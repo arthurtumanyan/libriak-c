@@ -49,9 +49,10 @@ Usage example:
   
       RiakClose(rh);
       return (EXIT_SUCCESS);
-  }
+      }
   
   Known bugs:
+  
     RiakListKeys - does not parse keys while keys=stream
     RiakGetBucketProps - not implemented yet
     
