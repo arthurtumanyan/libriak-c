@@ -45,11 +45,16 @@ jobs:
       - name: Valgrind
         if: matrix.config.sanitize == 'OFF'
         run: |
-          for t in build/tests/test_util build/tests/test_parse build/tests/test_api; do
-            valgrind -q --leak-check=full --error-exitcode=1 "$t"
+          vg() { valgrind -q --leak-check=full --error-exitcode=1 "$@"; }
+          for t in util parse multipart datatype api; do
+            vg "build/tests/test_$t"
           done
-          python3 tests/stub_riak.py valgrind -q --leak-check=full \
-            --error-exitcode=1 build/tests/test_client
+          for t in client async; do
+            python3 tests/stub_riak.py valgrind -q --leak-check=full --error-exitcode=1 \
+              "build/tests/test_$t"
+          done
+          RIAK_TEST_CERTS=build/tests/certs python3 tests/stub_riak.py --tls build/tests/certs \
+            valgrind -q --leak-check=full --error-exitcode=1 build/tests/test_tls
 
   oldest:
     name: oldest supported (ubuntu-22.04)

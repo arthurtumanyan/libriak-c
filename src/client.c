@@ -49,6 +49,10 @@ const char *riak_strerror(riak_status status) {
         return "malformed response";
     case RIAK_E_NOT_MODIFIED:
         return "not modified";
+    case RIAK_E_UNAUTHORIZED:
+        return "unauthorized";
+    case RIAK_E_CANCELLED:
+        return "cancelled";
     }
     return "unknown error";
 }
@@ -61,6 +65,18 @@ riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...)
         va_end(ap);
     }
     return st;
+}
+
+void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) {
+    if (c->cfg.log_fn == NULL || level < c->cfg.log_level) {
+        return;
+    }
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    c->cfg.log_fn(level, msg, c->cfg.log_ctx);
 }
 
 void riak_clear_error(riak_client *c) {
@@ -93,6 +109,25 @@ void riak_config_init(riak_config *cfg) {
     cfg->retry_max_ms = 2000;
     cfg->fail_threshold = 3;
     cfg->eject_ms = 5000;
+    cfg->log_level = RIAK_LOG_WARN;
+}
+
+/* Overwrite a secret before freeing it; volatile keeps the stores. */
+static void free_secret(char *s) {
+    if (s) {
+        for (volatile char *p = s; *p; p++) {
+            *p = '\0';
+        }
+        free(s);
+    }
+}
+
+static bool copy_opt(char **dst, const char *src) {
+    if (src == NULL) {
+        return true;
+    }
+    *dst = riak_strdup(src);
+    return *dst != NULL;
 }
 
 static bool host_ok(const char *h) {
@@ -127,7 +162,9 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
     if ((cfg->client_id && !riak_header_value_ok(cfg->client_id)) ||
         (cfg->n_nodes > 0 && cfg->nodes == NULL) || cfg->n_nodes > 1024 ||
         (unsigned)cfg->balance > RIAK_BALANCE_FAILOVER || cfg->retry_base_ms < 0 ||
-        cfg->retry_max_ms < 0 || cfg->eject_ms < 0) {
+        cfg->retry_max_ms < 0 || cfg->eject_ms < 0 || (unsigned)cfg->log_level > RIAK_LOG_ERROR ||
+        /* Riak only accepts credentials over TLS; never send them in clear */
+        (cfg->username && !cfg->tls) || (cfg->password && cfg->username == NULL)) {
         return RIAK_E_INVALID_ARG;
     }
 
@@ -139,12 +176,13 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
     c->root = "/";
     c->n_nodes = cfg->n_nodes ? cfg->n_nodes : 1;
     c->nodes = calloc(c->n_nodes, sizeof *c->nodes);
-    c->ca_file = riak_strdup(cfg->ca_file);
-    c->client_id = riak_strdup(cfg->client_id);
     c->curl = curl_easy_init();
     riak_status st = RIAK_OK;
-    if (c->nodes == NULL || c->curl == NULL || (cfg->ca_file && c->ca_file == NULL) ||
-        (cfg->client_id && c->client_id == NULL)) {
+    if (c->nodes == NULL || c->curl == NULL || !copy_opt(&c->ca_file, cfg->ca_file) ||
+        !copy_opt(&c->client_id, cfg->client_id) || !copy_opt(&c->username, cfg->username) ||
+        !copy_opt(&c->password, cfg->password) || !copy_opt(&c->cert_file, cfg->tls_cert_file) ||
+        !copy_opt(&c->key_file, cfg->tls_key_file) ||
+        !copy_opt(&c->key_password, cfg->tls_key_password)) {
         st = RIAK_E_NOMEM;
     } else if (cfg->n_nodes == 0) {
         st = add_node(c, 0, (cfg->host && *cfg->host) ? cfg->host : RIAK_DEFAULT_HOST,
@@ -163,6 +201,12 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
     c->cfg.port = c->nodes[0].port;
     c->cfg.ca_file = c->ca_file;
     c->cfg.client_id = c->client_id;
+    /* secrets live only in the client's own copies */
+    c->cfg.username = c->username;
+    c->cfg.password = NULL;
+    c->cfg.tls_cert_file = c->cert_file;
+    c->cfg.tls_key_file = c->key_file;
+    c->cfg.tls_key_password = NULL;
     if (c->cfg.max_body_bytes == 0) c->cfg.max_body_bytes = RIAK_DEFAULT_MAX_BODY;
     if (c->cfg.retry_base_ms == 0) c->cfg.retry_base_ms = 50;
     if (c->cfg.retry_max_ms == 0) c->cfg.retry_max_ms = 2000;
@@ -191,6 +235,11 @@ void riak_client_free(riak_client *client) {
     free(client->nodes);
     free(client->ca_file);
     free(client->client_id);
+    free(client->username);
+    free_secret(client->password);
+    free(client->cert_file);
+    free(client->key_file);
+    free_secret(client->key_password);
     free(client);
 }
 
@@ -229,26 +278,39 @@ size_t riak_client_check_nodes(riak_client *client) {
     return healthy;
 }
 
+riak_status riak_prepare_ping(riak_client *c, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    if (riak_buf_append_str(&p->url, c->root) != 0 || riak_buf_append_str(&p->url, "ping") != 0) {
+        riak_prepared_free(p);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    p->req = (riak_request){.method = "GET", .url = p->url.data};
+    return RIAK_OK;
+}
+
+riak_status riak_finish_ping(riak_client *c, riak_response *resp) {
+    if (resp->status != 200) {
+        return riak_http_error(c, resp);
+    }
+    if (resp->body.len < 2 || strncmp(resp->body.data, "OK", 2) != 0) {
+        return riak_set_error(c, RIAK_E_PARSE, "unexpected ping reply");
+    }
+    return RIAK_OK;
+}
+
 riak_status riak_ping(riak_client *client) {
     if (client == NULL) {
         return RIAK_E_INVALID_ARG;
     }
-    riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "ping") != 0) {
-        riak_buf_free(&url);
-        return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
-    }
-    riak_request req = {.method = "GET", .url = url.data};
+    riak_prepared p;
     riak_response resp = {0};
-    riak_status st = riak_perform(client, &req, &resp);
-    riak_buf_free(&url);
-    if (st != RIAK_OK) {
-        return st;
+    riak_status st = riak_prepare_ping(client, &p);
+    if (st == RIAK_OK) {
+        st = riak_perform(client, &p.req, &resp);
+        riak_prepared_free(&p);
     }
-    if (resp.status != 200) {
-        st = riak_http_error(client, &resp);
-    } else if (resp.body.len < 2 || strncmp(resp.body.data, "OK", 2) != 0) {
-        st = riak_set_error(client, RIAK_E_PARSE, "unexpected ping reply");
+    if (st == RIAK_OK) {
+        st = riak_finish_ping(client, &resp);
     }
     riak_response_free(&resp);
     return st;

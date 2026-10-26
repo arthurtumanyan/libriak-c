@@ -6,7 +6,7 @@ built on libcurl and json-c.
 
 ## Build
 
-Requirements: CMake ≥ 3.20, a C11 compiler, libcurl ≥ 7.62, json-c ≥ 0.15.
+Requirements: CMake ≥ 3.20, a C11 compiler, libcurl ≥ 7.66, json-c ≥ 0.15.
 
 ```sh
 sudo apt install libcurl4-openssl-dev libjson-c-dev   # Debian/Ubuntu
@@ -25,6 +25,11 @@ Options: `-DRIAK_SANITIZE=ON` (ASan + UBSan), `-DRIAK_WERROR=ON`,
 - `util`, `parse` — unit tests of the internal helpers.
 - `client` — the public API end to end against `tests/stub_riak.py`, an
   in-memory emulation of the Riak HTTP API (needs Python 3).
+- `async` — the asynchronous API against the stub, including an external
+  `poll()` loop, retries, cancellation and callback chaining.
+- `tls` — certificate verification, client certificates and Basic auth
+  against the stub in TLS mode (certificates made by `tests/gen_certs.sh`,
+  needs `openssl`).
 - `live` — against a real node; skipped unless `RIAK_TEST_URL` is set:
 
   ```sh
@@ -211,6 +216,48 @@ delivered data are not, so nothing is applied twice. A node with
 `fail_threshold` consecutive failures is skipped for `eject_ms`.
 `riak_client_check_nodes()` pings every node and `riak_client_node_info()`
 reports per-node health and counters. Error messages name the node.
+
+### Asynchronous requests
+
+```c
+static void done(riak_async_result *res, void *ctx) {
+    if (res->status == RIAK_OK && res->object.data)
+        printf("%.*s\n", (int)res->object.len, res->object.data);
+}
+
+riak_async *a;
+riak_async_new(&cfg, &a);            /* same riak_config, including nodes */
+riak_async_get(a, "users", "u1", NULL, done, NULL);
+riak_async_put(a, "users", "u2", "{}", 2, &opts, done, NULL);
+riak_async_run(a, 5000);             /* or drive it from your own event loop */
+riak_async_free(a);
+```
+
+Any number of get, put, delete and ping requests run concurrently on one
+thread, with the same failover, retry (as timers, never sleeping) and hooks as
+the blocking API. To integrate with libuv, libevent or epoll, register
+`riak_async_set_loop()` callbacks for descriptors and timers and call
+`riak_async_on_socket()` / `riak_async_on_timeout()`; see `tests/test_async.c`
+for a `poll()` loop and `examples/async.c`.
+
+### Security, logging and metrics
+
+```c
+cfg.tls = true;
+cfg.ca_file = "/etc/riak/ca.pem";
+cfg.username = "app";                 /* Riak security: HTTP Basic over TLS */
+cfg.password = "secret";
+cfg.tls_cert_file = "client.pem";     /* or certificate authentication */
+cfg.tls_key_file = "client.key";
+cfg.log_fn = my_log;                  /* RIAK_LOG_DEBUG .. RIAK_LOG_ERROR */
+cfg.log_level = RIAK_LOG_WARN;
+cfg.metrics_fn = my_metrics;          /* one riak_request_metrics per attempt */
+```
+
+Credentials are refused without TLS. 401/403 map to `RIAK_E_UNAUTHORIZED`; a
+server that rejects or demands a client certificate gives `RIAK_E_TLS`.
+Metrics carry method, path, node, attempt number, outcome, HTTP status,
+duration, bytes received and whether a retry follows.
 
 ### Rules
 

@@ -22,7 +22,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
-find_package(CURL 7.62 REQUIRED)
+find_package(CURL 7.66 REQUIRED)
 find_package(json-c CONFIG QUIET)
 if(NOT TARGET json-c::json-c)
   find_package(PkgConfig REQUIRED)
@@ -55,6 +55,7 @@ if(RIAK_COVERAGE)
 endif()
 
 set(RIAK_SOURCES
+  src/async.c
   src/bucket.c
   src/client.c
   src/datatype.c
@@ -117,6 +118,8 @@ install(FILES README.md CHANGELOG.md
 if(RIAK_BUILD_EXAMPLES)
   add_executable(riak_example examples/basic.c)
   target_link_libraries(riak_example PRIVATE riak riak_warnings)
+  add_executable(riak_async_example examples/async.c)
+  target_link_libraries(riak_async_example PRIVATE riak riak_warnings)
 endif()
 
 if(RIAK_BUILD_TESTS)

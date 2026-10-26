@@ -965,6 +965,85 @@ static void test_cluster_backoff_and_limits(void) {
     CHECK_EQ_INT(riak_client_check_nodes(NULL), 0);
 }
 
+typedef struct {
+    riak_request_metrics m[8];
+    char paths[8][64];
+    char hosts[8][32];
+    int n;
+} metrics_log;
+
+static void on_metrics(const riak_request_metrics *m, void *ctx) {
+    metrics_log *l = ctx;
+    if (l->n < 8) {
+        l->m[l->n] = *m;
+        snprintf(l->paths[l->n], sizeof l->paths[0], "%s", m->path);
+        snprintf(l->hosts[l->n], sizeof l->hosts[0], "%s", m->host);
+    }
+    l->n++;
+}
+
+typedef struct {
+    int counts[4];
+    char last_warn[256];
+} log_sink;
+
+static void on_log(riak_log_level level, const char *msg, void *ctx) {
+    log_sink *l = ctx;
+    l->counts[level]++;
+    if (level == RIAK_LOG_WARN) snprintf(l->last_warn, sizeof l->last_warn, "%s", msg);
+}
+
+static void test_observability(void) {
+    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    metrics_log ml = {0};
+    log_sink ls;
+    memset(&ls, 0, sizeof ls);
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.nodes = nodes;
+    cfg.n_nodes = 2;
+    cfg.balance = RIAK_BALANCE_FAILOVER;
+    cfg.max_retries = 1;
+    cfg.retry_base_ms = 5;
+    cfg.metrics_fn = on_metrics;
+    cfg.metrics_ctx = &ml;
+    cfg.log_fn = on_log;
+    cfg.log_ctx = &ls; /* default level: WARN and above */
+    riak_client *c = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    CHECK_EQ_INT(ml.n, 2);
+    if (ml.n == 2) {
+        CHECK(ml.m[0].status == RIAK_E_TRANSPORT && ml.m[0].will_retry && ml.m[0].port == 1);
+        CHECK(ml.m[0].http_status == 0 && ml.m[0].attempt == 0);
+        CHECK(ml.m[1].status == RIAK_OK && ml.m[1].http_status == 200 && !ml.m[1].will_retry);
+        CHECK(ml.m[1].attempt == 1 && ml.m[1].port == ports[0] && ml.m[1].bytes_received == 2);
+        CHECK_EQ_STR(ml.paths[1], "/ping");
+        CHECK_EQ_STR(ml.hosts[1], "127.0.0.1");
+        CHECK_EQ_STR(ml.m[1].method, "GET");
+        CHECK(ml.m[1].duration_ms >= 0.0);
+    }
+    CHECK_EQ_INT(ls.counts[RIAK_LOG_DEBUG], 0);
+    CHECK_EQ_INT(ls.counts[RIAK_LOG_WARN], 1);
+    CHECK(strstr(ls.last_warn, "retrying") != NULL && strstr(ls.last_warn, "127.0.0.1:1") != NULL);
+    riak_client_free(c);
+
+    /* DEBUG shows every attempt; ERROR when the last retry fails */
+    memset(&ls, 0, sizeof ls);
+    cfg.log_level = RIAK_LOG_DEBUG;
+    cfg.metrics_fn = NULL;
+    riak_node dead[1] = {{"127.0.0.1", 1}};
+    cfg.nodes = dead;
+    cfg.n_nodes = 1;
+    CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
+    CHECK_EQ_INT(riak_ping(c), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(ls.counts[RIAK_LOG_DEBUG], 2);
+    CHECK_EQ_INT(ls.counts[RIAK_LOG_ERROR], 1);
+    riak_client_free(c);
+    cfg.log_level = (riak_log_level)9;
+    CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_E_INVALID_ARG);
+}
+
 static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
@@ -1028,6 +1107,7 @@ int main(void) {
     RUN(test_cluster_round_robin);
     RUN(test_cluster_failover);
     RUN(test_cluster_backoff_and_limits);
+    RUN(test_observability);
     RUN(test_client_id_header);
 
     riak_client_free(rc);
