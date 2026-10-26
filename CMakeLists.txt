@@ -4,8 +4,10 @@ project(libriak-c VERSION 2.0.0 LANGUAGES C
 
 include(GNUInstallDirs)
 
+option(RIAK_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 option(RIAK_WERROR "Treat warnings as errors" OFF)
+option(RIAK_FUZZ "Build libFuzzer targets (clang only)" OFF)
 option(RIAK_COVERAGE "Instrument for code coverage" OFF)
 
 set(CMAKE_C_STANDARD 11)
@@ -41,9 +43,32 @@ if(RIAK_SANITIZE)
   target_link_options(riak_warnings INTERFACE -fsanitize=address,undefined)
 endif()
 
+if(RIAK_FUZZ)
+  # instrument the library too, so libFuzzer sees coverage inside it
+  target_compile_options(riak_warnings INTERFACE -fsanitize=fuzzer-no-link)
+endif()
 if(RIAK_COVERAGE)
   target_compile_options(riak_warnings INTERFACE --coverage -O0)
   target_link_options(riak_warnings INTERFACE --coverage)
 endif()
 
+set(RIAK_SOURCES
+  src/parse.c
+  src/util.c)
+
+# Object library shared by the shared/static targets and the unit tests,
+# which need the internal symbols that the shared library hides.
+add_library(riak_objects OBJECT ${RIAK_SOURCES})
+target_include_directories(riak_objects PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
+target_compile_definitions(riak_objects PRIVATE RIAK_BUILDING _POSIX_C_SOURCE=200809L)
+target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c
+                      PRIVATE $<BUILD_INTERFACE:riak_warnings>)
+
 install(DIRECTORY include/riak DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+if(RIAK_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

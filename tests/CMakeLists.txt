@@ -1,0 +1,12 @@
+foreach(name util parse)
+  add_executable(test_${name} test_${name}.c)
+  target_link_libraries(test_${name} PRIVATE riak_objects riak_warnings)
+  add_test(NAME ${name} COMMAND test_${name})
+endforeach()
+
+if(RIAK_FUZZ)
+  add_executable(fuzz_parse fuzz_parse.c)
+  target_compile_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
+  target_link_libraries(fuzz_parse PRIVATE riak_objects riak_warnings)
+endif()
