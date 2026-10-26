@@ -88,13 +88,15 @@ set_target_properties(riak PROPERTIES
 add_library(riak::riak ALIAS riak)
 add_library(riak::riak_static ALIAS riak_static)
 
-install(TARGETS riak riak_static EXPORT riakTargets
-  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY include/riak DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS riak EXPORT riakTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime
+          NAMELINK_COMPONENT dev
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime)
+install(TARGETS riak_static EXPORT riakTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT dev)
+install(DIRECTORY include/riak DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT dev)
 install(EXPORT riakTargets NAMESPACE riak::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c COMPONENT dev)
 configure_package_config_file(cmake/libriak-c-config.cmake.in
   ${PROJECT_BINARY_DIR}/libriak-c-config.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
@@ -102,10 +104,12 @@ write_basic_package_version_file(${PROJECT_BINARY_DIR}/libriak-c-config-version.
   COMPATIBILITY SameMajorVersion)
 install(FILES ${PROJECT_BINARY_DIR}/libriak-c-config.cmake
               ${PROJECT_BINARY_DIR}/libriak-c-config-version.cmake
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c COMPONENT dev)
 configure_file(cmake/libriak-c.pc.in ${PROJECT_BINARY_DIR}/libriak-c.pc @ONLY)
 install(FILES ${PROJECT_BINARY_DIR}/libriak-c.pc
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig COMPONENT dev)
+install(FILES README.md CHANGELOG.md
+  DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT runtime)
 
 if(RIAK_BUILD_EXAMPLES)
   add_executable(riak_example examples/basic.c)
@@ -116,3 +120,5 @@ if(RIAK_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+include(cmake/Packaging.cmake)

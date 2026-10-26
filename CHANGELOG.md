@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Debian and RPM packages via CPack (runtime and development components),
+  `packaging/build-packages.sh` and a package smoke test.
+- Release workflow: builds and install-tests packages on Ubuntu 22.04/24.04,
+  Fedora and AlmaLinux 10, publishes them with a source tarball, checksums and
+  build provenance attestations.
+
 ## 2.0.0 — 2026-10-26
 
 Complete rewrite. The public API is new and not source-compatible with 1.x;

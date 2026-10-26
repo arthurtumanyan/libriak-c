@@ -33,6 +33,18 @@ Options: `-DRIAK_SANITIZE=ON` (ASan + UBSan), `-DRIAK_WERROR=ON`,
   ```
 - Fuzzing: `build/tests/fuzz_parse -max_total_time=300` (with `-DRIAK_FUZZ=ON`).
 
+### Packages
+
+Tagged releases (`v*`) publish `.deb` packages for Ubuntu 22.04/24.04 and
+`.rpm` packages for Fedora and EL10, plus a source tarball, `SHA256SUMS` and
+build provenance attestations. Each format has a runtime package
+(`libriak-c2` / `libriak-c`) and a development package (`libriak-c-dev` /
+`libriak-c-devel`). To build them locally:
+
+```sh
+packaging/build-packages.sh DEB   # or RPM; output in dist/
+```
+
 Consumers can use `find_package(libriak-c)` → `riak::riak` / `riak::riak_static`,
 or `pkg-config --cflags --libs libriak-c`.
 
