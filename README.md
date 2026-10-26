@@ -119,6 +119,11 @@ A complete program is in [`examples/basic.c`](examples/basic.c).
 
 See [CHANGELOG.md](CHANGELOG.md) for the bugs fixed in 2.0.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md); report security issues as described in
+[SECURITY.md](SECURITY.md).
+
 ## License
 
 GPL-3.0-or-later.

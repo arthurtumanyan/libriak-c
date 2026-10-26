@@ -8,6 +8,12 @@
 - Release workflow: builds and install-tests packages on Ubuntu 22.04/24.04,
   Fedora and AlmaLinux 10, publishes them with a source tarball, checksums and
   build provenance attestations.
+- CI: least-privilege permissions, actions pinned to commit SHAs, jobs for
+  the oldest supported distribution, a live Riak node, coverage (fails under
+  85 % lines), a fuzzing smoke run, a package dry run and actionlint; CodeQL
+  analysis and Dependabot updates for actions.
+- `SECURITY.md`, `CONTRIBUTING.md`, issue and pull request templates,
+  `CODEOWNERS`.
 
 ## 2.0.0 — 2026-10-26
 
