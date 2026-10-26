@@ -36,6 +36,7 @@ typedef struct {
     size_t body_len;
     riak_sink_fn sink; /* NULL: collect into riak_response.body */
     void *sink_ctx;
+    bool unbounded; /* sink does not accumulate: skip the max_body_bytes cap */
 } riak_request;
 
 typedef struct {
@@ -51,8 +52,11 @@ void riak_clear_error(riak_client *c);
 int riak_url_bucket(riak_buf *b, const riak_client *c, const char *type, const char *bucket,
                     const char *suffix, const char *key);
 
-/* GET url, require 200 and a JSON object body, return the body. */
-riak_status riak_get_json(riak_client *c, const char *url, char **json);
+/* Expected body of riak_get_body(). */
+enum { RIAK_BODY_RAW, RIAK_BODY_JSON_OBJECT, RIAK_BODY_JSON_ARRAY };
+
+/* GET url, require 200 and a body of the expected kind, return the body. */
+riak_status riak_get_body(riak_client *c, const char *url, int kind, char **body);
 
 /* Validate a bucket/key argument. */
 riak_status riak_check_name(riak_client *c, const char *s, const char *what);

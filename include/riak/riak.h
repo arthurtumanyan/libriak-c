@@ -203,6 +203,87 @@ RIAK_API riak_status riak_get_type_props(riak_client *client, const char *type, 
 /* Node statistics from /stats as a JSON object. */
 RIAK_API riak_status riak_stats(riak_client *client, char **json);
 
+/* ---- Secondary indexes (needs the leveldb or memory backend) ---------- */
+
+typedef struct {
+    const char *index;     /* "age_int", "email_bin", "$key" or "$bucket" */
+    const char *value;     /* exact match; NULL for a range query */
+    const char *range_min; /* range query bounds (inclusive) */
+    const char *range_max;
+    unsigned max_results;     /* page size; 0 = all results */
+    const char *continuation; /* from the previous page */
+    bool return_terms;        /* range queries: also return matching terms */
+    const char *term_regex;   /* range queries: filter terms by regex */
+    const char *bucket_type;  /* NULL = default type */
+    unsigned server_timeout_ms;
+} riak_index_query;
+
+typedef struct {
+    char **keys;  /* keys[count] == NULL */
+    char **terms; /* parallel to keys when return_terms, else NULL */
+    size_t count;
+    char *continuation; /* next page, NULL when there is none */
+} riak_index_result;
+
+RIAK_API riak_status riak_index_query_run(riak_client *client, const char *bucket,
+                                          const riak_index_query *q, riak_index_result *out);
+/* Streamed variant: cb gets each match (term is NULL unless return_terms);
+ * return false from cb to stop early. */
+typedef bool (*riak_index_cb)(const char *key, const char *term, void *ctx);
+RIAK_API riak_status riak_index_query_stream(riak_client *client, const char *bucket,
+                                             const riak_index_query *q, riak_index_cb cb, void *ctx,
+                                             char **continuation);
+RIAK_API void riak_index_result_free(riak_index_result *res);
+
+/* ---- Riak Search (Solr) ---------------------------------------------- */
+
+typedef struct {
+    const char *q;             /* Solr query, e.g. "name_s:alice" */
+    const char *filter;        /* fq */
+    const char *sort;          /* e.g. "age_i desc" */
+    const char *fields;        /* fl, comma separated */
+    const char *default_field; /* df */
+    const char *op;            /* q.op: "AND" or "OR" */
+    unsigned start;
+    unsigned rows; /* 0 = server default */
+} riak_search_query;
+
+typedef struct {
+    riak_header *fields; /* every stored field; multi-valued fields repeat */
+    size_t n_fields;
+    char *bucket_type, *bucket, *key; /* _yz_rt, _yz_rb, _yz_rk */
+    double score;
+} riak_search_doc;
+
+typedef struct {
+    size_t num_found;
+    double max_score;
+    riak_search_doc *docs;
+    size_t count;
+    char *raw; /* complete Solr JSON response */
+} riak_search_result;
+
+RIAK_API riak_status riak_search(riak_client *client, const char *index, const riak_search_query *q,
+                                 riak_search_result *out);
+RIAK_API void riak_search_result_free(riak_search_result *res);
+/* schema == NULL uses _yz_default; n_val == 0 uses the server default. */
+RIAK_API riak_status riak_search_index_create(riak_client *client, const char *index,
+                                              const char *schema, unsigned n_val);
+RIAK_API riak_status riak_search_index_get(riak_client *client, const char *index, char **json);
+RIAK_API riak_status riak_search_index_list(riak_client *client, char **json);
+RIAK_API riak_status riak_search_index_delete(riak_client *client, const char *index);
+RIAK_API riak_status riak_search_schema_put(riak_client *client, const char *name, const char *xml);
+RIAK_API riak_status riak_search_schema_get(riak_client *client, const char *name, char **xml);
+
+/* ---- MapReduce (not available on OpenRiak 4.x) ----------------------- */
+
+/* job is the JSON job document; *result is the JSON array of kept results. */
+RIAK_API riak_status riak_mapred(riak_client *client, const char *job, char **result);
+/* Streamed variant: cb gets each {phase, data} chunk as it arrives. */
+typedef bool (*riak_mapred_cb)(unsigned phase, const char *data_json, void *ctx);
+RIAK_API riak_status riak_mapred_stream(riak_client *client, const char *job, riak_mapred_cb cb,
+                                        void *ctx);
+
 RIAK_API void riak_object_free(riak_object *obj);
 RIAK_API void riak_object_set_free(riak_object_set *set);
 RIAK_API void riak_strlist_free(riak_strlist *list);

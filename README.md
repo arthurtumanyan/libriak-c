@@ -31,6 +31,10 @@ Options: `-DRIAK_SANITIZE=ON` (ASan + UBSan), `-DRIAK_WERROR=ON`,
   docker run -d -p 8098:8098 basho/riak-kv
   RIAK_TEST_URL=http://127.0.0.1:8098 ctest --test-dir build -R live
   ```
+  Secondary index and Search tests also need the node from `tests/docker`
+  (leveldb, `search = on`), an `allow_mult` bucket type and
+  `RIAK_TEST_TYPE=libriak_multi RIAK_TEST_FEATURES=2i,search`; see
+  `tests/test_live.c` and the `live` job in `.github/workflows/ci.yml`.
 - Fuzzing: `build/tests/fuzz_parse -max_total_time=300` (with `-DRIAK_FUZZ=ON`).
 
 ### Packages
@@ -117,6 +121,39 @@ riak_put(c, "users", "u1", v, n, &create, NULL, NULL); /* RIAK_E_PRECONDITION if
 Objects returned by `riak_get` also carry user metadata (`meta`), secondary
 index entries (`indexes`) and links. `opts.server_timeout_ms` sets Riak's own
 request timeout; `riak_stats()` returns `/stats` as JSON.
+
+### Queries
+
+```c
+/* secondary indexes (leveldb or memory backend) */
+riak_index_query q = {.index = "age_int", .range_min = "18", .range_max = "65",
+                      .return_terms = true, .max_results = 100};
+riak_index_result page;
+while (riak_index_query_run(c, "users", &q, &page) == RIAK_OK) {
+    for (size_t i = 0; i < page.count; i++)
+        printf("%s = %s\n", page.keys[i], page.terms[i]);
+    char *next = page.continuation ? strdup(page.continuation) : NULL;
+    riak_index_result_free(&page);
+    if (next == NULL) break;
+    q.continuation = next; /* free after the next call */
+}
+/* or stream matches through a callback: riak_index_query_stream() */
+
+/* Riak Search */
+riak_search_index_create(c, "users_idx", NULL, 0);
+riak_search_query sq = {.q = "name_s:alice", .sort = "age_i desc", .rows = 10};
+riak_search_result found;
+if (riak_search(c, "users_idx", &sq, &found) == RIAK_OK) {
+    for (size_t i = 0; i < found.count; i++)
+        printf("%s/%s score %.2f\n", found.docs[i].bucket, found.docs[i].key,
+               found.docs[i].score);
+    riak_search_result_free(&found);
+}
+
+/* MapReduce (not available on OpenRiak 4.x) */
+char *result;
+riak_mapred(c, "{\"inputs\":\"users\",\"query\":[...]}", &result);
+```
 
 ### Rules
 

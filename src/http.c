@@ -38,7 +38,7 @@ static size_t write_cb(char *data, size_t size, size_t nmemb, void *userp) {
     transfer *t = userp;
     size_t len = size * nmemb;
     t->received += len;
-    if (t->received > t->c->cfg.max_body_bytes) {
+    if (!t->req->unbounded && t->received > t->c->cfg.max_body_bytes) {
         return abort_transfer(t, RIAK_E_HTTP, "response exceeds max_body_bytes");
     }
     if (t->req->sink != NULL) {

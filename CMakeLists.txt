@@ -61,6 +61,7 @@ set(RIAK_SOURCES
   src/kv.c
   src/multipart.c
   src/parse.c
+  src/query.c
   src/util.c)
 
 # Object library shared by the shared/static targets and the unit tests,

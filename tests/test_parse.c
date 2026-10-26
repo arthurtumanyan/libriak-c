@@ -3,6 +3,8 @@
  SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "check.h"
@@ -95,6 +97,126 @@ static void test_stream_empty(void) {
     riak_keystream_free(ks);
 }
 
+typedef struct {
+    char keys[8][16];
+    char terms[8][16];
+    size_t n;
+    size_t stop_at;
+} visited;
+
+static bool visit(const char *key, const char *term, void *ctx) {
+    visited *v = ctx;
+    if (v->n < 8) {
+        snprintf(v->keys[v->n], sizeof v->keys[0], "%s", key);
+        snprintf(v->terms[v->n], sizeof v->terms[0], "%s", term ? term : "-");
+    }
+    v->n++;
+    return v->stop_at == 0 || v->n < v->stop_at;
+}
+
+static riak_status index_json(const char *json, visited *v, char **cont, bool *stopped) {
+    return riak_parse_index_json(json, strlen(json), visit, v, cont, stopped);
+}
+
+static void test_index_json(void) {
+    visited v = {0};
+    char *cont = NULL;
+    bool stopped;
+    CHECK_EQ_INT(index_json("{\"keys\":[\"b\",\"a\"]}", &v, &cont, &stopped), RIAK_OK);
+    CHECK(v.n == 2 && strcmp(v.keys[0], "b") == 0 && strcmp(v.terms[0], "-") == 0);
+    CHECK(cont == NULL && !stopped);
+
+    memset(&v, 0, sizeof v);
+    CHECK_EQ_INT(index_json("{\"results\":[{\"na\":\"a\"},{\"nb\":\"b\"}],"
+                            "\"continuation\":\"g2gC\"}",
+                            &v, &cont, &stopped),
+                 RIAK_OK);
+    CHECK(v.n == 2 && strcmp(v.terms[1], "nb") == 0 && strcmp(v.keys[1], "b") == 0);
+    CHECK_EQ_STR(cont, "g2gC");
+
+    /* a page without continuation keeps the old value; a new one replaces it */
+    CHECK_EQ_INT(index_json("{\"continuation\":\"next\"}", &v, &cont, &stopped), RIAK_OK);
+    CHECK_EQ_STR(cont, "next");
+    free(cont);
+    cont = NULL;
+
+    memset(&v, 0, sizeof v);
+    v.stop_at = 1;
+    CHECK_EQ_INT(index_json("{\"keys\":[\"x\",\"y\"]}", &v, &cont, &stopped), RIAK_OK);
+    CHECK(stopped && v.n == 1);
+
+    const char *bad[] = {"[]",
+                         "{\"keys\":\"x\"}",
+                         "{\"keys\":[1]}",
+                         "{\"results\":[{\"a\":\"b\",\"c\":\"d\"}]}",
+                         "{\"results\":[{\"a\":1}]}",
+                         "{\"continuation\":3}",
+                         "{\"keys\":["};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        memset(&v, 0, sizeof v);
+        CHECK_EQ_INT(index_json(bad[i], &v, &cont, &stopped), RIAK_E_PARSE);
+    }
+    CHECK(cont == NULL);
+}
+
+static void test_search_json(void) {
+    const char *json =
+        "{\"responseHeader\":{\"status\":0},\"response\":{\"numFound\":7,\"start\":0,"
+        "\"maxScore\":1.5,\"docs\":[{\"age_i\":30,\"name_s\":\"alice\",\"tags_ss\":[\"a\",\"b\"],"
+        "\"_yz_rk\":\"u1\",\"_yz_rt\":\"default\",\"_yz_rb\":\"users\",\"score\":1.5,"
+        "\"none\":null}]}}";
+    riak_search_result r = {0};
+    CHECK_EQ_INT(riak_parse_search(json, strlen(json), &r), RIAK_OK);
+    CHECK_EQ_INT(r.num_found, 7);
+    CHECK(r.max_score > 1.4 && r.max_score < 1.6);
+    CHECK_EQ_INT(r.count, 1);
+    if (r.count == 1) {
+        riak_search_doc *d = &r.docs[0];
+        CHECK_EQ_STR(d->key, "u1");
+        CHECK_EQ_STR(d->bucket, "users");
+        CHECK_EQ_STR(d->bucket_type, "default");
+        CHECK(d->score > 1.4);
+        size_t tags = 0;
+        for (size_t i = 0; i < d->n_fields; i++) {
+            if (strcmp(d->fields[i].name, "tags_ss") == 0) tags++;
+            if (strcmp(d->fields[i].name, "age_i") == 0) CHECK_EQ_STR(d->fields[i].value, "30");
+            CHECK(strcmp(d->fields[i].name, "none") != 0 &&
+                  strcmp(d->fields[i].name, "score") != 0);
+        }
+        CHECK_EQ_INT(tags, 2);
+    }
+    riak_search_result_free(&r);
+
+    const char *bad[] = {"{}", "{\"response\":[]}", "{\"response\":{\"docs\":{}}}",
+                         "{\"response\":{\"docs\":[1]}}", "nope"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        memset(&r, 0, sizeof r);
+        CHECK_EQ_INT(riak_parse_search(bad[i], strlen(bad[i]), &r), RIAK_E_PARSE);
+        riak_search_result_free(&r);
+    }
+    riak_search_result_free(NULL);
+}
+
+static void test_mapred_chunk(void) {
+    unsigned phase = 9;
+    char *data = NULL;
+    const char *ok = "{\"phase\":1,\"data\":[2, {\"a\": \"b\"}]}";
+    CHECK_EQ_INT(riak_parse_mapred_chunk(ok, strlen(ok), &phase, &data), RIAK_OK);
+    CHECK_EQ_INT(phase, 1);
+    CHECK_EQ_STR(data, "[2,{\"a\":\"b\"}]");
+    free(data);
+    const char *bad[] = {"{\"data\":[]}",
+                         "{\"phase\":-1,\"data\":[]}",
+                         "{\"phase\":\"0\",\"data\":[]}",
+                         "{\"phase\":0}",
+                         "[]",
+                         ""};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK_EQ_INT(riak_parse_mapred_chunk(bad[i], strlen(bad[i]), &phase, &data), RIAK_E_PARSE);
+        CHECK(data == NULL);
+    }
+}
+
 int main(void) {
     RUN(test_array);
     RUN(test_empty_array);
@@ -103,5 +225,8 @@ int main(void) {
     RUN(test_stream_truncated);
     RUN(test_stream_garbage);
     RUN(test_stream_empty);
+    RUN(test_index_json);
+    RUN(test_search_json);
+    RUN(test_mapred_chunk);
     return CHECK_DONE();
 }

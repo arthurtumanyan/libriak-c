@@ -36,6 +36,8 @@ STREAM_BUCKET = "many"
 STREAM_KEYS = [f"key-{i}" for i in range(1000)]
 BOUNDARY = "StubBoundary7x"
 KEPT_HEADERS = ("x-riak-meta-", "x-riak-index-", "link")
+SEARCH_INDEXES = {}  # name -> {"name", "schema", "n_val"}
+SCHEMAS = {"_yz_default": '<schema name="_yz_default" version="1.5"/>'}
 
 
 def object_headers(obj):
@@ -45,6 +47,33 @@ def object_headers(obj):
     if obj.get("deleted"):
         headers.append(("X-Riak-Deleted", "true"))
     return headers
+
+
+def index_entries(btype, bucket, index):
+    """Sorted (term, key) pairs of one index; values compare as ints for _int."""
+    out = []
+    with LOCK:
+        items = [(k, e) for (t, b, k), e in STORE.items() if t == btype and b == bucket]
+    for key, entry in items:
+        if index == "$key":
+            out.append((key, key))
+        elif index == "$bucket":
+            out.append((bucket, key))
+        else:
+            for obj in entry["siblings"]:
+                for name, value in obj["extra"]:
+                    if name.lower() == "x-riak-index-" + index.lower():
+                        out.extend((v.strip(), key) for v in value.split(","))
+    as_int = index.endswith("_int")
+    return sorted(set(out), key=lambda tk: (int(tk[0]) if as_int else tk[0], tk[1])), as_int
+
+
+def multipart(parts):
+    body = b""
+    for part in parts:
+        body += f"\r\n--{BOUNDARY}\r\nContent-Type: application/json\r\n\r\n".encode()
+        body += json.dumps(part).encode()
+    return body + f"\r\n--{BOUNDARY}--\r\n".encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -100,8 +129,12 @@ class Handler(BaseHTTPRequestHandler):
             if parts[1] not in TYPES:
                 return self._send(404, "no such bucket type\n")
             return self._json(200, {"props": dict(TYPES[parts[1]], n_val=3)})
+        if parts[:1] == ["search"]:
+            return self._search_get(parts[1:], query)
         if btype not in TYPES:
             return self._send(404, "no such bucket type\n")
+        if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "index":
+            return self._index_query(btype, parts[1], parts[3], parts[4:], query)
         if parts == ["buckets"] and query.get("buckets") == ["true"]:
             with LOCK:
                 names = {b for t, b, _ in STORE if t == btype}
@@ -149,6 +182,110 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(304, "", [("ETag", obj["etag"])])
         return self._send(200, obj["body"].encode("latin-1"),
                           object_headers(obj) + [("X-Riak-Vclock", entry["vclock"])])
+
+    def _index_query(self, btype, bucket, index, values, query):
+        if bucket == "unavailable":
+            return self._send(500, "{error,{indexes_not_supported,riak_kv_bitcask_backend}}")
+        entries, as_int = index_entries(btype, bucket, index)
+        conv = int if as_int else str
+        try:
+            if len(values) == 1:
+                hits = [tk for tk in entries if conv(tk[0]) == conv(values[0])]
+            elif len(values) == 2:
+                lo, hi = conv(values[0]), conv(values[1])
+                hits = [tk for tk in entries if lo <= conv(tk[0]) <= hi]
+            else:
+                return self._send(400, "bad index query\n")
+        except ValueError:
+            return self._send(400, "bad integer\n")
+        terms = query.get("return_terms") == ["true"] and len(values) == 2
+        start = int(query["continuation"][0][1:]) if "continuation" in query else 0
+        limit = int(query.get("max_results", ["0"])[0])
+        page = hits[start:start + limit] if limit else hits[start:]
+        cont = f"c{start + limit}" if limit and start + limit < len(hits) else None
+        def doc(chunk):
+            return {"results": [{t: k} for t, k in chunk]} if terms else {"keys": [k for _, k in chunk]}
+        if query.get("stream") == ["true"]:
+            parts = [doc(page[i:i + 2]) for i in range(0, len(page), 2)]
+            if cont:
+                parts.append({"continuation": cont})
+            return self._send(200, multipart(parts),
+                              {"Content-Type": f"multipart/mixed;boundary={BOUNDARY}"})
+        result = doc(page)
+        if cont:
+            result["continuation"] = cont
+        return self._json(200, result)
+
+    def _search_get(self, parts, query):
+        if parts == ["index"]:
+            return self._json(200, sorted(SEARCH_INDEXES.values(), key=lambda i: i["name"]))
+        if len(parts) == 2 and parts[0] == "index":
+            idx = SEARCH_INDEXES.get(parts[1])
+            return self._json(200, idx) if idx else self._send(404, "not found\n")
+        if len(parts) == 2 and parts[0] == "schema":
+            xml = SCHEMAS.get(parts[1])
+            return self._send(200, xml, {"Content-Type": "application/xml"}) if xml \
+                else self._send(404, "not found\n")
+        if len(parts) == 2 and parts[0] == "query":
+            return self._search_query(parts[1], query)
+        return self._send(400, "bad request\n")
+
+    def _search_query(self, index, query):
+        if index not in SEARCH_INDEXES:
+            return self._send(404, "No index found\n")
+        if query.get("wt") != ["json"] or "q" not in query:
+            return self._send(400, "expected wt=json and q\n")
+        field, _, value = query["q"][0].partition(":")
+        docs = []
+        with LOCK:
+            buckets = [tb for tb, props in PROPS.items() if props.get("search_index") == index]
+            for (t, b, k), entry in STORE.items():
+                if (t, b) not in buckets:
+                    continue
+                try:
+                    data = json.loads(entry["siblings"][0]["body"])
+                except ValueError:
+                    continue
+                if (field, value) == ("*", "*") or str(data.get(field)) == value:
+                    docs.append(dict(data, _yz_rk=k, _yz_rb=b, _yz_rt=t, score=1.0))
+        if "sort" in query:
+            name, _, order = query["sort"][0].partition(" ")
+            docs.sort(key=lambda d: d.get(name, 0), reverse=order == "desc")
+        start = int(query.get("start", ["0"])[0])
+        rows = int(query.get("rows", ["10"])[0])
+        return self._json(200, {"responseHeader": {"status": 0},
+                                "response": {"numFound": len(docs), "start": start,
+                                             "maxScore": 1.0 if docs else 0.0,
+                                             "docs": docs[start:start + rows]}})
+
+    def _mapred(self, query):
+        try:
+            job = json.loads(self._body())
+            inputs = [tuple(i) for i in job["inputs"]]
+            phases = job["query"]
+        except (ValueError, KeyError, TypeError):
+            return self._json(400, {"error": "bad job"})
+        results = []
+        values = []
+        with LOCK:
+            for b, k in inputs:
+                entry = STORE.get(("default", b, k))
+                if entry:
+                    values.append(entry["siblings"][0]["body"])
+        data = values
+        for n, phase in enumerate(phases):
+            kind = "map" if "map" in phase else "reduce"
+            if kind == "reduce":
+                data = [len(data)]
+            results.append((n, data))
+        if query.get("chunked") == ["true"]:
+            parts = []
+            for n, d in results:
+                parts.extend({"phase": n, "data": [v]} for v in d) if n == 0 else \
+                    parts.append({"phase": n, "data": d})
+            return self._send(200, multipart(parts),
+                              {"Content-Type": f"multipart/mixed;boundary={BOUNDARY}"})
+        return self._json(200, results[-1][1] if results else [])
 
     def _stream_keys(self, btype, bucket, query):
         if query.get("keys") != ["stream"]:
@@ -214,6 +351,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         btype, parts, query = self._route()
+        if len(parts) == 3 and parts[:2] == ["search", "index"]:
+            spec = json.loads(self._body() or b"{}")
+            SEARCH_INDEXES[parts[2]] = {"name": parts[2],
+                                        "schema": spec.get("schema", "_yz_default"),
+                                        "n_val": spec.get("n_val", 3)}
+            return self._send(204)
+        if len(parts) == 3 and parts[:2] == ["search", "schema"]:
+            SCHEMAS[parts[2]] = self._body().decode()
+            return self._send(204)
         if btype not in TYPES:
             self._body()
             return self._send(404, "no such bucket type\n")
@@ -232,6 +378,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         btype, parts, query = self._route()
+        if parts == ["mapred"]:
+            return self._mapred(query)
         if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "keys":
             body = self._body()
             if parts[1] == "nolocation":
@@ -248,6 +396,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         btype, parts, query = self._route()
+        if len(parts) == 3 and parts[:2] == ["search", "index"]:
+            existed = SEARCH_INDEXES.pop(parts[2], None) is not None
+            return self._send(204 if existed else 404)
         if parts[1:] == ["unavailable", "props"]:
             return self._send(503, "service unavailable\n")
         if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "props":
