@@ -57,6 +57,7 @@ endif()
 set(RIAK_SOURCES
   src/bucket.c
   src/client.c
+  src/datatype.c
   src/http.c
   src/kv.c
   src/multipart.c

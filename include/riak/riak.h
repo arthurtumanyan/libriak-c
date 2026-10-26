@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #if defined(_WIN32) && defined(RIAK_SHARED)
 #ifdef RIAK_BUILDING
@@ -283,6 +284,82 @@ RIAK_API riak_status riak_mapred(riak_client *client, const char *job, char **re
 typedef bool (*riak_mapred_cb)(unsigned phase, const char *data_json, void *ctx);
 RIAK_API riak_status riak_mapred_stream(riak_client *client, const char *job, riak_mapred_cb cb,
                                         void *ctx);
+
+/* ---- Data types (CRDTs) ---------------------------------------------- */
+/* Buckets must belong to a bucket type created with {"datatype": "..."}. */
+
+typedef enum {
+    RIAK_DT_COUNTER,
+    RIAK_DT_SET,
+    RIAK_DT_MAP,
+    RIAK_DT_HLL,      /* HyperLogLog: approximate distinct count (Riak 2.2+) */
+    RIAK_DT_GSET,     /* grow-only set (Riak 2.9+) */
+    RIAK_DT_REGISTER, /* map fields only */
+    RIAK_DT_FLAG      /* map fields only */
+} riak_dt_type;
+
+typedef struct riak_dt_entry riak_dt_entry;
+
+typedef struct {
+    riak_dt_type type;
+    int64_t counter; /* COUNTER value, HLL cardinality */
+    char **elements; /* SET / GSET members, elements[n_elements] == NULL */
+    size_t n_elements;
+    char *reg;              /* REGISTER */
+    bool flag;              /* FLAG */
+    riak_dt_entry *entries; /* MAP fields */
+    size_t n_entries;
+} riak_dt_value;
+
+struct riak_dt_entry {
+    char *name;
+    riak_dt_value value;
+};
+
+typedef struct {
+    riak_dt_value value;
+    char *context; /* opaque causal context; needed to remove set/map items */
+} riak_datatype;
+
+typedef struct {
+    int r, pr, w, dw, pw; /* RIAK_Q_* or a replica count */
+    bool return_body;     /* update: return the new value */
+    bool no_context;      /* fetch: omit the context */
+    unsigned server_timeout_ms;
+} riak_dt_opts;
+
+RIAK_API riak_status riak_dt_fetch(riak_client *client, const char *type, const char *bucket,
+                                   const char *key, const riak_dt_opts *opts, riak_datatype *out);
+RIAK_API void riak_datatype_free(riak_datatype *dt);
+/* A map field by name and type, or NULL. */
+RIAK_API const riak_dt_value *riak_dt_map_get(const riak_dt_value *map, const char *name,
+                                              riak_dt_type type);
+
+/* Update operations are built first, then sent with riak_dt_update().
+ * Building never fails visibly: an allocation failure or a call that does
+ * not fit the operation's type is remembered and reported by
+ * riak_dt_update(). Nested operations returned by riak_dt_op_map_set() and
+ * riak_dt_op_map_map() belong to their parent. */
+typedef struct riak_dt_op riak_dt_op;
+
+RIAK_API riak_dt_op *riak_dt_op_new(riak_dt_type type); /* COUNTER, SET, MAP, HLL or GSET */
+RIAK_API void riak_dt_op_free(riak_dt_op *op);
+RIAK_API void riak_dt_op_increment(riak_dt_op *counter, int64_t delta);
+RIAK_API void riak_dt_op_add(riak_dt_op *set_hll_gset, const char *element);
+RIAK_API void riak_dt_op_remove(riak_dt_op *set, const char *element); /* needs a context */
+RIAK_API void riak_dt_op_map_counter(riak_dt_op *map, const char *field, int64_t delta);
+RIAK_API void riak_dt_op_map_register(riak_dt_op *map, const char *field, const char *value);
+RIAK_API void riak_dt_op_map_flag(riak_dt_op *map, const char *field, bool enable);
+RIAK_API riak_dt_op *riak_dt_op_map_set(riak_dt_op *map, const char *field);
+RIAK_API riak_dt_op *riak_dt_op_map_map(riak_dt_op *map, const char *field);
+RIAK_API void riak_dt_op_map_remove(riak_dt_op *map, const char *field, riak_dt_type type);
+
+/* key == NULL lets Riak generate one, returned through created_key.
+ * context comes from a previous fetch (required to remove items). */
+RIAK_API riak_status riak_dt_update(riak_client *client, const char *type, const char *bucket,
+                                    const char *key, const riak_dt_op *op, const char *context,
+                                    const riak_dt_opts *opts, riak_datatype *out,
+                                    char **created_key);
 
 RIAK_API void riak_object_free(riak_object *obj);
 RIAK_API void riak_object_set_free(riak_object_set *set);

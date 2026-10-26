@@ -11,6 +11,9 @@
    RIAK_TEST_TYPE=libriak_multi
  Secondary index and Search tests need a node built from tests/docker
  (leveldb backend, search = on) and RIAK_TEST_FEATURES=2i,search.
+ Data type tests ("dt") need bucket types libriak_counters, libriak_sets,
+ libriak_maps and libriak_hlls created with {"props":{"datatype":"<type>"}};
+ "gset" (Riak 2.9+) also needs libriak_gsets.
  */
 
 #define _POSIX_C_SOURCE 200809L /* nanosleep */
@@ -352,6 +355,123 @@ static void test_mapreduce(void) {
     riak_delete(rc, bucket, "m2", NULL);
 }
 
+static void test_datatypes(void) {
+    if (!has_feature("dt")) {
+        fprintf(stderr, "dt not in RIAK_TEST_FEATURES; skipping\n");
+        return;
+    }
+    riak_dt_opts rb = {.return_body = true};
+    riak_datatype dt;
+
+    /* counter */
+    riak_dt_op *c = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(c, 7);
+    riak_dt_op_increment(c, -2);
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_counters", bucket, "c", c, NULL, &rb, &dt, NULL),
+                 RIAK_OK);
+    CHECK(dt.value.type == RIAK_DT_COUNTER && dt.value.counter == 5);
+    riak_datatype_free(&dt);
+    char *key = NULL;
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_counters", bucket, NULL, c, NULL, NULL, NULL, &key),
+                 RIAK_OK);
+    CHECK(key != NULL && *key);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "libriak_counters", bucket, key, NULL, &dt), RIAK_OK);
+    CHECK_EQ_INT(dt.value.counter, 5);
+    riak_datatype_free(&dt);
+    riak_free(key);
+    riak_dt_op_free(c);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "libriak_counters", bucket, "absent", NULL, &dt),
+                 RIAK_E_NOT_FOUND);
+
+    /* set: add, then remove with the context */
+    riak_dt_op *s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_add(s, "a");
+    riak_dt_op_add(s, "b");
+    riak_dt_op_add(s, "c");
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_sets", bucket, "s", s, NULL, NULL, NULL, NULL),
+                 RIAK_OK);
+    riak_dt_op_free(s);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "libriak_sets", bucket, "s", NULL, &dt), RIAK_OK);
+    CHECK_EQ_INT(dt.value.n_elements, 3);
+    CHECK(dt.context != NULL);
+    s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_remove(s, "a");
+    riak_datatype after;
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_sets", bucket, "s", s, dt.context, &rb, &after, NULL),
+                 RIAK_OK);
+    CHECK(after.value.n_elements == 2 && strcmp(after.value.elements[0], "b") == 0);
+    riak_datatype_free(&after);
+    riak_dt_op_free(s);
+    s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_remove(s, "nope");
+    /* without a context Riak checks presence; with one the remove is a no-op */
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_sets", bucket, "s", s, NULL, NULL, NULL, NULL),
+                 RIAK_E_PRECONDITION);
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_sets", bucket, "s", s, dt.context, NULL, NULL, NULL),
+                 RIAK_OK);
+    riak_dt_op_free(s);
+    riak_datatype_free(&dt);
+
+    /* map with every embeddable type, nested map, then a field removal */
+    riak_dt_op *m = riak_dt_op_new(RIAK_DT_MAP);
+    riak_dt_op_map_register(m, "name", "alice");
+    riak_dt_op_map_flag(m, "admin", true);
+    riak_dt_op_map_counter(m, "visits", 3);
+    riak_dt_op_add(riak_dt_op_map_set(m, "tags"), "x");
+    riak_dt_op_map_register(riak_dt_op_map_map(m, "addr"), "city", "Yerevan");
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_maps", bucket, "m", m, NULL, &rb, &dt, NULL), RIAK_OK);
+    riak_dt_op_free(m);
+    const riak_dt_value *v = riak_dt_map_get(&dt.value, "name", RIAK_DT_REGISTER);
+    CHECK(v && strcmp(v->reg, "alice") == 0);
+    v = riak_dt_map_get(&dt.value, "admin", RIAK_DT_FLAG);
+    CHECK(v && v->flag);
+    v = riak_dt_map_get(&dt.value, "visits", RIAK_DT_COUNTER);
+    CHECK(v && v->counter == 3);
+    v = riak_dt_map_get(&dt.value, "tags", RIAK_DT_SET);
+    CHECK(v && v->n_elements == 1);
+    v = riak_dt_map_get(riak_dt_map_get(&dt.value, "addr", RIAK_DT_MAP), "city", RIAK_DT_REGISTER);
+    CHECK(v && strcmp(v->reg, "Yerevan") == 0);
+    m = riak_dt_op_new(RIAK_DT_MAP);
+    riak_dt_op_map_remove(m, "admin", RIAK_DT_FLAG);
+    riak_dt_op_map_counter(m, "visits", 1);
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_maps", bucket, "m", m, dt.context, &rb, &after, NULL),
+                 RIAK_OK);
+    CHECK(riak_dt_map_get(&after.value, "admin", RIAK_DT_FLAG) == NULL);
+    v = riak_dt_map_get(&after.value, "visits", RIAK_DT_COUNTER);
+    CHECK(v && v->counter == 4);
+    riak_datatype_free(&after);
+    riak_datatype_free(&dt);
+    riak_dt_op_free(m);
+
+    /* HyperLogLog */
+    riak_dt_op *h = riak_dt_op_new(RIAK_DT_HLL);
+    riak_dt_op_add(h, "a");
+    riak_dt_op_add(h, "b");
+    riak_dt_op_add(h, "a");
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_hlls", bucket, "h", h, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK(dt.value.type == RIAK_DT_HLL && dt.value.counter == 2);
+    riak_datatype_free(&dt);
+    riak_dt_op_free(h);
+
+    if (has_feature("gset")) {
+        riak_dt_op *g = riak_dt_op_new(RIAK_DT_GSET);
+        riak_dt_op_add(g, "only-grows");
+        CHECK_EQ_INT(riak_dt_update(rc, "libriak_gsets", bucket, "g", g, NULL, &rb, &dt, NULL),
+                     RIAK_OK);
+        CHECK(dt.value.type == RIAK_DT_GSET && dt.value.n_elements == 1);
+        riak_datatype_free(&dt);
+        riak_dt_op_free(g);
+    }
+
+    /* operation that does not fit the bucket type */
+    riak_dt_op *wrong = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_add(wrong, "x");
+    CHECK_EQ_INT(riak_dt_update(rc, "libriak_counters", bucket, "c", wrong, NULL, NULL, NULL, NULL),
+                 RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_client_http_status(rc), 400);
+    riak_dt_op_free(wrong);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -394,6 +514,7 @@ int main(void) {
     RUN(test_secondary_indexes);
     RUN(test_search);
     RUN(test_mapreduce);
+    RUN(test_datatypes);
 
     riak_client_free(rc);
     riak_global_cleanup();
