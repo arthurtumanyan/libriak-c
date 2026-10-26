@@ -27,6 +27,10 @@ from urllib.parse import quote, unquote, urlsplit, parse_qs
 
 TYPES = {"default": {"allow_mult": False}, "t1": {"allow_mult": False},
          "multi": {"allow_mult": True}}
+for _dt in ("counter", "set", "map", "hll", "gset"):
+    TYPES[_dt + "s"] = {"allow_mult": True, "datatype": _dt}
+DATATYPES = {}      # (type, bucket, key) -> python value
+DT_FIELD_TYPES = ("counter", "set", "map", "register", "flag")
 STORE = {}          # (type, bucket, key) -> {"vclock": str, "siblings": [obj]}
 PROPS = {}          # (type, bucket) -> dict
 LAST = {}
@@ -68,6 +72,62 @@ def index_entries(btype, bucket, index):
     return sorted(set(out), key=lambda tk: (int(tk[0]) if as_int else tk[0], tk[1])), as_int
 
 
+class BadOp(Exception):
+    pass
+
+
+def dt_empty(kind):
+    return {"counter": 0, "hll": [], "set": [], "gset": [], "map": {}}[kind]
+
+
+def dt_apply(kind, value, op, has_context):
+    """Apply one update document; raises BadOp or KeyError (precondition)."""
+    if kind == "counter":
+        if isinstance(op, int) and not isinstance(op, bool):
+            return value + op
+        if not isinstance(op, dict) or set(op) - {"increment", "decrement"}:
+            raise BadOp()
+        return value + op.get("increment", 0) - op.get("decrement", 0)
+    if kind in ("set", "gset", "hll"):
+        allowed = {"add", "add_all"} | ({"remove", "remove_all"} if kind == "set" else set())
+        if not isinstance(op, dict) or not op or set(op) - allowed:
+            raise BadOp()
+        adds = op.get("add_all", []) + ([op["add"]] if "add" in op else [])
+        removes = op.get("remove_all", []) + ([op["remove"]] if "remove" in op else [])
+        if kind == "hll":
+            return value  # cardinality is tracked separately
+        members = set(value) | set(adds)
+        for r in removes:
+            if r not in members and not has_context:
+                raise KeyError(r)
+            members.discard(r)
+        return sorted(members)
+    if kind == "map":
+        if not isinstance(op, dict) or not op or set(op) - {"update", "remove"}:
+            raise BadOp()
+        out = dict(value)
+        for field in op.get("remove", []):
+            if field not in out and not has_context:
+                raise KeyError(field)
+            out.pop(field, None)
+        for field, sub in op.get("update", {}).items():
+            name, _, ftype = field.rpartition("_")
+            if not name or ftype not in DT_FIELD_TYPES:
+                raise BadOp()
+            if ftype == "register":
+                if not isinstance(sub, str):
+                    raise BadOp()
+                out[field] = sub
+            elif ftype == "flag":
+                if sub not in ("enable", "disable"):
+                    raise BadOp()
+                out[field] = sub == "enable"
+            else:
+                out[field] = dt_apply(ftype, out.get(field, dt_empty(ftype)), sub, has_context)
+        return out
+    raise BadOp()
+
+
 def multipart(parts):
     body = b""
     for part in parts:
@@ -98,7 +158,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
+        data = self.rfile.read(n) if n else b""
+        with LOCK:
+            LAST["body"] = data.decode("latin-1")
+        return data
 
     def _route(self):
         """Return (type, parts, query); parts start at "buckets" when typed."""
@@ -133,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._search_get(parts[1:], query)
         if btype not in TYPES:
             return self._send(404, "no such bucket type\n")
+        if len(parts) == 4 and parts[0] == "buckets" and parts[2] == "datatypes":
+            return self._dt_get(btype, parts[1], parts[3], query)
         if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "index":
             return self._index_query(btype, parts[1], parts[3], parts[4:], query)
         if parts == ["buckets"] and query.get("buckets") == ["true"]:
@@ -182,6 +247,59 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(304, "", [("ETag", obj["etag"])])
         return self._send(200, obj["body"].encode("latin-1"),
                           object_headers(obj) + [("X-Riak-Vclock", entry["vclock"])])
+
+    def _dt_doc(self, btype, key3, query):
+        kind = TYPES[btype]["datatype"]
+        value = DATATYPES[key3]
+        doc = {"type": kind, "value": len(value) if kind == "hll" else value}
+        if kind != "counter" and kind != "hll" and query.get("include_context") != ["false"]:
+            doc["context"] = f"ctx-{next(COUNTER)}"
+        return doc
+
+    def _dt_get(self, btype, bucket, key, query):
+        kind = TYPES[btype].get("datatype")
+        if kind is None:
+            return self._send(404, "not a datatype bucket type\n")
+        with LOCK:
+            if (btype, bucket, key) not in DATATYPES:
+                return self._json(404, {"type": kind, "error": "notfound"})
+            return self._json(200, self._dt_doc(btype, (btype, bucket, key), query))
+
+    def _dt_update(self, btype, bucket, key, query):
+        kind = TYPES.get(btype, {}).get("datatype")
+        body = self._body()
+        if kind is None:
+            return self._send(404, "not a datatype bucket type\n")
+        try:
+            op = json.loads(body)
+        except ValueError:
+            return self._send(400, "bad json\n")
+        has_context = isinstance(op, dict) and "context" in op
+        if isinstance(op, dict):
+            op = {k: v for k, v in op.items() if k != "context"}
+        created = key is None
+        if created:
+            key = f"gen{next(COUNTER)}"
+        k3 = (btype, bucket, key)
+        with LOCK:
+            current = DATATYPES.get(k3, dt_empty(kind))
+            try:
+                if kind == "hll":
+                    dt_apply("hll", 0, op, has_context)
+                    seen = set(current) | set(op.get("add_all", []) + ([op["add"]] if "add" in op else []))
+                    DATATYPES[k3] = sorted(seen)
+                else:
+                    DATATYPES[k3] = dt_apply(kind, current, op, has_context)
+            except BadOp:
+                return self._send(400, f"Invalid operation on datatype '{kind}': {body.decode()}")
+            except KeyError as missing:
+                return self._send(500, f"Error:\n{{precondition,{{not_present,<<{missing}>>}}}}\n")
+            doc = self._dt_doc(btype, k3, query)
+        if created:
+            return self._send(201, "", {"Location": f"/types/{btype}/buckets/{bucket}/keys/{key}"})
+        if query.get("returnbody") == ["true"]:
+            return self._json(200, doc)
+        return self._send(204)
 
     def _index_query(self, btype, bucket, index, values, query):
         if bucket == "unavailable":
@@ -380,6 +498,8 @@ class Handler(BaseHTTPRequestHandler):
         btype, parts, query = self._route()
         if parts == ["mapred"]:
             return self._mapred(query)
+        if len(parts) in (3, 4) and parts[0] == "buckets" and parts[2] == "datatypes":
+            return self._dt_update(btype, parts[1], parts[3] if len(parts) == 4 else None, query)
         if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "keys":
             body = self._body()
             if parts[1] == "nolocation":

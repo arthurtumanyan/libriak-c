@@ -35,6 +35,8 @@ Options: `-DRIAK_SANITIZE=ON` (ASan + UBSan), `-DRIAK_WERROR=ON`,
   (leveldb, `search = on`), an `allow_mult` bucket type and
   `RIAK_TEST_TYPE=libriak_multi RIAK_TEST_FEATURES=2i,search`; see
   `tests/test_live.c` and the `live` job in `.github/workflows/ci.yml`.
+  Data type tests (`dt`) need one bucket type per data type
+  (`libriak_counters`, `libriak_sets`, `libriak_maps`, `libriak_hlls`).
 - Fuzzing: `build/tests/fuzz_parse -max_total_time=300` (with `-DRIAK_FUZZ=ON`).
 
 ### Packages
@@ -154,6 +156,36 @@ if (riak_search(c, "users_idx", &sq, &found) == RIAK_OK) {
 char *result;
 riak_mapred(c, "{\"inputs\":\"users\",\"query\":[...]}", &result);
 ```
+
+### Data types (CRDTs)
+
+Buckets must belong to a bucket type created with a `datatype` property, e.g.
+`riak-admin bucket-type create counters '{"props":{"datatype":"counter"}}'`.
+
+```c
+riak_dt_op *op = riak_dt_op_new(RIAK_DT_MAP);
+riak_dt_op_map_register(op, "name", "alice");
+riak_dt_op_map_counter(op, "visits", 1);
+riak_dt_op_add(riak_dt_op_map_set(op, "tags"), "admin");
+riak_dt_opts o = {.return_body = true};
+riak_datatype user;
+if (riak_dt_update(c, "maps", "users", "u1", op, NULL, &o, &user, NULL) == RIAK_OK) {
+    const riak_dt_value *v = riak_dt_map_get(&user.value, "visits", RIAK_DT_COUNTER);
+    printf("visits: %lld\n", (long long)v->counter);
+    riak_datatype_free(&user);
+}
+riak_dt_op_free(op);
+
+/* removals need the context of a previous fetch */
+riak_datatype tags;
+riak_dt_fetch(c, "sets", "groups", "g1", NULL, &tags);
+riak_dt_op *rm = riak_dt_op_new(RIAK_DT_SET);
+riak_dt_op_remove(rm, "old-member");
+riak_dt_update(c, "sets", "groups", "g1", rm, tags.context, NULL, NULL, NULL);
+```
+
+Counters, sets, maps (with counter, set, map, register and flag fields),
+HyperLogLogs (Riak 2.2+) and grow-only sets (Riak 2.9+) are supported.
 
 ### Rules
 

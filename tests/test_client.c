@@ -666,6 +666,120 @@ static void test_mapreduce(void) {
     CHECK_EQ_INT(riak_mapred_stream(NULL, job, stop_now, &calls), RIAK_E_INVALID_ARG);
 }
 
+static void test_datatypes(void) {
+    riak_dt_opts rb = {.return_body = true, .w = RIAK_Q_QUORUM};
+    riak_datatype dt;
+
+    riak_dt_op *c = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(c, 4);
+    CHECK_EQ_INT(riak_dt_update(rc, "counters", "dtb", "c", c, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK(dt.value.type == RIAK_DT_COUNTER && dt.value.counter == 4);
+    riak_datatype_free(&dt);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "method"), "POST");
+    CHECK_EQ_STR(jstr(last, "path"),
+                 "/types/counters/buckets/dtb/datatypes/c?w=quorum&returnbody=true");
+    CHECK_EQ_STR(jstr(last, "body"), "{\"increment\":4}");
+    CHECK_EQ_STR(last_header(last, "Content-Type"), "application/json");
+    json_object_put(last);
+
+    char *key = NULL;
+    CHECK_EQ_INT(riak_dt_update(rc, "counters", "dtb", NULL, c, NULL, NULL, NULL, &key), RIAK_OK);
+    CHECK(key && strncmp(key, "gen", 3) == 0);
+    riak_dt_opts fo = {.r = RIAK_Q_ONE, .server_timeout_ms = 700};
+    CHECK_EQ_INT(riak_dt_fetch(rc, "counters", "dtb", key, &fo, &dt), RIAK_OK);
+    CHECK_EQ_INT(dt.value.counter, 4);
+    riak_datatype_free(&dt);
+    last = last_request();
+    CHECK(strstr(jstr(last, "path"), "?r=one&timeout=700") != NULL);
+    json_object_put(last);
+    riak_free(key);
+    riak_dt_op_free(c);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "counters", "dtb", "absent", NULL, &dt), RIAK_E_NOT_FOUND);
+
+    riak_dt_op *s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_add(s, "a");
+    riak_dt_op_add(s, "b");
+    CHECK_EQ_INT(riak_dt_update(rc, "sets", "dtb", "s", s, NULL, NULL, NULL, NULL), RIAK_OK);
+    riak_dt_op_free(s);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", "s", NULL, &dt), RIAK_OK);
+    CHECK(dt.value.n_elements == 2 && dt.context != NULL);
+    s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_remove(s, "a");
+    CHECK_EQ_INT(riak_dt_update(rc, "sets", "dtb", "s", s, dt.context, NULL, NULL, NULL), RIAK_OK);
+    last = last_request();
+    CHECK(strstr(jstr(last, "body"), "\"context\":\"") != NULL);
+    json_object_put(last);
+    riak_dt_op_free(s);
+    riak_datatype_free(&dt);
+    s = riak_dt_op_new(RIAK_DT_SET);
+    riak_dt_op_remove(s, "missing");
+    CHECK_EQ_INT(riak_dt_update(rc, "sets", "dtb", "s", s, NULL, NULL, NULL, NULL),
+                 RIAK_E_PRECONDITION);
+    riak_dt_op_free(s);
+    riak_dt_opts noctx = {.no_context = true};
+    CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", "s", &noctx, &dt), RIAK_OK);
+    CHECK(dt.context == NULL && dt.value.n_elements == 1);
+    riak_datatype_free(&dt);
+
+    riak_dt_op *m = riak_dt_op_new(RIAK_DT_MAP);
+    riak_dt_op_map_register(m, "name", "alice");
+    riak_dt_op_map_flag(m, "admin", true);
+    riak_dt_op_map_counter(m, "visits", 2);
+    riak_dt_op_add(riak_dt_op_map_set(m, "tags"), "x");
+    riak_dt_op_map_counter(riak_dt_op_map_map(m, "stats"), "logins", 1);
+    CHECK_EQ_INT(riak_dt_update(rc, "maps", "dtb", "m", m, NULL, &rb, &dt, NULL), RIAK_OK);
+    riak_dt_op_free(m);
+    CHECK_EQ_INT(dt.value.n_entries, 5);
+    const riak_dt_value *stats = riak_dt_map_get(&dt.value, "stats", RIAK_DT_MAP);
+    CHECK(stats && riak_dt_map_get(stats, "logins", RIAK_DT_COUNTER)->counter == 1);
+    m = riak_dt_op_new(RIAK_DT_MAP);
+    riak_dt_op_map_remove(m, "admin", RIAK_DT_FLAG);
+    riak_datatype after;
+    CHECK_EQ_INT(riak_dt_update(rc, "maps", "dtb", "m", m, dt.context, &rb, &after, NULL), RIAK_OK);
+    CHECK(after.value.n_entries == 4 &&
+          riak_dt_map_get(&after.value, "admin", RIAK_DT_FLAG) == NULL);
+    riak_datatype_free(&after);
+    riak_datatype_free(&dt);
+    riak_dt_op_free(m);
+
+    riak_dt_op *h = riak_dt_op_new(RIAK_DT_HLL);
+    riak_dt_op_add(h, "a");
+    riak_dt_op_add(h, "a");
+    riak_dt_op_add(h, "b");
+    CHECK_EQ_INT(riak_dt_update(rc, "hlls", "dtb", "h", h, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK(dt.value.type == RIAK_DT_HLL && dt.value.counter == 2);
+    riak_datatype_free(&dt);
+    riak_dt_op_free(h);
+
+    riak_dt_op *g = riak_dt_op_new(RIAK_DT_GSET);
+    riak_dt_op_add(g, "z");
+    CHECK_EQ_INT(riak_dt_update(rc, "gsets", "dtb", "g", g, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK(dt.value.type == RIAK_DT_GSET && dt.value.n_elements == 1);
+    riak_datatype_free(&dt);
+
+    /* errors */
+    CHECK_EQ_INT(riak_dt_update(rc, "counters", "dtb", "c", g, NULL, NULL, NULL, NULL),
+                 RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_client_http_status(rc), 400);
+    riak_dt_op_free(g);
+    riak_dt_op *bad = riak_dt_op_new(RIAK_DT_SET);
+    CHECK_EQ_INT(riak_dt_update(rc, "sets", "dtb", "s", bad, NULL, NULL, NULL, NULL),
+                 RIAK_E_INVALID_ARG); /* empty operation, nothing sent */
+    riak_dt_op_add(bad, "x");
+    CHECK_EQ_INT(riak_dt_update(rc, "", "dtb", "s", bad, NULL, NULL, NULL, NULL),
+                 RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_dt_update(rc, "sets", "dtb", "s", NULL, NULL, NULL, NULL, NULL),
+                 RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_dt_update(rc, "default", "dtb", "s", bad, NULL, NULL, NULL, NULL),
+                 RIAK_E_NOT_FOUND);
+    riak_dt_op_free(bad);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", NULL, NULL, &dt), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", "s", NULL, NULL), RIAK_E_INVALID_ARG);
+    riak_dt_opts badq = {.r = -9};
+    CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", "s", &badq, &dt), RIAK_E_INVALID_ARG);
+}
+
 static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
@@ -720,6 +834,7 @@ int main(void) {
     RUN(test_secondary_indexes);
     RUN(test_search);
     RUN(test_mapreduce);
+    RUN(test_datatypes);
     RUN(test_client_id_header);
 
     riak_client_free(rc);

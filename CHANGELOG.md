@@ -23,6 +23,11 @@
   `riak_mapred_stream()`.
 - Streamed responses are parsed incrementally; a callback can stop a stream
   early, which aborts the transfer.
+- Data types (CRDTs): `riak_dt_fetch()` and `riak_dt_update()` for counters,
+  sets, maps (counter, set, map, register and flag fields, nested), HyperLogLogs
+  and grow-only sets. Updates are built with `riak_dt_op_*`; misuse and
+  allocation failures are reported by `riak_dt_update()`. Removing an absent
+  element without a context maps to `RIAK_E_PRECONDITION`.
 - `tests/docker`: Riak image with the leveldb backend and Search enabled for
   the live tests.
 - Debian and RPM packages via CPack (runtime and development components),

@@ -1,6 +1,6 @@
 find_package(Python3 COMPONENTS Interpreter)
 
-foreach(name util parse multipart api)
+foreach(name util parse multipart datatype api)
   add_executable(test_${name} test_${name}.c)
   target_link_libraries(test_${name} PRIVATE riak_objects riak_warnings)
   add_test(NAME ${name} COMMAND test_${name})

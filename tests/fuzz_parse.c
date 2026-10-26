@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "datatype.h"
 #include "multipart.h"
 #include "parse.h"
 #include "util.h"
@@ -101,6 +102,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         abort();
     }
     free(mr);
+
+    riak_datatype dt;
+    if (riak_dt_parse(s, size, &dt) == RIAK_OK && dt.value.type == RIAK_DT_MAP) {
+        for (size_t i = 0; i < dt.value.n_entries; i++) {
+            if (riak_dt_map_get(&dt.value, dt.value.entries[i].name,
+                                dt.value.entries[i].value.type) == NULL) {
+                abort();
+            }
+        }
+    }
+    riak_datatype_free(&dt);
 
     /* streamed multipart in odd chunks must agree with the one-shot parse */
     if (nl != NULL) {
