@@ -54,8 +54,10 @@ if(RIAK_COVERAGE)
 endif()
 
 set(RIAK_SOURCES
+  src/bucket.c
   src/client.c
   src/http.c
+  src/kv.c
   src/parse.c
   src/util.c)
 
