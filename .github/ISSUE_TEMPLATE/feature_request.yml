@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest an addition to the API
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What is needed
+      description: The Riak feature or use case, and how the API could look.
+    validations:
+      required: true

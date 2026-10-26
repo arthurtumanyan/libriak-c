@@ -2,10 +2,20 @@ name: CI
 
 on:
   push:
+    branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
+    name: ${{ matrix.cc }} / ${{ matrix.config.name }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -14,13 +24,12 @@ jobs:
         config:
           - { name: asan, type: Debug, sanitize: "ON" }
           - { name: release, type: Release, sanitize: "OFF" }
-    name: ${{ matrix.cc }} / ${{ matrix.config.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev valgrind
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev valgrind
       - name: Configure
         env:
           CC: ${{ matrix.cc }}
@@ -36,16 +45,95 @@ jobs:
       - name: Valgrind
         if: matrix.config.sanitize == 'OFF'
         run: |
-          for t in test_util test_parse; do
-            valgrind -q --leak-check=full --error-exitcode=1 build/tests/$t
+          for t in build/tests/test_util build/tests/test_parse build/tests/test_api; do
+            valgrind -q --leak-check=full --error-exitcode=1 "$t"
           done
           python3 tests/stub_riak.py valgrind -q --leak-check=full \
             --error-exitcode=1 build/tests/test_client
 
+  oldest:
+    name: oldest supported (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - run: cmake -S . -B build -DRIAK_WERROR=ON && cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+
+  live:
+    name: live Riak node
+    runs-on: ubuntu-24.04
+    services:
+      riak:
+        image: basho/riak-kv:latest
+        ports: ["8098:8098"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON && cmake --build build -j
+      - name: Wait for Riak
+        run: |
+          for _ in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8098/ping && break
+            sleep 2
+          done
+          docker exec "${{ job.services.riak.id }}" riak-admin wait-for-service riak_kv
+      - name: Live tests
+        env:
+          RIAK_TEST_URL: http://127.0.0.1:8098
+        run: ctest --test-dir build --output-on-failure -R live
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev && pipx install gcovr==8.7
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_COVERAGE=ON && cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+      - name: Coverage report (fails under 85% lines)
+        run: |
+          gcovr --root . --filter src/ --object-directory build --print-summary \
+            --markdown-summary "$GITHUB_STEP_SUMMARY" --fail-under-line 85 build
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - name: Build fuzzer
+        env:
+          CC: clang
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_FUZZ=ON -DRIAK_SANITIZE=ON
+          && cmake --build build -j --target fuzz_parse
+      - name: Fuzz for 60 seconds
+        run: build/tests/fuzz_parse -max_total_time=60 -max_len=4096
+
+  package:
+    name: package dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev dpkg-dev file
+      - run: packaging/build-packages.sh DEB
+      - run: sudo apt-get install -y ./dist/*.deb && packaging/smoke-test.sh
+
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install tools
         run: |
           sudo apt-get update
@@ -60,3 +148,5 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           clang-tidy -p build --warnings-as-errors='*' src/*.c
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color=false
