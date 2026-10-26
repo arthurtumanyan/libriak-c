@@ -6,6 +6,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(RIAK_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
+option(RIAK_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 option(RIAK_WERROR "Treat warnings as errors" OFF)
 option(RIAK_FUZZ "Build libFuzzer targets (clang only)" OFF)
@@ -105,6 +106,11 @@ install(FILES ${PROJECT_BINARY_DIR}/libriak-c-config.cmake
 configure_file(cmake/libriak-c.pc.in ${PROJECT_BINARY_DIR}/libriak-c.pc @ONLY)
 install(FILES ${PROJECT_BINARY_DIR}/libriak-c.pc
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+if(RIAK_BUILD_EXAMPLES)
+  add_executable(riak_example examples/basic.c)
+  target_link_libraries(riak_example PRIVATE riak riak_warnings)
+endif()
 
 if(RIAK_BUILD_TESTS)
   enable_testing()
