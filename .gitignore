@@ -1,0 +1,7 @@
+/build*/
+/graphify-out/
+compile_commands.json
+.cache/
+*.o
+*.so
+*.a
