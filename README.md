@@ -187,6 +187,31 @@ riak_dt_update(c, "sets", "groups", "g1", rm, tags.context, NULL, NULL, NULL);
 Counters, sets, maps (with counter, set, map, register and flag fields),
 HyperLogLogs (Riak 2.2+) and grow-only sets (Riak 2.9+) are supported.
 
+### Clusters, failover and retries
+
+```c
+riak_node nodes[] = {{"10.0.0.1", 8098}, {"10.0.0.2", 8098}, {"10.0.0.3", 8098}};
+riak_config cfg;
+riak_config_init(&cfg);
+cfg.nodes = nodes;
+cfg.n_nodes = 3;
+cfg.balance = RIAK_BALANCE_ROUND_ROBIN; /* or RIAK_BALANCE_FAILOVER */
+cfg.max_retries = 2;                    /* defaults shown */
+cfg.retry_base_ms = 50;
+cfg.retry_max_ms = 2000;
+cfg.fail_threshold = 3;
+cfg.eject_ms = 5000;
+```
+
+Every call picks a node; failed attempts move to the next node after an
+exponential backoff with jitter. Requests that never reached a node are always
+retried. GET, PUT and DELETE are also retried after a transport error or a 503;
+POST requests (counter increments, generated keys) and streams that already
+delivered data are not, so nothing is applied twice. A node with
+`fail_threshold` consecutive failures is skipped for `eject_ms`.
+`riak_client_check_nodes()` pings every node and `riak_client_node_info()`
+reports per-node health and counters. Error messages name the node.
+
 ### Rules
 
 - Every function returns a `riak_status`; `riak_client_errmsg()` gives detail

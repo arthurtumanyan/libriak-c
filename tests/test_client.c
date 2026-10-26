@@ -6,8 +6,11 @@
  RIAK_TEST_PORT. Only the public header is used for the library itself.
  */
 
+#define _POSIX_C_SOURCE 200809L /* clock_gettime, nanosleep */
+
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <curl/curl.h>
 #include <json-c/json.h>
@@ -28,6 +31,36 @@ static size_t collect(char *d, size_t s, size_t n, void *u) {
     p[old + len] = '\0';
     *buf = p;
     return len;
+}
+
+static unsigned ports[3];
+
+/* GET a stub control endpoint on one node; returns the body (caller frees). */
+static char *stub_get(unsigned on_port, const char *path) {
+    char url[96];
+    char *body = NULL;
+    snprintf(url, sizeof url, "http://127.0.0.1:%u%s", on_port, path);
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, collect);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &body);
+    curl_easy_perform(h);
+    curl_easy_cleanup(h);
+    return body;
+}
+
+static void set_mode(int node, const char *mode) {
+    char path[32];
+    snprintf(path, sizeof path, "/_mode?set=%s", mode);
+    free(stub_get(ports[node], path));
+}
+
+static long hits(int node) {
+    char *body = stub_get(ports[node], "/_hits");
+    long n = -1;
+    if (body) sscanf(body, "{\"hits\": %ld}", &n);
+    free(body);
+    return n;
 }
 
 /* Previous request as recorded by the stub; caller puts the result. */
@@ -780,6 +813,158 @@ static void test_datatypes(void) {
     CHECK_EQ_INT(riak_dt_fetch(rc, "sets", "dtb", "s", &badq, &dt), RIAK_E_INVALID_ARG);
 }
 
+static riak_client *cluster(const riak_node *nodes, size_t n, riak_balance balance,
+                            unsigned retries) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.nodes = nodes;
+    cfg.n_nodes = n;
+    cfg.balance = balance;
+    cfg.max_retries = retries;
+    cfg.retry_base_ms = 10;
+    cfg.fail_threshold = 2;
+    cfg.eject_ms = 300;
+    cfg.connect_timeout_ms = 2000;
+    riak_client *c = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
+    return c;
+}
+
+static double elapsed_ms(const struct timespec *t0) {
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (double)(t1.tv_sec - t0->tv_sec) * 1000.0 + (double)(t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+static void sleep_ms(long ms) {
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+static void test_cluster_round_robin(void) {
+    riak_node nodes[3] = {
+        {"127.0.0.1", ports[0]}, {"127.0.0.1", ports[1]}, {"127.0.0.1", ports[2]}};
+    for (int i = 0; i < 3; i++)
+        hits(i);
+    riak_client *c = cluster(nodes, 3, RIAK_BALANCE_ROUND_ROBIN, 0);
+    CHECK_EQ_INT(riak_client_node_count(c), 3);
+    for (int i = 0; i < 6; i++)
+        CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    for (int i = 0; i < 3; i++)
+        CHECK_EQ_INT(hits(i), 2);
+
+    /* writes through one node are visible through another (shared store) */
+    CHECK_EQ_INT(riak_put(c, "cl", "k", "v", 1, NULL, NULL, NULL), RIAK_OK);
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(c, "cl", "k", NULL, &obj), RIAK_OK);
+    riak_object_free(&obj);
+    riak_node_info info;
+    CHECK_EQ_INT(riak_client_node_info(c, 2, &info), RIAK_OK);
+    CHECK(info.port == ports[2] && info.healthy && info.requests == 2);
+    CHECK_EQ_INT(riak_client_node_info(c, 3, &info), RIAK_E_INVALID_ARG);
+    riak_client_free(c);
+}
+
+static void test_cluster_failover(void) {
+    /* port 1: nothing listens, connections are refused */
+    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    hits(0);
+    riak_client *c = cluster(nodes, 2, RIAK_BALANCE_FAILOVER, 1);
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK); /* refused, then retried on the next node */
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    riak_node_info dead;
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &dead), RIAK_OK);
+    CHECK(!dead.healthy && dead.consecutive_failures == 2); /* threshold reached: ejected */
+    unsigned long long before = dead.requests;
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &dead), RIAK_OK);
+    CHECK_EQ_INT(dead.requests, before); /* skipped while ejected */
+    sleep_ms(350);                       /* eject_ms elapsed: tried again */
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &dead), RIAK_OK);
+    CHECK_EQ_INT(dead.requests, before + 1);
+    CHECK_EQ_INT(hits(0), 4);
+
+    /* a POST that never reached a node is safe to retry */
+    riak_dt_op *inc = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(inc, 1);
+    sleep_ms(350);
+    CHECK_EQ_INT(riak_dt_update(c, "counters", "cl", "once", inc, NULL, NULL, NULL, NULL), RIAK_OK);
+    riak_datatype dt;
+    CHECK_EQ_INT(riak_dt_fetch(c, "counters", "cl", "once", NULL, &dt), RIAK_OK);
+    CHECK_EQ_INT(dt.value.counter, 1);
+    riak_datatype_free(&dt);
+    riak_client_free(c);
+
+    /* 503 on a GET is retried elsewhere; on a POST it is not */
+    riak_node two[2] = {{"127.0.0.1", ports[1]}, {"127.0.0.1", ports[2]}};
+    c = cluster(two, 2, RIAK_BALANCE_FAILOVER, 2);
+    set_mode(1, "503");
+    hits(1);
+    hits(2);
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(c, "cl", "k", NULL, &obj), RIAK_OK);
+    riak_object_free(&obj);
+    CHECK_EQ_INT(hits(1), 1);
+    CHECK_EQ_INT(hits(2), 1);
+    CHECK_EQ_INT(riak_dt_update(c, "counters", "cl", "once", inc, NULL, NULL, NULL, NULL),
+                 RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_client_http_status(c), 503);
+    CHECK_EQ_INT(hits(2), 0); /* the increment was not repeated on another node */
+    CHECK(strstr(riak_client_errmsg(c), "127.0.0.1:") != NULL);
+
+    /* connections closed without a reply count as transport errors */
+    set_mode(1, "close");
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    CHECK_EQ_INT(riak_client_check_nodes(c), 1);
+    set_mode(1, "ok");
+    CHECK_EQ_INT(riak_client_check_nodes(c), 2);
+    riak_node_info info;
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &info), RIAK_OK);
+    CHECK(info.healthy && info.consecutive_failures == 0 && info.failures >= 2);
+    riak_dt_op_free(inc);
+    riak_client_free(c);
+}
+
+static void test_cluster_backoff_and_limits(void) {
+    riak_node dead[2] = {{"127.0.0.1", 1}, {"127.0.0.1", 1}};
+    riak_client *c = cluster(dead, 2, RIAK_BALANCE_ROUND_ROBIN, 2);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK_EQ_INT(riak_ping(c), RIAK_E_TRANSPORT);
+    /* backoffs of 10 and 20 ms, at least half of each */
+    CHECK(elapsed_ms(&t0) >= 14.0);
+    riak_client_free(c);
+
+    riak_node one[1] = {{"127.0.0.1", 1}};
+    c = cluster(one, 1, RIAK_BALANCE_ROUND_ROBIN, 0);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK_EQ_INT(riak_ping(c), RIAK_E_TRANSPORT);
+    riak_node_info info;
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &info), RIAK_OK);
+    CHECK_EQ_INT(info.requests, 1); /* max_retries = 0: a single attempt */
+    riak_client_free(c);
+
+    riak_config cfg;
+    riak_config_init(&cfg);
+    riak_client *bad = NULL;
+    riak_node badhost[1] = {{"no/slash", 0}};
+    cfg.nodes = badhost;
+    cfg.n_nodes = 1;
+    CHECK_EQ_INT(riak_client_new(&cfg, &bad), RIAK_E_INVALID_ARG);
+    cfg.nodes = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &bad), RIAK_E_INVALID_ARG);
+    cfg.n_nodes = 0;
+    cfg.balance = (riak_balance)7;
+    CHECK_EQ_INT(riak_client_new(&cfg, &bad), RIAK_E_INVALID_ARG);
+    cfg.balance = RIAK_BALANCE_ROUND_ROBIN;
+    cfg.retry_base_ms = -1;
+    CHECK_EQ_INT(riak_client_new(&cfg, &bad), RIAK_E_INVALID_ARG);
+    CHECK(bad == NULL);
+    CHECK_EQ_INT(riak_client_node_count(NULL), 0);
+    CHECK_EQ_INT(riak_client_check_nodes(NULL), 0);
+}
+
 static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
@@ -801,6 +986,11 @@ int main(void) {
         return 77; /* CTest "skipped" */
     }
     port = (unsigned)strtoul(p, NULL, 10);
+    const char *ps = getenv("RIAK_TEST_PORTS");
+    if (ps == NULL || sscanf(ps, "%u,%u,%u", &ports[0], &ports[1], &ports[2]) != 3) {
+        fprintf(stderr, "RIAK_TEST_PORTS must list three stub nodes\n");
+        return 1;
+    }
 
     CHECK_EQ_INT(riak_global_init(), RIAK_OK);
     riak_config cfg;
@@ -835,6 +1025,9 @@ int main(void) {
     RUN(test_search);
     RUN(test_mapreduce);
     RUN(test_datatypes);
+    RUN(test_cluster_round_robin);
+    RUN(test_cluster_failover);
+    RUN(test_cluster_backoff_and_limits);
     RUN(test_client_id_header);
 
     riak_client_free(rc);

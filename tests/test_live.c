@@ -28,8 +28,10 @@
 
 static riak_client *rc;
 static char bucket[64];
-static const char *multi_type;    /* bucket type with allow_mult, from RIAK_TEST_TYPE */
-static const char *features = ""; /* RIAK_TEST_FEATURES, e.g. "2i,search" */
+static const char *multi_type; /* bucket type with allow_mult, from RIAK_TEST_TYPE */
+static const char *features = "";
+static const char *live_host;
+static unsigned live_port; /* RIAK_TEST_FEATURES, e.g. "2i,search" */
 
 static bool has_feature(const char *f) {
     const char *p = strstr(features, f);
@@ -472,6 +474,29 @@ static void test_datatypes(void) {
     riak_dt_op_free(wrong);
 }
 
+static void test_failover(void) {
+    /* a dead node (nothing listens on port 1) ahead of the real one */
+    riak_node nodes[2] = {{"127.0.0.1", 1}, {live_host, live_port}};
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.nodes = nodes;
+    cfg.n_nodes = 2;
+    cfg.balance = RIAK_BALANCE_FAILOVER;
+    cfg.timeout_ms = 30000;
+    riak_client *c = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
+    CHECK_EQ_INT(riak_put(c, bucket, "fo", "x", 1, NULL, NULL, NULL), RIAK_OK);
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(c, bucket, "fo", NULL, &obj), RIAK_OK);
+    riak_object_free(&obj);
+    CHECK_EQ_INT(riak_delete(c, bucket, "fo", NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_client_check_nodes(c), 1);
+    riak_node_info info;
+    CHECK_EQ_INT(riak_client_node_info(c, 0, &info), RIAK_OK);
+    CHECK(!info.healthy);
+    riak_client_free(c);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -499,6 +524,8 @@ int main(void) {
     riak_config_init(&cfg);
     cfg.host = host;
     cfg.port = port;
+    live_host = host;
+    live_port = port;
     cfg.tls = strcmp(scheme, "https") == 0;
     cfg.timeout_ms = 30000;
     if (riak_client_new(&cfg, &rc) != RIAK_OK) {
@@ -515,6 +542,7 @@ int main(void) {
     RUN(test_search);
     RUN(test_mapreduce);
     RUN(test_datatypes);
+    RUN(test_failover);
 
     riak_client_free(rc);
     riak_global_cleanup();

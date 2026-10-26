@@ -12,9 +12,24 @@
 #include "riak/riak.h"
 #include "util.h"
 
+typedef struct {
+    char *host;
+    unsigned port;
+    char *base; /* scheme://host:port, no trailing slash */
+    unsigned consecutive_failures;
+    long long ejected_until_ms; /* monotonic; 0 = healthy */
+    unsigned long long requests;
+    unsigned long long failures;
+} riak_node_state;
+
 struct riak_client {
     CURL *curl;
-    char *base_url; /* scheme://host:port/ */
+    const char *root; /* "/": callers build paths, riak_perform adds the node */
+    riak_node_state *nodes;
+    size_t n_nodes;
+    size_t next_node; /* round-robin cursor */
+    size_t last_node; /* node of the latest attempt, for error messages */
+    unsigned long long rng;
     char *host;
     char *ca_file;
     char *client_id;
@@ -37,6 +52,7 @@ typedef struct {
     riak_sink_fn sink; /* NULL: collect into riak_response.body */
     void *sink_ctx;
     bool unbounded; /* sink does not accumulate: skip the max_body_bytes cap */
+    size_t pin;     /* 0: choose a node and retry; i + 1: only node i, no retries */
 } riak_request;
 
 typedef struct {
@@ -44,6 +60,9 @@ typedef struct {
     riak_buf body;
     riak_headerlist headers;
 } riak_response;
+
+/* Monotonic clock in milliseconds. */
+long long riak_now_ms(void);
 
 riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_clear_error(riak_client *c);
