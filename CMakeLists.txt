@@ -59,6 +59,7 @@ set(RIAK_SOURCES
   src/client.c
   src/http.c
   src/kv.c
+  src/multipart.c
   src/parse.c
   src/util.c)
 

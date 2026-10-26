@@ -41,19 +41,18 @@ typedef struct {
 typedef struct {
     long status;
     riak_buf body;
-    char *content_type;
-    char *vclock;
-    char *etag;
-    char *last_modified;
-    char *location;
+    riak_headerlist headers;
 } riak_response;
 
 riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_clear_error(riak_client *c);
 
-/* "<base>buckets/<bucket>[/<suffix>[/<key>]]", escaped. */
-int riak_url_bucket(riak_buf *b, const riak_client *c, const char *bucket, const char *suffix,
-                    const char *key);
+/* "<base>[types/<type>/]buckets/<bucket>[/<suffix>[/<key>]]", escaped. */
+int riak_url_bucket(riak_buf *b, const riak_client *c, const char *type, const char *bucket,
+                    const char *suffix, const char *key);
+
+/* GET url, require 200 and a JSON object body, return the body. */
+riak_status riak_get_json(riak_client *c, const char *url, char **json);
 
 /* Validate a bucket/key argument. */
 riak_status riak_check_name(riak_client *c, const char *s, const char *what);

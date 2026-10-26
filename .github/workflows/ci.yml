@@ -82,9 +82,18 @@ jobs:
             sleep 2
           done
           docker exec "${{ job.services.riak.id }}" riak-admin wait-for-service riak_kv
+      - name: Create allow_mult bucket type
+        run: |
+          id="${{ job.services.riak.id }}"
+          docker exec "$id" riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
+          for _ in $(seq 1 30); do
+            docker exec "$id" riak-admin bucket-type activate libriak_multi && break
+            sleep 2
+          done
       - name: Live tests
         env:
           RIAK_TEST_URL: http://127.0.0.1:8098
+          RIAK_TEST_TYPE: libriak_multi
         run: ctest --test-dir build --output-on-failure -R live
 
   coverage:

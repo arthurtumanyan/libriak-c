@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static int buf_reserve(riak_buf *b, size_t extra) {
     if (extra > SIZE_MAX - b->len - 1) {
@@ -244,6 +245,14 @@ void riak_strlist_free(riak_strlist *list) {
     list->count = 0;
 }
 
+static void free_headers(riak_header *h, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        free(h[i].name);
+        free(h[i].value);
+    }
+    free(h);
+}
+
 void riak_object_free(riak_object *obj) {
     if (obj == NULL) {
         return;
@@ -253,7 +262,164 @@ void riak_object_free(riak_object *obj) {
     free(obj->vclock);
     free(obj->etag);
     free(obj->last_modified);
+    free_headers(obj->meta, obj->n_meta);
+    free_headers(obj->indexes, obj->n_indexes);
+    free(obj->links);
     memset(obj, 0, sizeof *obj);
+}
+
+void riak_object_set_free(riak_object_set *set) {
+    if (set == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < set->count; i++) {
+        riak_object_free(&set->items[i]);
+    }
+    free(set->items);
+    free(set->vclock);
+    memset(set, 0, sizeof *set);
+}
+
+static bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+int riak_headerlist_add_line(riak_headerlist *l, const char *line, size_t len) {
+    const char *colon = memchr(line, ':', len);
+    if (colon == NULL || colon == line) {
+        return 1;
+    }
+    const char *v = colon + 1;
+    const char *end = line + len;
+    while (v < end && is_space(*v))
+        v++;
+    while (end > v && is_space(end[-1]))
+        end--;
+    size_t nlen = (size_t)(colon - line);
+    while (nlen > 0 && is_space(line[nlen - 1]))
+        nlen--;
+    if (nlen == 0) {
+        return 1;
+    }
+    if (l->count == l->cap) {
+        size_t ncap = l->cap ? l->cap * 2 : 16;
+        if (ncap > SIZE_MAX / sizeof(riak_header)) {
+            return -1;
+        }
+        riak_header *items = realloc(l->items, ncap * sizeof(riak_header));
+        if (items == NULL) {
+            return -1;
+        }
+        l->items = items;
+        l->cap = ncap;
+    }
+    char *name = riak_strndup(line, nlen);
+    char *value = riak_strndup(v, (size_t)(end - v));
+    if (name == NULL || value == NULL) {
+        free(name);
+        free(value);
+        return -1;
+    }
+    l->items[l->count].name = name;
+    l->items[l->count].value = value;
+    l->count++;
+    return 0;
+}
+
+const char *riak_headerlist_get(const riak_headerlist *l, const char *name) {
+    for (size_t i = 0; i < l->count; i++) {
+        if (strcasecmp(l->items[i].name, name) == 0) {
+            return l->items[i].value;
+        }
+    }
+    return NULL;
+}
+
+void riak_headerlist_clear(riak_headerlist *l) {
+    free_headers(l->items, l->count);
+    l->items = NULL;
+    l->count = l->cap = 0;
+}
+
+static int copy_header(char **dst, const riak_headerlist *h, const char *name) {
+    const char *v = riak_headerlist_get(h, name);
+    if (v == NULL) {
+        return 0;
+    }
+    *dst = riak_strdup(v);
+    return *dst ? 0 : -1;
+}
+
+/* Collect headers named <prefix><rest> as {rest, value}. */
+static int collect_prefixed(const riak_headerlist *h, const char *prefix, riak_header **out,
+                            size_t *n) {
+    size_t plen = strlen(prefix);
+    size_t count = 0;
+    for (size_t i = 0; i < h->count; i++) {
+        if (strncasecmp(h->items[i].name, prefix, plen) == 0 && h->items[i].name[plen]) {
+            count++;
+        }
+    }
+    if (count == 0) {
+        return 0;
+    }
+    riak_header *items = calloc(count, sizeof *items);
+    if (items == NULL) {
+        return -1;
+    }
+    *out = items;
+    size_t j = 0;
+    for (size_t i = 0; i < h->count && j < count; i++) {
+        const riak_header *src = &h->items[i];
+        if (strncasecmp(src->name, prefix, plen) != 0 || src->name[plen] == '\0') {
+            continue;
+        }
+        items[j].name = riak_strdup(src->name + plen);
+        items[j].value = riak_strdup(src->value);
+        *n = ++j;
+        if (items[j - 1].name == NULL || items[j - 1].value == NULL) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int join_links(const riak_headerlist *h, char **out) {
+    riak_buf b = {0};
+    for (size_t i = 0; i < h->count; i++) {
+        if (strcasecmp(h->items[i].name, "Link") != 0) {
+            continue;
+        }
+        if ((b.len && riak_buf_append_str(&b, ", ") != 0) ||
+            riak_buf_append_str(&b, h->items[i].value) != 0) {
+            riak_buf_free(&b);
+            return -1;
+        }
+    }
+    *out = b.data;
+    return 0;
+}
+
+int riak_object_from_headers(const riak_headerlist *h, const char *vclock, riak_object *obj) {
+    if (copy_header(&obj->content_type, h, "Content-Type") != 0 ||
+        copy_header(&obj->etag, h, "ETag") != 0 ||
+        copy_header(&obj->last_modified, h, "Last-Modified") != 0 ||
+        collect_prefixed(h, "X-Riak-Meta-", &obj->meta, &obj->n_meta) != 0 ||
+        collect_prefixed(h, "X-Riak-Index-", &obj->indexes, &obj->n_indexes) != 0 ||
+        join_links(h, &obj->links) != 0) {
+        return -1;
+    }
+    if (vclock) {
+        obj->vclock = riak_strdup(vclock);
+        if (obj->vclock == NULL) {
+            return -1;
+        }
+    } else if (copy_header(&obj->vclock, h, "X-Riak-Vclock") != 0) {
+        return -1;
+    }
+    const char *del = riak_headerlist_get(h, "X-Riak-Deleted");
+    obj->deleted = del != NULL && strcasecmp(del, "true") == 0;
+    return 0;
 }
 
 void riak_free(void *ptr) {

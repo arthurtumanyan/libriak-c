@@ -92,6 +92,36 @@ static void test_strlist(void) {
     CHECK(l.items == NULL && l.count == 0);
 }
 
+static void test_headerlist(void) {
+    riak_headerlist h = {0};
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Content-Type:  text/plain \r\n", 28), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "X-Riak-Index-age_int: 42", 24), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "X-Riak-Index-name_bin: a", 24), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <a>", 9), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <b>", 9), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Empty:", 6), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "\r\n", 2), 1);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, ": novalue", 9), 1);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "HTTP/1.1 200 OK", 15), 1);
+    CHECK_EQ_INT(h.count, 6);
+    CHECK_EQ_STR(riak_headerlist_get(&h, "content-type"), "text/plain");
+    CHECK_EQ_STR(riak_headerlist_get(&h, "Empty"), "");
+    CHECK(riak_headerlist_get(&h, "missing") == NULL);
+
+    riak_object obj = {0};
+    CHECK_EQ_INT(riak_object_from_headers(&h, NULL, &obj), 0);
+    CHECK_EQ_INT(obj.n_indexes, 2);
+    if (obj.n_indexes == 2) {
+        CHECK_EQ_STR(obj.indexes[0].name, "age_int");
+        CHECK_EQ_STR(obj.indexes[1].value, "a");
+    }
+    CHECK_EQ_STR(obj.links, "<a>, <b>");
+    CHECK(obj.meta == NULL && obj.n_meta == 0);
+    riak_object_free(&obj);
+    riak_headerlist_clear(&h);
+    CHECK(h.items == NULL && h.count == 0);
+}
+
 int main(void) {
     RUN(test_buf_growth);
     RUN(test_buf_steal_empty);
@@ -101,5 +131,6 @@ int main(void) {
     RUN(test_headers);
     RUN(test_strprintf);
     RUN(test_strlist);
+    RUN(test_headerlist);
     return CHECK_DONE();
 }

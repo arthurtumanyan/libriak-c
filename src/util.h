@@ -60,4 +60,23 @@ bool riak_header_name_ok(const char *n);
 /* String list builder. */
 int riak_strlist_push(riak_strlist *l, size_t *cap, const char *s, size_t len);
 
+/* Response or multipart-part headers, in arrival order. */
+typedef struct {
+    riak_header *items;
+    size_t count;
+    size_t cap;
+} riak_headerlist;
+
+/* Add one "Name: value" line (surrounding whitespace and CR/LF trimmed).
+ * Returns 0 when added, 1 when the line is not a header, -1 on ENOMEM. */
+int riak_headerlist_add_line(riak_headerlist *l, const char *line, size_t len);
+/* Value of the first header with this name (case-insensitive), or NULL. */
+const char *riak_headerlist_get(const riak_headerlist *l, const char *name);
+void riak_headerlist_clear(riak_headerlist *l);
+
+/* Fill the metadata fields of obj (everything except data/len) from
+ * headers. vclock, when not NULL, overrides X-Riak-Vclock. Returns 0 or -1
+ * on ENOMEM; on failure obj holds whatever was copied and must be freed. */
+int riak_object_from_headers(const riak_headerlist *h, const char *vclock, riak_object *obj);
+
 #endif /* RIAK_UTIL_H */
