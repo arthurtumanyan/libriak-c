@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: deb / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake dpkg-dev file libcurl4-openssl-dev libjson-c-dev
+      - name: Build packages
+        run: packaging/build-packages.sh DEB
+      - name: Install and smoke-test packages
+        run: |
+          sudo apt-get remove -y libcurl4-openssl-dev libjson-c-dev
+          sudo apt-get install -y ./dist/*.deb
+          packaging/smoke-test.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deb-${{ matrix.os }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  rpm:
+    name: rpm / ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["fedora:latest", "almalinux:10"]
+    steps:
+      - name: Install build dependencies
+        run: dnf -y install gcc cmake make rpm-build libcurl-devel json-c-devel pkgconf-pkg-config
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build packages
+        run: packaging/build-packages.sh RPM
+      - name: Install and smoke-test packages
+        run: |
+          dnf -y remove libcurl-devel json-c-devel
+          dnf -y install ./dist/*.rpm
+          packaging/smoke-test.sh
+      - id: name
+        run: echo "artifact=rpm-$(echo '${{ matrix.image }}' | tr ':/' '--')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    needs: [deb, rpm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check tag matches project version
+        run: |
+          version=$(sed -n 's/^project(libriak-c VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Source tarball and checksums
+        run: |
+          git archive --format=tar.gz --prefix="libriak-c-$VERSION/" -o "dist/libriak-c-$VERSION.tar.gz" "$GITHUB_REF_NAME"
+          cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "dist/*"
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## " v "( |$)" {on=1; next}
+            on && /^## / {exit}
+            on {print}' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "libriak-c $VERSION" --notes-file notes.md
