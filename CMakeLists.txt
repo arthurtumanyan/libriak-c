@@ -3,6 +3,7 @@ project(libriak-c VERSION 2.0.0 LANGUAGES C
         DESCRIPTION "C client for the Riak KV HTTP API")
 
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 option(RIAK_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
@@ -53,6 +54,8 @@ if(RIAK_COVERAGE)
 endif()
 
 set(RIAK_SOURCES
+  src/client.c
+  src/http.c
   src/parse.c
   src/util.c)
 
@@ -66,7 +69,40 @@ target_compile_definitions(riak_objects PRIVATE RIAK_BUILDING _POSIX_C_SOURCE=20
 target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c
                       PRIVATE $<BUILD_INTERFACE:riak_warnings>)
 
+add_library(riak SHARED $<TARGET_OBJECTS:riak_objects>)
+add_library(riak_static STATIC $<TARGET_OBJECTS:riak_objects>)
+foreach(t riak riak_static)
+  target_include_directories(${t} PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c
+                        $<BUILD_INTERFACE:riak_warnings>)
+  set_target_properties(${t} PROPERTIES OUTPUT_NAME riak-c)
+endforeach()
+target_compile_definitions(riak INTERFACE RIAK_SHARED)
+set_target_properties(riak PROPERTIES
+  VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+add_library(riak::riak ALIAS riak)
+add_library(riak::riak_static ALIAS riak_static)
+
+install(TARGETS riak riak_static EXPORT riakTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/riak DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT riakTargets NAMESPACE riak::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
+configure_package_config_file(cmake/libriak-c-config.cmake.in
+  ${PROJECT_BINARY_DIR}/libriak-c-config.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
+write_basic_package_version_file(${PROJECT_BINARY_DIR}/libriak-c-config-version.cmake
+  COMPATIBILITY SameMajorVersion)
+install(FILES ${PROJECT_BINARY_DIR}/libriak-c-config.cmake
+              ${PROJECT_BINARY_DIR}/libriak-c-config-version.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libriak-c)
+configure_file(cmake/libriak-c.pc.in ${PROJECT_BINARY_DIR}/libriak-c.pc @ONLY)
+install(FILES ${PROJECT_BINARY_DIR}/libriak-c.pc
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 if(RIAK_BUILD_TESTS)
   enable_testing()
