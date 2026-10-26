@@ -57,7 +57,7 @@ riak_status riak_type_list_buckets(riak_client *client, const char *type, riak_s
         return st;
     }
     riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->base_url) != 0 ||
+    if (riak_buf_append_str(&url, client->root) != 0 ||
         (type &&
          (riak_buf_append_str(&url, "types/") != 0 || riak_url_append_escaped(&url, type) != 0 ||
           riak_buf_append_str(&url, "/") != 0)) ||
@@ -243,9 +243,8 @@ riak_status riak_get_type_props(riak_client *client, const char *type, char **js
         return st;
     }
     riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->base_url) != 0 ||
-        riak_buf_append_str(&url, "types/") != 0 || riak_url_append_escaped(&url, type) != 0 ||
-        riak_buf_append_str(&url, "/props") != 0) {
+    if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "types/") != 0 ||
+        riak_url_append_escaped(&url, type) != 0 || riak_buf_append_str(&url, "/props") != 0) {
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }
@@ -260,8 +259,7 @@ riak_status riak_stats(riak_client *client, char **json) {
     }
     *json = NULL;
     riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->base_url) != 0 ||
-        riak_buf_append_str(&url, "stats") != 0) {
+    if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "stats") != 0) {
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }

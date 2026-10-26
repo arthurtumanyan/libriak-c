@@ -293,7 +293,7 @@ riak_status riak_search(riak_client *client, const char *index, const riak_searc
     }
     riak_buf url = {0};
     char num[16];
-    int rc = riak_buf_append_str(&url, client->base_url) ||
+    int rc = riak_buf_append_str(&url, client->root) ||
              riak_buf_append_str(&url, "search/query/") || riak_url_append_escaped(&url, index) ||
              riak_url_append_query(&url, "wt", "json") || riak_url_append_query(&url, "q", q->q) ||
              search_param(&url, "fq", q->filter) || search_param(&url, "sort", q->sort) ||
@@ -328,7 +328,7 @@ riak_status riak_search(riak_client *client, const char *index, const riak_searc
 
 static int search_admin_url(riak_buf *url, const riak_client *c, const char *what,
                             const char *name) {
-    return riak_buf_append_str(url, c->base_url) || riak_buf_append_str(url, "search/") ||
+    return riak_buf_append_str(url, c->root) || riak_buf_append_str(url, "search/") ||
            riak_buf_append_str(url, what) ||
            (name && (riak_buf_append_str(url, "/") || riak_url_append_escaped(url, name)));
 }
@@ -447,7 +447,7 @@ static riak_status mapred_request(riak_client *c, const char *job, bool chunked,
     if (c == NULL || job == NULL) {
         return RIAK_E_INVALID_ARG;
     }
-    if (riak_buf_append_str(url, c->base_url) || riak_buf_append_str(url, "mapred") ||
+    if (riak_buf_append_str(url, c->root) || riak_buf_append_str(url, "mapred") ||
         (chunked && riak_url_append_query(url, "chunked", "true"))) {
         return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
     }

@@ -7,9 +7,11 @@
 #include "internal.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define RIAK_DEFAULT_HOST "127.0.0.1"
 #define RIAK_DEFAULT_PORT 8098u
@@ -86,10 +88,29 @@ void riak_config_init(riak_config *cfg) {
     cfg->port = RIAK_DEFAULT_PORT;
     cfg->tls_verify = true;
     cfg->max_body_bytes = RIAK_DEFAULT_MAX_BODY;
+    cfg->max_retries = 2;
+    cfg->retry_base_ms = 50;
+    cfg->retry_max_ms = 2000;
+    cfg->fail_threshold = 3;
+    cfg->eject_ms = 5000;
 }
 
 static bool host_ok(const char *h) {
-    return *h != '\0' && strpbrk(h, "/?#@ \t\r\n") == NULL;
+    return h != NULL && *h != '\0' && strpbrk(h, "/?#@ \t\r\n") == NULL;
+}
+
+static riak_status add_node(riak_client *c, size_t i, const char *host, unsigned port) {
+    if (!host_ok(host) || port > 65535) {
+        return RIAK_E_INVALID_ARG;
+    }
+    riak_node_state *n = &c->nodes[i];
+    n->port = port ? port : RIAK_DEFAULT_PORT;
+    n->host = riak_strdup(host);
+    /* bracket bare IPv6 literals */
+    bool v6 = strchr(host, ':') != NULL && host[0] != '[';
+    n->base = riak_strprintf("%s://%s%s%s:%u", c->cfg.tls ? "https" : "http", v6 ? "[" : "", host,
+                             v6 ? "]" : "", n->port);
+    return n->host && n->base ? RIAK_OK : RIAK_E_NOMEM;
 }
 
 riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
@@ -103,10 +124,10 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
     if (cfg == NULL) {
         cfg = &defaults;
     }
-    const char *host = (cfg->host && *cfg->host) ? cfg->host : RIAK_DEFAULT_HOST;
-    unsigned port = cfg->port ? cfg->port : RIAK_DEFAULT_PORT;
-    if (!host_ok(host) || port > 65535 ||
-        (cfg->client_id && !riak_header_value_ok(cfg->client_id))) {
+    if ((cfg->client_id && !riak_header_value_ok(cfg->client_id)) ||
+        (cfg->n_nodes > 0 && cfg->nodes == NULL) || cfg->n_nodes > 1024 ||
+        (unsigned)cfg->balance > RIAK_BALANCE_FAILOVER || cfg->retry_base_ms < 0 ||
+        cfg->retry_max_ms < 0 || cfg->eject_ms < 0) {
         return RIAK_E_INVALID_ARG;
     }
 
@@ -115,26 +136,43 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
         return RIAK_E_NOMEM;
     }
     c->cfg = *cfg;
-    c->host = riak_strdup(host);
+    c->root = "/";
+    c->n_nodes = cfg->n_nodes ? cfg->n_nodes : 1;
+    c->nodes = calloc(c->n_nodes, sizeof *c->nodes);
     c->ca_file = riak_strdup(cfg->ca_file);
     c->client_id = riak_strdup(cfg->client_id);
-    /* bracket bare IPv6 literals */
-    bool v6 = strchr(host, ':') != NULL && host[0] != '[';
-    c->base_url = riak_strprintf("%s://%s%s%s:%u/", cfg->tls ? "https" : "http", v6 ? "[" : "",
-                                 host, v6 ? "]" : "", port);
     c->curl = curl_easy_init();
-    if (c->host == NULL || c->base_url == NULL || c->curl == NULL ||
-        (cfg->ca_file && c->ca_file == NULL) || (cfg->client_id && c->client_id == NULL)) {
+    riak_status st = RIAK_OK;
+    if (c->nodes == NULL || c->curl == NULL || (cfg->ca_file && c->ca_file == NULL) ||
+        (cfg->client_id && c->client_id == NULL)) {
+        st = RIAK_E_NOMEM;
+    } else if (cfg->n_nodes == 0) {
+        st = add_node(c, 0, (cfg->host && *cfg->host) ? cfg->host : RIAK_DEFAULT_HOST,
+                      cfg->port ? cfg->port : RIAK_DEFAULT_PORT);
+    } else {
+        for (size_t i = 0; st == RIAK_OK && i < cfg->n_nodes; i++) {
+            st = add_node(c, i, cfg->nodes[i].host, cfg->nodes[i].port);
+        }
+    }
+    if (st != RIAK_OK) {
         riak_client_free(c);
-        return RIAK_E_NOMEM;
+        return st;
     }
-    c->cfg.host = c->host;
-    c->cfg.port = port;
-    if (c->cfg.max_body_bytes == 0) {
-        c->cfg.max_body_bytes = RIAK_DEFAULT_MAX_BODY;
-    }
+    c->cfg.nodes = NULL; /* the caller's array is not kept */
+    c->cfg.host = c->nodes[0].host;
+    c->cfg.port = c->nodes[0].port;
     c->cfg.ca_file = c->ca_file;
     c->cfg.client_id = c->client_id;
+    if (c->cfg.max_body_bytes == 0) c->cfg.max_body_bytes = RIAK_DEFAULT_MAX_BODY;
+    if (c->cfg.retry_base_ms == 0) c->cfg.retry_base_ms = 50;
+    if (c->cfg.retry_max_ms == 0) c->cfg.retry_max_ms = 2000;
+    if (c->cfg.fail_threshold == 0) c->cfg.fail_threshold = 3;
+    if (c->cfg.eject_ms == 0) c->cfg.eject_ms = 5000;
+    /* seed the jitter generator; quality does not matter, only spread */
+    c->rng =
+        (unsigned long long)(uintptr_t)c ^ (unsigned long long)time(NULL) ^ 0x9E3779B97F4A7C15ULL;
+    long maxconn = c->n_nodes > 5 ? (long)c->n_nodes : 5L;
+    curl_easy_setopt(c->curl, CURLOPT_MAXCONNECTS, maxconn);
     *out = c;
     return RIAK_OK;
 }
@@ -146,11 +184,49 @@ void riak_client_free(riak_client *client) {
     if (client->curl) {
         curl_easy_cleanup(client->curl);
     }
-    free(client->base_url);
-    free(client->host);
+    for (size_t i = 0; client->nodes && i < client->n_nodes; i++) {
+        free(client->nodes[i].host);
+        free(client->nodes[i].base);
+    }
+    free(client->nodes);
     free(client->ca_file);
     free(client->client_id);
     free(client);
+}
+
+size_t riak_client_node_count(const riak_client *client) {
+    return client ? client->n_nodes : 0;
+}
+
+riak_status riak_client_node_info(const riak_client *client, size_t index, riak_node_info *info) {
+    if (client == NULL || info == NULL || index >= client->n_nodes) {
+        return RIAK_E_INVALID_ARG;
+    }
+    const riak_node_state *n = &client->nodes[index];
+    info->host = n->host;
+    info->port = n->port;
+    info->healthy = n->ejected_until_ms == 0 || riak_now_ms() >= n->ejected_until_ms;
+    info->consecutive_failures = n->consecutive_failures;
+    info->requests = n->requests;
+    info->failures = n->failures;
+    return RIAK_OK;
+}
+
+size_t riak_client_check_nodes(riak_client *client) {
+    if (client == NULL) {
+        return 0;
+    }
+    size_t healthy = 0;
+    for (size_t i = 0; i < client->n_nodes; i++) {
+        riak_request req = {.method = "GET", .url = "/ping", .pin = i + 1};
+        riak_response resp = {0};
+        riak_status st = riak_perform(client, &req, &resp);
+        if (st == RIAK_OK && resp.status == 200) {
+            healthy++;
+        }
+        riak_response_free(&resp);
+    }
+    return healthy;
 }
 
 riak_status riak_ping(riak_client *client) {
@@ -158,8 +234,7 @@ riak_status riak_ping(riak_client *client) {
         return RIAK_E_INVALID_ARG;
     }
     riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->base_url) != 0 ||
-        riak_buf_append_str(&url, "ping") != 0) {
+    if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "ping") != 0) {
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }

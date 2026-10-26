@@ -6,8 +6,14 @@ Usage: stub_riak.py <test-binary> [args...]
 Starts the server on a free port, runs the test binary with RIAK_TEST_PORT
 set, and exits with the binary's exit code.
 
+Three nodes are started (sharing one store, like a cluster); their ports are
+in RIAK_TEST_PORTS, and RIAK_TEST_PORT is the first one.
+
 Extra endpoints for assertions:
-  GET /_last  -> JSON {"method", "path", "headers"} of the previous request
+  GET /_last  -> JSON {"method", "path", "headers", "body"} of the previous request
+  GET /_mode?set=ok|503|close  -> make this node answer normally, with 503, or
+                                  by closing the connection without a reply
+  GET /_hits  -> number of requests this node received (resets it)
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
 vclock create siblings). Special buckets: "many" (1000 streamed keys),
@@ -168,6 +174,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         parts = [unquote(p) for p in url.path.strip("/").split("/")]
         query = parse_qs(url.query)
+        if not parts[0].startswith("_"):
+            self.server.hits += 1
+        if parts[0] != "_last" and parts[0].startswith("_"):
+            return "default", parts, query
         if parts != ["_last"]:
             with LOCK:
                 LAST.clear()
@@ -178,12 +188,32 @@ class Handler(BaseHTTPRequestHandler):
             btype, parts = parts[1], parts[2:]
         return btype, parts, query
 
+    def _failing(self):
+        """Apply this node's failure mode; True when the request was handled."""
+        mode = self.server.mode
+        if mode == "503":
+            self._body()
+            self._send(503, "<html>Service Unavailable</html>")
+            return True
+        if mode == "close":
+            self.close_connection = True
+            return True
+        return False
+
     # ---- GET ----------------------------------------------------------
     def do_GET(self):
         btype, parts, query = self._route()
         if parts == ["_last"]:
             with LOCK:
                 return self._json(200, LAST)
+        if parts == ["_mode"]:
+            self.server.mode = query.get("set", ["ok"])[0]
+            return self._send(204)
+        if parts == ["_hits"]:
+            hits, self.server.hits = self.server.hits, 0
+            return self._json(200, {"hits": hits})
+        if self._failing():
+            return None
         if parts == ["ping"]:
             return self._send(200, "OK", {"Content-Type": "text/plain"})
         if parts == ["stats"]:
@@ -469,6 +499,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         btype, parts, query = self._route()
+        if self._failing():
+            return None
         if len(parts) == 3 and parts[:2] == ["search", "index"]:
             spec = json.loads(self._body() or b"{}")
             SEARCH_INDEXES[parts[2]] = {"name": parts[2],
@@ -496,6 +528,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         btype, parts, query = self._route()
+        if self._failing():
+            return None
         if parts == ["mapred"]:
             return self._mapred(query)
         if len(parts) in (3, 4) and parts[0] == "buckets" and parts[2] == "datatypes":
@@ -516,6 +550,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         btype, parts, query = self._route()
+        if self._failing():
+            return None
         if len(parts) == 3 and parts[:2] == ["search", "index"]:
             existed = SEARCH_INDEXES.pop(parts[2], None) is not None
             return self._send(204 if existed else 404)
@@ -533,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    mode = "ok"
+    hits = 0
 
     def handle_error(self, request, client_address):
         # clients aborting a transfer (e.g. the body size limit) are expected
@@ -545,13 +583,16 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
-    server = Server(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    env = dict(os.environ, RIAK_TEST_PORT=str(server.server_address[1]))
+    servers = [Server(("127.0.0.1", 0), Handler) for _ in range(3)]
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    ports = [str(server.server_address[1]) for server in servers]
+    env = dict(os.environ, RIAK_TEST_PORT=ports[0], RIAK_TEST_PORTS=",".join(ports))
     try:
         return subprocess.call(sys.argv[1:], env=env)
     finally:
-        server.shutdown()
+        for server in servers:
+            server.shutdown()
 
 
 if __name__ == "__main__":

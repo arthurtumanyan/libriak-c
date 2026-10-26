@@ -28,6 +28,12 @@
   and grow-only sets. Updates are built with `riak_dt_op_*`; misuse and
   allocation failures are reported by `riak_dt_update()`. Removing an absent
   element without a context maps to `RIAK_E_PRECONDITION`.
+- Clusters: `riak_config.nodes` with round-robin or failover balancing,
+  retries with exponential backoff and jitter, and per-node ejection after
+  consecutive failures (circuit breaker). Only requests that are safe to repeat
+  are retried after reaching a node. `riak_client_check_nodes()`,
+  `riak_client_node_info()` and `riak_client_node_count()`; error messages name
+  the node.
 - `tests/docker`: Riak image with the leveldb backend and Search enabled for
   the live tests.
 - Debian and RPM packages via CPack (runtime and development components),

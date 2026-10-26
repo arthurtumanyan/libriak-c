@@ -75,6 +75,16 @@ enum { RIAK_Q_DEFAULT = 0, RIAK_Q_ONE = -1, RIAK_Q_QUORUM = -2, RIAK_Q_ALL = -3 
 typedef struct riak_client riak_client;
 
 typedef struct {
+    const char *host;
+    unsigned port; /* 0 = 8098 */
+} riak_node;
+
+typedef enum {
+    RIAK_BALANCE_ROUND_ROBIN = 0, /* spread requests over healthy nodes */
+    RIAK_BALANCE_FAILOVER         /* always prefer the first healthy node */
+} riak_balance;
+
+typedef struct {
     const char *host;        /* default "127.0.0.1" */
     unsigned port;           /* default 8098 */
     bool tls;                /* use https */
@@ -84,7 +94,31 @@ typedef struct {
     long timeout_ms;         /* 0 = no limit */
     const char *client_id;   /* sent as X-Riak-ClientId when set */
     size_t max_body_bytes;   /* response size limit; 0 = default (64 MiB) */
+
+    /* Cluster. With n_nodes > 0 the nodes replace host/port. */
+    const riak_node *nodes;
+    size_t n_nodes;
+    riak_balance balance;
+    /* Retries go to the next node with exponential backoff and jitter.
+     * Requests that never reached a node are always retried; GET, PUT and
+     * DELETE are also retried after a transport error or a 503. POST
+     * (counter increments, generated keys) and streams that already
+     * delivered data are not. */
+    unsigned max_retries;    /* default 2 */
+    long retry_base_ms;      /* first backoff; default 50 */
+    long retry_max_ms;       /* backoff cap; default 2000 */
+    unsigned fail_threshold; /* consecutive failures that eject a node; default 3 */
+    long eject_ms;           /* how long an ejected node is skipped; default 5000 */
 } riak_config;
+
+typedef struct {
+    const char *host;
+    unsigned port;
+    bool healthy; /* not currently ejected */
+    unsigned consecutive_failures;
+    unsigned long long requests; /* attempts sent to this node */
+    unsigned long long failures;
+} riak_node_info;
 
 typedef struct {
     const char *name;
@@ -159,6 +193,13 @@ RIAK_API void riak_client_free(riak_client *client);
 RIAK_API const char *riak_client_errmsg(const riak_client *client);
 /* HTTP status of the last request, 0 if none was received. */
 RIAK_API long riak_client_http_status(const riak_client *client);
+
+RIAK_API size_t riak_client_node_count(const riak_client *client);
+/* Pointers in *info stay valid for the client's lifetime. */
+RIAK_API riak_status riak_client_node_info(const riak_client *client, size_t index,
+                                           riak_node_info *info);
+/* Ping every node now, updating health; returns the number of healthy nodes. */
+RIAK_API size_t riak_client_check_nodes(riak_client *client);
 
 RIAK_API riak_status riak_ping(riak_client *client);
 

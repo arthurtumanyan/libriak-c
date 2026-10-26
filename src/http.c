@@ -11,9 +11,11 @@
 
 #include "internal.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define RIAK_USER_AGENT "libriak-c/2.0"
 
@@ -94,20 +96,30 @@ static riak_status map_curl_error(riak_client *c, CURLcode rc) {
     }
 }
 
-riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp) {
+/* What a failed attempt allows. */
+enum retry { RETRY_NONE, RETRY_ANY, RETRY_IDEMPOTENT };
+
+/* One attempt against one node. */
+static riak_status perform_once(riak_client *c, riak_node_state *node, const riak_request *req,
+                                riak_response *resp, enum retry *retry) {
     CURL *h = c->curl;
     transfer t = {.c = c, .req = req, .resp = resp};
     struct curl_slist *headers = req->headers;
     struct curl_slist *extra = NULL;
 
+    *retry = RETRY_NONE;
     memset(resp, 0, sizeof *resp);
     c->http_status = 0;
     c->curl_err[0] = '\0';
     riak_clear_error(c);
 
+    char *url = riak_strprintf("%s%s", node->base, req->url);
+    if (url == NULL) {
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
     curl_easy_reset(h);
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, c->curl_err);
-    curl_easy_setopt(h, CURLOPT_URL, req->url);
+    curl_easy_setopt(h, CURLOPT_URL, url);
     curl_easy_setopt(h, CURLOPT_USERAGENT, RIAK_USER_AGENT);
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
@@ -165,11 +177,14 @@ riak_status riak_perform(riak_client *c, const riak_request *req, riak_response 
     }
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, extra);
 
+    node->requests++;
     CURLcode rc = curl_easy_perform(h);
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &resp->status);
     c->http_status = resp->status;
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, NULL);
+    curl_easy_setopt(h, CURLOPT_URL, NULL);
     curl_slist_free_all(extra);
+    free(url);
 
     if (t.aborted) {
         riak_response_free(resp);
@@ -177,13 +192,138 @@ riak_status riak_perform(riak_client *c, const riak_request *req, riak_response 
     }
     if (rc != CURLE_OK) {
         riak_response_free(resp);
-        return map_curl_error(c, rc);
+        bool not_sent = rc == CURLE_COULDNT_CONNECT || rc == CURLE_COULDNT_RESOLVE_HOST ||
+                        rc == CURLE_COULDNT_RESOLVE_PROXY;
+        riak_status st = map_curl_error(c, rc);
+        if (not_sent) {
+            *retry = RETRY_ANY;
+        } else if (st == RIAK_E_TRANSPORT && (req->sink == NULL || t.received == 0)) {
+            *retry = RETRY_IDEMPOTENT; /* nothing was handed to a streaming callback yet */
+        }
+        return st;
+    }
+    if (resp->status == 503) {
+        *retry = RETRY_IDEMPOTENT; /* node overloaded or still starting */
     }
     return RIAK_OK;
 
 nomem:
     curl_slist_free_all(extra);
+    free(url);
     return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+}
+
+long long riak_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static bool node_usable(const riak_node_state *n, long long now) {
+    return n->ejected_until_ms == 0 || now >= n->ejected_until_ms;
+}
+
+/* Next node to try after `after` (SIZE_MAX: first attempt). */
+static size_t pick_node(riak_client *c, size_t after) {
+    size_t n = c->n_nodes;
+    long long now = riak_now_ms();
+    size_t start;
+    if (after != SIZE_MAX) {
+        start = (after + 1) % n;
+    } else if (c->cfg.balance == RIAK_BALANCE_ROUND_ROBIN) {
+        start = c->next_node++ % n;
+    } else {
+        start = 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        size_t k = (start + i) % n;
+        if (node_usable(&c->nodes[k], now)) {
+            return k;
+        }
+    }
+    /* every node is ejected: try the one that comes back first */
+    size_t best = start;
+    for (size_t k = 0; k < n; k++) {
+        if (c->nodes[k].ejected_until_ms < c->nodes[best].ejected_until_ms) {
+            best = k;
+        }
+    }
+    return best;
+}
+
+static void node_result(riak_client *c, riak_node_state *n, bool ok) {
+    if (ok) {
+        n->consecutive_failures = 0;
+        n->ejected_until_ms = 0;
+        return;
+    }
+    n->failures++;
+    if (++n->consecutive_failures >= c->cfg.fail_threshold) {
+        n->ejected_until_ms = riak_now_ms() + c->cfg.eject_ms;
+    }
+}
+
+static unsigned long long next_random(riak_client *c) {
+    /* xorshift64* */
+    c->rng ^= c->rng >> 12U;
+    c->rng ^= c->rng << 25U;
+    c->rng ^= c->rng >> 27U;
+    return c->rng * 2685821657736338717ULL;
+}
+
+/* "Equal jitter": half the exponential delay plus a random half. */
+static void backoff(riak_client *c, unsigned attempt) {
+    long long delay = c->cfg.retry_base_ms;
+    for (unsigned i = 0; i < attempt && delay < c->cfg.retry_max_ms; i++) {
+        delay *= 2;
+    }
+    if (delay > c->cfg.retry_max_ms) {
+        delay = c->cfg.retry_max_ms;
+    }
+    long long half = delay / 2;
+    long long ms =
+        half + (half > 0 ? (long long)(next_random(c) % (unsigned long long)(half + 1)) : 0);
+    struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0) {
+    }
+}
+
+static bool idempotent(const char *method) {
+    return strcmp(method, "GET") == 0 || strcmp(method, "PUT") == 0 ||
+           strcmp(method, "DELETE") == 0;
+}
+
+riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp) {
+    if (req->pin > 0) {
+        c->last_node = (req->pin - 1) % c->n_nodes;
+        riak_node_state *n = &c->nodes[c->last_node];
+        enum retry retry;
+        riak_status st = perform_once(c, n, req, resp, &retry);
+        node_result(c, n, st == RIAK_OK && resp->status != 503);
+        return st;
+    }
+    unsigned attempts = c->cfg.max_retries + 1;
+    size_t k = pick_node(c, SIZE_MAX);
+    for (unsigned attempt = 0;; attempt++) {
+        riak_node_state *n = &c->nodes[k];
+        c->last_node = k;
+        enum retry retry;
+        riak_status st = perform_once(c, n, req, resp, &retry);
+        bool failed = retry != RETRY_NONE;
+        node_result(c, n, !failed);
+        bool again = (retry == RETRY_ANY || (retry == RETRY_IDEMPOTENT && idempotent(req->method)));
+        if (!again || attempt + 1 >= attempts) {
+            if (st != RIAK_OK && c->n_nodes > 1) {
+                char detail[sizeof c->errmsg];
+                snprintf(detail, sizeof detail, "%s", c->errmsg);
+                riak_set_error(c, st, "%s:%u: %s", n->host, n->port, detail);
+            }
+            return st;
+        }
+        riak_response_free(resp);
+        backoff(c, attempt);
+        k = pick_node(c, k);
+    }
 }
 
 void riak_response_free(riak_response *resp) {
@@ -214,6 +354,11 @@ riak_status riak_http_error(riak_client *c, const riak_response *resp) {
         break;
     }
     int n = resp->body.len > 200 ? 200 : (int)resp->body.len;
+    if (c->n_nodes > 1) {
+        const riak_node_state *node = &c->nodes[c->last_node];
+        return riak_set_error(c, st, "%s:%u: HTTP %ld%s%.*s", node->host, node->port, resp->status,
+                              n ? ": " : "", n, n ? resp->body.data : "");
+    }
     return riak_set_error(c, st, "HTTP %ld%s%.*s", resp->status, n ? ": " : "", n,
                           n ? resp->body.data : "");
 }
@@ -236,7 +381,7 @@ riak_status riak_add_header(riak_client *c, struct curl_slist **list, const char
 
 int riak_url_bucket(riak_buf *b, const riak_client *c, const char *type, const char *bucket,
                     const char *suffix, const char *key) {
-    if (riak_buf_append_str(b, c->base_url) != 0) {
+    if (riak_buf_append_str(b, c->root) != 0) {
         return -1;
     }
     if (type && (riak_buf_append_str(b, "types/") != 0 || riak_url_append_escaped(b, type) != 0 ||
