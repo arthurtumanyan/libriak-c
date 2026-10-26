@@ -33,9 +33,10 @@ struct riak_client {
     char *host;
     char *ca_file;
     char *client_id;
+    char *username, *password; /* password is wiped on free */
+    char *cert_file, *key_file, *key_password;
     riak_config cfg; /* string members point at the copies above */
     long http_status;
-    char curl_err[CURL_ERROR_SIZE];
     char errmsg[512];
 };
 
@@ -85,6 +86,77 @@ riak_status riak_add_header(riak_client *c, struct curl_slist **list, const char
                             const char *name, const char *value);
 
 riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp);
+
+/* ---- operations split into prepare (build) and finish (interpret) ---- */
+
+/* A request ready to send; owns its URL, headers and optional body copy.
+ * The heap pointers inside req stay valid if the struct is copied. */
+typedef struct {
+    riak_buf url;
+    struct curl_slist *headers;
+    char *body;
+    riak_request req;
+} riak_prepared;
+
+void riak_prepared_free(riak_prepared *p);
+
+/* copy_body: keep a private copy of value (needed when the call returns
+ * before the request is sent, i.e. for async requests). */
+riak_status riak_kv_prepare_get(riak_client *c, const char *bucket, const char *key,
+                                const riak_opts *o, riak_prepared *p);
+riak_status riak_kv_finish_get(riak_client *c, const riak_opts *o, riak_response *resp,
+                               riak_object *out);
+riak_status riak_kv_prepare_put(riak_client *c, const char *bucket, const char *key,
+                                const void *value, size_t len, const riak_opts *o, bool copy_body,
+                                riak_prepared *p);
+riak_status riak_kv_finish_put(riak_client *c, bool generated_key, riak_response *resp,
+                               riak_object *out, char **created_key);
+riak_status riak_kv_prepare_delete(riak_client *c, const char *bucket, const char *key,
+                                   const riak_opts *o, riak_prepared *p);
+riak_status riak_kv_finish_delete(riak_client *c, riak_response *resp);
+riak_status riak_prepare_ping(riak_client *c, riak_prepared *p);
+riak_status riak_finish_ping(riak_client *c, riak_response *resp);
+
+/* ---- one attempt on one easy handle (shared by sync and async) ---- */
+
+enum riak_retry { RIAK_RETRY_NONE, RIAK_RETRY_ANY, RIAK_RETRY_IDEMPOTENT };
+
+typedef struct {
+    riak_client *c;
+    CURL *h;
+    const riak_request *req;
+    riak_response *resp;
+    size_t node;
+    unsigned attempt;
+    char *url;
+    struct curl_slist *extra;
+    size_t received;
+    riak_status abort_status;
+    const char *abort_msg;
+    bool aborted;
+    long long started_ms;
+    char curl_err[CURL_ERROR_SIZE];
+    char tls_alert[96];  /* first TLS alert received from the server */
+    bool cert_requested; /* the server asked for a client certificate */
+} riak_attempt;
+
+/* Configure h for req on the given node. On failure nothing needs freeing. */
+riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t node,
+                               unsigned attempt, const riak_request *req, riak_response *resp);
+/* Collect the outcome of a finished transfer: status, error message, node
+ * health, metrics and log; *retry says what a further attempt may do. */
+riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *retry);
+/* Whether another attempt is allowed after one that returned `retry`. */
+bool riak_retry_allowed(const riak_client *c, const riak_request *req, enum riak_retry retry,
+                        unsigned attempts_done);
+/* Next node (SIZE_MAX: first attempt of a request). */
+size_t riak_pick_node(riak_client *c, size_t after);
+/* Backoff before attempt number `attempt` + 1, in milliseconds. */
+long long riak_backoff_ms(riak_client *c, unsigned attempt);
+/* Prefix the current error message with the node of the last attempt. */
+void riak_error_add_node(riak_client *c, riak_status st);
+
+void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_response_free(riak_response *resp);
 /* Map an unexpected HTTP status to an error and record a message. */
 riak_status riak_http_error(riak_client *c, const riak_response *resp);

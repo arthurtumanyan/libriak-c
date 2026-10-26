@@ -11,7 +11,7 @@
 #include "riak/riak.h"
 
 static void test_strerror(void) {
-    for (int st = RIAK_OK; st <= RIAK_E_NOT_MODIFIED; st++) {
+    for (int st = RIAK_OK; st <= RIAK_E_CANCELLED; st++) {
         const char *msg = riak_strerror((riak_status)st);
         CHECK(msg != NULL && strcmp(msg, "unknown error") != 0);
     }

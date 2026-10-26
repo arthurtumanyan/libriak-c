@@ -66,8 +66,28 @@ typedef enum {
     RIAK_E_PRECONDITION, /* 412: conditional request failed */
     RIAK_E_HTTP,         /* any other unexpected HTTP status */
     RIAK_E_PARSE,        /* malformed response body */
-    RIAK_E_NOT_MODIFIED  /* 304: conditional get, object unchanged */
+    RIAK_E_NOT_MODIFIED, /* 304: conditional get, object unchanged */
+    RIAK_E_UNAUTHORIZED, /* 401/403: authentication or permission failure */
+    RIAK_E_CANCELLED     /* async request dropped by riak_async_free() */
 } riak_status;
+
+typedef enum { RIAK_LOG_DEBUG, RIAK_LOG_INFO, RIAK_LOG_WARN, RIAK_LOG_ERROR } riak_log_level;
+typedef void (*riak_log_fn)(riak_log_level level, const char *message, void *ctx);
+
+/* One HTTP attempt, reported after it completes. */
+typedef struct {
+    const char *method;
+    const char *path; /* request path and query, without scheme and host */
+    const char *host; /* node the attempt went to */
+    unsigned port;
+    unsigned attempt;   /* 0 for the first try, then 1, 2, ... */
+    riak_status status; /* RIAK_OK when a response arrived, whatever its HTTP code */
+    long http_status;   /* 0 if no response */
+    double duration_ms;
+    size_t bytes_received; /* response body */
+    bool will_retry;
+} riak_request_metrics;
+typedef void (*riak_metrics_fn)(const riak_request_metrics *m, void *ctx);
 
 /* Quorum values; positive numbers are passed through as-is. */
 enum { RIAK_Q_DEFAULT = 0, RIAK_Q_ONE = -1, RIAK_Q_QUORUM = -2, RIAK_Q_ALL = -3 };
@@ -109,6 +129,21 @@ typedef struct {
     long retry_max_ms;       /* backoff cap; default 2000 */
     unsigned fail_threshold; /* consecutive failures that eject a node; default 3 */
     long eject_ms;           /* how long an ejected node is skipped; default 5000 */
+
+    /* Riak security: HTTP Basic authentication (requires tls) and client
+     * certificates (PEM). */
+    const char *username;
+    const char *password;
+    const char *tls_cert_file;
+    const char *tls_key_file;
+    const char *tls_key_password;
+
+    /* Observability. Callbacks run on the thread that issues the request. */
+    riak_log_fn log_fn;
+    riak_log_level log_level; /* minimum level passed to log_fn; default WARN */
+    void *log_ctx;
+    riak_metrics_fn metrics_fn;
+    void *metrics_ctx;
 } riak_config;
 
 typedef struct {
@@ -401,6 +436,60 @@ RIAK_API riak_status riak_dt_update(riak_client *client, const char *type, const
                                     const char *key, const riak_dt_op *op, const char *context,
                                     const riak_dt_opts *opts, riak_datatype *out,
                                     char **created_key);
+
+/* ---- Asynchronous requests ------------------------------------------ */
+/* An async handle owns its own client (nodes, retries, hooks) and runs many
+ * requests concurrently on one thread. Callbacks run inside
+ * riak_async_run() / riak_async_on_socket() / riak_async_on_timeout(); they
+ * may submit further requests but must not call riak_async_free(). */
+
+typedef struct riak_async riak_async;
+
+typedef struct {
+    riak_status status;
+    long http_status;
+    const char *errmsg; /* valid during the callback */
+    riak_object object; /* get, and put with return_body */
+    char *created_key;  /* put with key == NULL */
+} riak_async_result;
+
+/* The callback may keep res->object / res->created_key by copying them and
+ * clearing the originals; whatever is left is freed when it returns. */
+typedef void (*riak_async_cb)(riak_async_result *res, void *ctx);
+
+RIAK_API riak_status riak_async_new(const riak_config *cfg, riak_async **out);
+/* Pending requests are cancelled: their callbacks get RIAK_E_CANCELLED. */
+RIAK_API void riak_async_free(riak_async *a);
+/* The underlying client, e.g. for riak_client_node_info(). */
+RIAK_API riak_client *riak_async_client(riak_async *a);
+RIAK_API size_t riak_async_pending(const riak_async *a);
+
+/* Submission validates the arguments and copies everything it needs; an
+ * error is returned directly and the callback is not called. */
+RIAK_API riak_status riak_async_ping(riak_async *a, riak_async_cb cb, void *ctx);
+RIAK_API riak_status riak_async_get(riak_async *a, const char *bucket, const char *key,
+                                    const riak_opts *opts, riak_async_cb cb, void *ctx);
+RIAK_API riak_status riak_async_put(riak_async *a, const char *bucket, const char *key,
+                                    const void *value, size_t len, const riak_opts *opts,
+                                    riak_async_cb cb, void *ctx);
+RIAK_API riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key,
+                                       const riak_opts *opts, riak_async_cb cb, void *ctx);
+
+/* Built-in loop: run until nothing is pending or timeout_ms passes
+ * (-1 = no limit). Returns the number of requests still pending. */
+RIAK_API size_t riak_async_run(riak_async *a, long timeout_ms);
+
+/* Integration with an external event loop (libuv, libevent, epoll ...):
+ * socket_fn is told which events to watch on a descriptor (RIAK_POLL_REMOVE:
+ * stop watching), timer_fn when to call riak_async_on_timeout() (-1: no
+ * timer). Use either this or riak_async_run(), not both. */
+enum { RIAK_POLL_IN = 1, RIAK_POLL_OUT = 2, RIAK_POLL_REMOVE = 4 };
+typedef void (*riak_socket_fn)(int fd, int events, void *ctx);
+typedef void (*riak_timer_fn)(long timeout_ms, void *ctx);
+RIAK_API riak_status riak_async_set_loop(riak_async *a, riak_socket_fn socket_fn,
+                                         riak_timer_fn timer_fn, void *ctx);
+RIAK_API void riak_async_on_socket(riak_async *a, int fd, int events);
+RIAK_API void riak_async_on_timeout(riak_async *a);
 
 RIAK_API void riak_object_free(riak_object *obj);
 RIAK_API void riak_object_set_free(riak_object_set *set);

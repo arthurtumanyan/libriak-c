@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Minimal in-memory emulation of the Riak KV HTTP API for integration tests.
 
-Usage: stub_riak.py <test-binary> [args...]
+Usage: stub_riak.py [--tls CERT_DIR] <test-binary> [args...]
 Starts the server on a free port, runs the test binary with RIAK_TEST_PORT
 set, and exits with the binary's exit code.
 
@@ -11,8 +11,12 @@ in RIAK_TEST_PORTS, and RIAK_TEST_PORT is the first one.
 
 Extra endpoints for assertions:
   GET /_last  -> JSON {"method", "path", "headers", "body"} of the previous request
-  GET /_mode?set=ok|503|close  -> make this node answer normally, with 503, or
-                                  by closing the connection without a reply
+  GET /_mode?set=ok|503|close|slow  -> answer normally, with 503, by closing
+                                       the connection, or after 300 ms
+
+With --tls (certificates from tests/gen_certs.sh) every node speaks HTTPS:
+node 0 requires Basic auth "riak:s3cret", node 1 requires a client
+certificate signed by the test CA, node 2 requires neither.
   GET /_hits  -> number of requests this node received (resets it)
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
@@ -22,9 +26,12 @@ vclock create siblings). Special buckets: "many" (1000 streamed keys),
 (POST without Location).
 """
 
+import base64
 import itertools
 import json
 import os
+import ssl
+import time
 import subprocess
 import sys
 import threading
@@ -190,7 +197,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _failing(self):
         """Apply this node's failure mode; True when the request was handled."""
+        if self.server.auth:
+            sent = self.headers.get("Authorization", "")
+            want = "Basic " + base64.b64encode(self.server.auth.encode()).decode()
+            if sent != want:
+                self._body()
+                self._send(401, "unauthorized\n", {"WWW-Authenticate": 'Basic realm="riak"'})
+                return True
         mode = self.server.mode
+        if mode == "slow":
+            time.sleep(0.3)
+            return False
         if mode == "503":
             self._body()
             self._send(503, "<html>Service Unavailable</html>")
@@ -571,10 +588,11 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     mode = "ok"
     hits = 0
+    auth = None
 
     def handle_error(self, request, client_address):
         # clients aborting a transfer (e.g. the body size limit) are expected
-        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ssl.SSLError)):
             return
         super().handle_error(request, client_address)
 
@@ -583,13 +601,26 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
+    args = sys.argv[1:]
+    certs = None
+    if args[:1] == ["--tls"]:
+        certs, args = args[1], args[2:]
     servers = [Server(("127.0.0.1", 0), Handler) for _ in range(3)]
+    if certs:
+        for i, server in enumerate(servers):
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(os.path.join(certs, "server.pem"), os.path.join(certs, "server.key"))
+            if i == 1:
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                ctx.load_verify_locations(os.path.join(certs, "ca.pem"))
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        servers[0].auth = "riak:s3cret"
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     ports = [str(server.server_address[1]) for server in servers]
     env = dict(os.environ, RIAK_TEST_PORT=ports[0], RIAK_TEST_PORTS=",".join(ports))
     try:
-        return subprocess.call(sys.argv[1:], env=env)
+        return subprocess.call(args, env=env)
     finally:
         for server in servers:
             server.shutdown()

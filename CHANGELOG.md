@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- libcurl 7.66 or newer is required (`curl_multi_poll`).
+
 ### Added
 - Bucket types: `riak_opts.bucket_type` for object calls and `riak_type_*`
   variants of the bucket calls; `riak_get_type_props()`.
@@ -34,6 +37,18 @@
   are retried after reaching a node. `riak_client_check_nodes()`,
   `riak_client_node_info()` and `riak_client_node_count()`; error messages name
   the node.
+- Asynchronous API on curl's multi interface: `riak_async_get/put/delete/ping`
+  with callbacks, a built-in loop (`riak_async_run()`) and hooks for external
+  event loops (`riak_async_set_loop()`, `riak_async_on_socket()`,
+  `riak_async_on_timeout()`). Failover and retries work as in the blocking API,
+  with backoff as timers. Pending requests are cancelled on free.
+- Riak security: HTTP Basic authentication (refused without TLS), client
+  certificates with optional key passphrase; `RIAK_E_UNAUTHORIZED` for 401/403;
+  a server that requires a client certificate is reported as `RIAK_E_TLS`.
+- Observability: `log_fn` with levels and `metrics_fn` called once per HTTP
+  attempt (node, attempt, outcome, status, duration, bytes, retry).
+- Secrets are copied by the client and wiped when it is freed.
+- `examples/async.c`.
 - `tests/docker`: Riak image with the leveldb backend and Search enabled for
   the live tests.
 - Debian and RPM packages via CPack (runtime and development components),

@@ -92,26 +92,42 @@ static riak_status fill_object(riak_client *c, riak_response *resp, riak_object 
     return RIAK_OK;
 }
 
-/* Issue the GET for riak_get / riak_get_siblings. */
-static riak_status fetch(riak_client *c, const char *bucket, const char *key, const riak_opts *o,
-                         enum op op, riak_response *resp) {
+void riak_prepared_free(riak_prepared *p) {
+    riak_buf_free(&p->url);
+    curl_slist_free_all(p->headers);
+    free(p->body);
+    memset(p, 0, sizeof *p);
+}
+
+static riak_status prepare_fetch(riak_client *c, const char *bucket, const char *key,
+                                 const riak_opts *o, enum op op, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
     riak_status st;
     if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
         (st = riak_check_name(c, key, "key")) != RIAK_OK ||
         (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
         return st;
     }
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
-    if (riak_url_bucket(&url, c, o->bucket_type, bucket, "keys", key) != 0 ||
-        add_quorums(&url, o, true, false, false) != 0 || add_timeout(&url, o) != 0) {
+    if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
+        add_quorums(&p->url, o, true, false, false) != 0 || add_timeout(&p->url, o) != 0) {
         st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
-    } else if ((st = object_headers(c, o, op, &headers)) == RIAK_OK) {
-        riak_request req = {.method = "GET", .url = url.data, .headers = headers};
-        st = riak_perform(c, &req, resp);
+    } else {
+        st = object_headers(c, o, op, &p->headers);
     }
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "GET", .url = p->url.data, .headers = p->headers};
+    return RIAK_OK;
+}
+
+/* Prepare and run a request, then free what prepare allocated. */
+static riak_status run(riak_client *c, riak_status st, riak_prepared *p, riak_response *resp) {
+    if (st == RIAK_OK) {
+        st = riak_perform(c, &p->req, resp);
+    }
+    riak_prepared_free(p);
     return st;
 }
 
@@ -173,7 +189,10 @@ riak_status riak_get_siblings(riak_client *client, const char *bucket, const cha
     }
     memset(out, 0, sizeof *out);
     riak_response resp = {0};
-    riak_status st = fetch(client, bucket, key, opts ? opts : &no_opts, OP_GET_SIBLINGS, &resp);
+    riak_prepared p;
+    riak_status st =
+        prepare_fetch(client, bucket, key, opts ? opts : &no_opts, OP_GET_SIBLINGS, &p);
+    st = run(client, st, &p, &resp);
     if (st == RIAK_OK) {
         st = (resp.status == 200 || resp.status == 300) ? to_sibling_set(client, &resp, out)
                                                         : riak_http_error(client, &resp);
@@ -185,6 +204,34 @@ riak_status riak_get_siblings(riak_client *client, const char *bucket, const cha
     return st;
 }
 
+riak_status riak_kv_prepare_get(riak_client *c, const char *bucket, const char *key,
+                                const riak_opts *o, riak_prepared *p) {
+    return prepare_fetch(c, bucket, key, o, o->resolver ? OP_GET_SIBLINGS : OP_GET, p);
+}
+
+riak_status riak_kv_finish_get(riak_client *c, const riak_opts *o, riak_response *resp,
+                               riak_object *out) {
+    if (resp->status == 200) {
+        return fill_object(c, resp, out);
+    }
+    if (resp->status != 300 || o->resolver == NULL) {
+        return riak_http_error(c, resp);
+    }
+    riak_object_set set = {0};
+    riak_status st = to_sibling_set(c, resp, &set);
+    if (st == RIAK_OK) {
+        size_t pick = o->resolver(set.items, set.count, o->resolver_ctx);
+        if (pick < set.count) {
+            *out = set.items[pick];
+            memset(&set.items[pick], 0, sizeof set.items[pick]);
+        } else {
+            st = riak_set_error(c, RIAK_E_SIBLINGS, "resolver declined %zu siblings", set.count);
+        }
+    }
+    riak_object_set_free(&set);
+    return st;
+}
+
 riak_status riak_get(riak_client *client, const char *bucket, const char *key,
                      const riak_opts *opts, riak_object *out) {
     if (client == NULL || out == NULL) {
@@ -193,30 +240,11 @@ riak_status riak_get(riak_client *client, const char *bucket, const char *key,
     memset(out, 0, sizeof *out);
     const riak_opts *o = opts ? opts : &no_opts;
     riak_response resp = {0};
-    riak_status st = fetch(client, bucket, key, o, o->resolver ? OP_GET_SIBLINGS : OP_GET, &resp);
-    if (st != RIAK_OK) {
-        goto done;
+    riak_prepared p;
+    riak_status st = run(client, riak_kv_prepare_get(client, bucket, key, o, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_kv_finish_get(client, o, &resp, out);
     }
-    if (resp.status == 200) {
-        st = fill_object(client, &resp, out);
-    } else if (resp.status == 300 && o->resolver) {
-        riak_object_set set = {0};
-        st = to_sibling_set(client, &resp, &set);
-        if (st == RIAK_OK) {
-            size_t pick = o->resolver(set.items, set.count, o->resolver_ctx);
-            if (pick < set.count) {
-                *out = set.items[pick];
-                memset(&set.items[pick], 0, sizeof set.items[pick]);
-            } else {
-                st = riak_set_error(client, RIAK_E_SIBLINGS, "resolver declined %zu siblings",
-                                    set.count);
-            }
-        }
-        riak_object_set_free(&set);
-    } else {
-        st = riak_http_error(client, &resp);
-    }
-done:
     riak_response_free(&resp);
     return st;
 }
@@ -232,68 +260,110 @@ static char *key_from_location(const char *loc) {
     return riak_url_unescape(k, len);
 }
 
+riak_status riak_kv_prepare_put(riak_client *c, const char *bucket, const char *key,
+                                const void *value, size_t len, const riak_opts *o, bool copy_body,
+                                riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    if (value == NULL && len > 0) {
+        return riak_set_error(c, RIAK_E_INVALID_ARG, "value is NULL");
+    }
+    riak_status st;
+    if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
+        (key != NULL && (st = riak_check_name(c, key, "key")) != RIAK_OK) ||
+        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
+        return st;
+    }
+    if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
+        add_quorums(&p->url, o, false, true, false) != 0 || add_timeout(&p->url, o) != 0 ||
+        (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0)) {
+        st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
+    } else if ((st = object_headers(c, o, OP_PUT, &p->headers)) == RIAK_OK && copy_body) {
+        p->body = malloc(len ? len : 1);
+        if (p->body == NULL) {
+            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+        } else if (len) {
+            memcpy(p->body, value, len);
+        }
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = key ? "PUT" : "POST",
+                            .url = p->url.data,
+                            .headers = p->headers,
+                            .body = copy_body ? p->body : (value ? value : ""),
+                            .body_len = len};
+    return RIAK_OK;
+}
+
+riak_status riak_kv_finish_put(riak_client *c, bool generated_key, riak_response *resp,
+                               riak_object *out, char **created_key) {
+    if (resp->status != 200 && resp->status != 201 && resp->status != 204) {
+        return riak_http_error(c, resp);
+    }
+    if (created_key && generated_key) {
+        const char *location = riak_headerlist_get(&resp->headers, "Location");
+        *created_key = location ? key_from_location(location) : NULL;
+        if (*created_key == NULL) {
+            return riak_set_error(c, RIAK_E_PARSE, "no usable Location header");
+        }
+    }
+    if (out && resp->status != 204) {
+        riak_status st = fill_object(c, resp, out);
+        if (st != RIAK_OK && created_key) {
+            free(*created_key);
+            *created_key = NULL;
+        }
+        return st;
+    }
+    return RIAK_OK;
+}
+
 riak_status riak_put(riak_client *client, const char *bucket, const char *key, const void *value,
                      size_t len, const riak_opts *opts, riak_object *out, char **created_key) {
+    if (out) memset(out, 0, sizeof *out);
+    if (created_key) *created_key = NULL;
     if (client == NULL || (value == NULL && len > 0)) {
         return RIAK_E_INVALID_ARG;
     }
-    if (out) memset(out, 0, sizeof *out);
-    if (created_key) *created_key = NULL;
-    riak_status st;
-    if ((st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
-        return st;
-    }
     const riak_opts *o = opts ? opts : &no_opts;
-    if ((key != NULL && (st = riak_check_name(client, key, "key")) != RIAK_OK) ||
-        (o->bucket_type &&
-         (st = riak_check_name(client, o->bucket_type, "bucket type")) != RIAK_OK)) {
-        return st;
-    }
-
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
     riak_response resp = {0};
-    if (riak_url_bucket(&url, client, o->bucket_type, bucket, "keys", key) != 0 ||
-        add_quorums(&url, o, false, true, false) != 0 || add_timeout(&url, o) != 0 ||
-        (o->return_body && riak_url_append_query(&url, "returnbody", "true") != 0)) {
-        st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
-        goto done;
-    }
-    if ((st = object_headers(client, o, OP_PUT, &headers)) != RIAK_OK) {
-        goto done;
-    }
-    riak_request req = {.method = key ? "PUT" : "POST",
-                        .url = url.data,
-                        .headers = headers,
-                        .body = value ? value : "",
-                        .body_len = len};
-    if ((st = riak_perform(client, &req, &resp)) != RIAK_OK) {
-        goto done;
-    }
-    if (resp.status != 200 && resp.status != 201 && resp.status != 204) {
-        st = riak_http_error(client, &resp);
-        goto done;
-    }
-    if (created_key && key == NULL) {
-        const char *location = riak_headerlist_get(&resp.headers, "Location");
-        *created_key = location ? key_from_location(location) : NULL;
-        if (*created_key == NULL) {
-            st = riak_set_error(client, RIAK_E_PARSE, "no usable Location header");
-            goto done;
-        }
-    }
-    if (out && resp.status != 204) {
-        st = fill_object(client, &resp, out);
-    }
-done:
-    if (st != RIAK_OK && created_key) {
-        free(*created_key);
-        *created_key = NULL;
+    riak_prepared p;
+    riak_status st =
+        run(client, riak_kv_prepare_put(client, bucket, key, value, len, o, false, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_kv_finish_put(client, key == NULL, &resp, out, created_key);
     }
     riak_response_free(&resp);
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
     return st;
+}
+
+riak_status riak_kv_prepare_delete(riak_client *c, const char *bucket, const char *key,
+                                   const riak_opts *o, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st;
+    if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
+        (st = riak_check_name(c, key, "key")) != RIAK_OK ||
+        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
+        return st;
+    }
+    if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
+        add_quorums(&p->url, o, true, true, true) != 0 || add_timeout(&p->url, o) != 0) {
+        st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
+    } else {
+        st = object_headers(c, o, OP_DELETE, &p->headers);
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "DELETE", .url = p->url.data, .headers = p->headers};
+    return RIAK_OK;
+}
+
+riak_status riak_kv_finish_delete(riak_client *c, riak_response *resp) {
+    return resp->status == 204 || resp->status == 404 ? RIAK_OK : riak_http_error(c, resp);
 }
 
 riak_status riak_delete(riak_client *client, const char *bucket, const char *key,
@@ -301,38 +371,13 @@ riak_status riak_delete(riak_client *client, const char *bucket, const char *key
     if (client == NULL) {
         return RIAK_E_INVALID_ARG;
     }
-    riak_status st;
-    if ((st = riak_check_name(client, bucket, "bucket")) != RIAK_OK ||
-        (st = riak_check_name(client, key, "key")) != RIAK_OK) {
-        return st;
-    }
-    const riak_opts *o = opts ? opts : &no_opts;
-    if (o->bucket_type &&
-        (st = riak_check_name(client, o->bucket_type, "bucket type")) != RIAK_OK) {
-        return st;
-    }
-
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
     riak_response resp = {0};
-    if (riak_url_bucket(&url, client, o->bucket_type, bucket, "keys", key) != 0 ||
-        add_quorums(&url, o, true, true, true) != 0 || add_timeout(&url, o) != 0) {
-        st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
-        goto done;
+    riak_prepared p;
+    riak_status st = run(
+        client, riak_kv_prepare_delete(client, bucket, key, opts ? opts : &no_opts, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_kv_finish_delete(client, &resp);
     }
-    if ((st = object_headers(client, o, OP_DELETE, &headers)) != RIAK_OK) {
-        goto done;
-    }
-    riak_request req = {.method = "DELETE", .url = url.data, .headers = headers};
-    if ((st = riak_perform(client, &req, &resp)) != RIAK_OK) {
-        goto done;
-    }
-    if (resp.status != 204 && resp.status != 404) {
-        st = riak_http_error(client, &resp);
-    }
-done:
     riak_response_free(&resp);
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
     return st;
 }

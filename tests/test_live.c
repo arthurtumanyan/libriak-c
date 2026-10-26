@@ -497,6 +497,50 @@ static void test_failover(void) {
     riak_client_free(c);
 }
 
+typedef struct {
+    int ok, done;
+    riak_status last;
+} async_tally;
+
+static void async_count(riak_async_result *res, void *ctx) {
+    async_tally *t = ctx;
+    t->done++;
+    t->ok += res->status == RIAK_OK;
+    t->last = res->status;
+}
+
+static void test_async(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.host = live_host;
+    cfg.port = live_port;
+    cfg.timeout_ms = 30000;
+    riak_async *a = NULL;
+    CHECK_EQ_INT(riak_async_new(&cfg, &a), RIAK_OK);
+    async_tally put = {0}, get = {0}, del = {0};
+    char keys[50][16];
+    riak_opts o = {.content_type = "text/plain"};
+    for (int i = 0; i < 50; i++) {
+        snprintf(keys[i], sizeof keys[i], "async-%d", i);
+        CHECK_EQ_INT(
+            riak_async_put(a, bucket, keys[i], keys[i], strlen(keys[i]), &o, async_count, &put),
+            RIAK_OK);
+    }
+    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(put.ok, 50);
+    for (int i = 0; i < 50; i++) {
+        CHECK_EQ_INT(riak_async_get(a, bucket, keys[i], NULL, async_count, &get), RIAK_OK);
+    }
+    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(get.ok, 50);
+    for (int i = 0; i < 50; i++) {
+        CHECK_EQ_INT(riak_async_delete(a, bucket, keys[i], NULL, async_count, &del), RIAK_OK);
+    }
+    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(del.ok, 50);
+    riak_async_free(a);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -543,6 +587,7 @@ int main(void) {
     RUN(test_mapreduce);
     RUN(test_datatypes);
     RUN(test_failover);
+    RUN(test_async);
 
     riak_client_free(rc);
     riak_global_cleanup();
