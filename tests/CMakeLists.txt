@@ -1,4 +1,4 @@
-foreach(name util parse)
+foreach(name util parse api)
   add_executable(test_${name} test_${name}.c)
   target_link_libraries(test_${name} PRIVATE riak_objects riak_warnings)
   add_test(NAME ${name} COMMAND test_${name})
