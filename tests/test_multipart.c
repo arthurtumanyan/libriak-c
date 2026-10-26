@@ -3,6 +3,7 @@
  SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,11 +117,88 @@ static void test_object_from_part(void) {
     riak_parts_free(parts, n);
 }
 
+typedef struct {
+    size_t n;
+    char bodies[8][64];
+} seen_parts;
+
+static bool remember(void *ctx, riak_part *part, riak_status *err) {
+    (void)err;
+    seen_parts *s = ctx;
+    if (s->n < 8) {
+        snprintf(s->bodies[s->n], sizeof s->bodies[0], "%s", part->body);
+    }
+    s->n++;
+    return true;
+}
+
+static void test_stream_matches_batch(void) {
+    /* feed in every chunk size: the parts must equal the one-shot parse */
+    size_t len = sizeof riak_body - 1;
+    for (size_t step = 1; step <= len; step++) {
+        seen_parts seen = {0};
+        riak_mpstream *s = riak_mpstream_new("B", 0, remember, &seen);
+        CHECK(s != NULL);
+        riak_status st = RIAK_OK;
+        for (size_t off = 0; st == RIAK_OK && off < len; off += step) {
+            st = riak_mpstream_feed(s, riak_body + off, len - off < step ? len - off : step);
+        }
+        CHECK_EQ_INT(st, RIAK_OK);
+        CHECK_EQ_INT(riak_mpstream_finish(s), RIAK_OK);
+        CHECK_EQ_INT(seen.n, 3);
+        CHECK_EQ_STR(seen.bodies[0], "first");
+        CHECK_EQ_STR(seen.bodies[2], "no headers\r\n");
+        riak_mpstream_free(s);
+    }
+}
+
+static bool stop_after_one(void *ctx, riak_part *part, riak_status *err) {
+    (void)part;
+    (void)err;
+    (*(size_t *)ctx)++;
+    return false;
+}
+
+static void test_stream_limits_and_stop(void) {
+    /* a part larger than max_part fails the feed */
+    riak_mpstream *s = riak_mpstream_new("B", 8, NULL, NULL);
+    const char big[] = "--B\r\n\r\n0123456789abcdef";
+    CHECK_EQ_INT(riak_mpstream_feed(s, big, sizeof big - 1), RIAK_E_HTTP);
+    riak_mpstream_free(s);
+
+    /* the callback can stop parsing */
+    size_t calls = 0;
+    s = riak_mpstream_new("B", 0, stop_after_one, &calls);
+    CHECK_EQ_INT(riak_mpstream_feed(s, riak_body, sizeof riak_body - 1), RIAK_E_PARSE);
+    CHECK_EQ_INT(calls, 1);
+    riak_mpstream_free(s);
+
+    /* a preamble longer than the delimiter, split across feeds */
+    seen_parts seen = {0};
+    s = riak_mpstream_new("B", 0, remember, &seen);
+    const char *pre = "lots of preamble text -";
+    const char *rest = "-B is not it\r\n--B\r\n\r\nx\r\n--B--";
+    CHECK_EQ_INT(riak_mpstream_feed(s, pre, strlen(pre)), RIAK_OK);
+    CHECK_EQ_INT(riak_mpstream_feed(s, rest, strlen(rest)), RIAK_OK);
+    CHECK_EQ_INT(riak_mpstream_finish(s), RIAK_OK);
+    CHECK_EQ_INT(seen.n, 1);
+    CHECK_EQ_STR(seen.bodies[0], "x");
+    riak_mpstream_free(s);
+
+    CHECK(riak_mpstream_new("", 0, NULL, NULL) == NULL);
+    CHECK(riak_mpstream_new(NULL, 0, NULL, NULL) == NULL);
+    char *b = riak_multipart_boundary("multipart/mixed;boundary=DXmffoAWkavejCOV020OyUCJib");
+    CHECK_EQ_STR(b, "DXmffoAWkavejCOV020OyUCJib"); /* Riak's 2i/mapred form, no space */
+    free(b);
+}
+
 int main(void) {
     RUN(test_boundary);
     RUN(test_parse_riak_shape);
     RUN(test_parse_binary_and_preamble);
     RUN(test_parse_errors);
     RUN(test_object_from_part);
+    RUN(test_stream_matches_batch);
+    RUN(test_stream_limits_and_stop);
     return CHECK_DONE();
 }

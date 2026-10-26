@@ -17,6 +17,21 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
+static bool any_visit(const char *key, const char *term, void *ctx) {
+    (void)term;
+    (*(size_t *)ctx) += strlen(key) > 0;
+    return true;
+}
+
+static bool count_part(void *ctx, riak_part *part, riak_status *err) {
+    (void)err;
+    if (part->body[part->len] != '\0') {
+        abort();
+    }
+    (*(size_t *)ctx)++;
+    return true;
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     const char *s = (const char *)data;
 
@@ -66,6 +81,55 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
                 riak_object_free(&obj);
             }
             riak_parts_free(parts, n);
+        }
+        free(boundary);
+        free(ctype);
+    }
+
+    /* 2i pages, Search responses and MapReduce chunks */
+    size_t visits = 0;
+    char *cont = NULL;
+    bool stopped;
+    (void)riak_parse_index_json(s, size, any_visit, &visits, &cont, &stopped);
+    free(cont);
+    riak_search_result sr = {0};
+    (void)riak_parse_search(s, size, &sr);
+    riak_search_result_free(&sr);
+    unsigned phase;
+    char *mr = NULL;
+    if (riak_parse_mapred_chunk(s, size, &phase, &mr) == RIAK_OK && mr == NULL) {
+        abort();
+    }
+    free(mr);
+
+    /* streamed multipart in odd chunks must agree with the one-shot parse */
+    if (nl != NULL) {
+        char *ctype = riak_strndup(s, (size_t)(nl - s));
+        char *boundary = ctype ? riak_multipart_boundary(ctype) : NULL;
+        if (boundary) {
+            const char *body = nl + 1;
+            size_t blen = size - (size_t)(nl - s) - 1;
+            riak_part *parts;
+            size_t n_batch = 0, n_stream = 0;
+            riak_status batch = riak_multipart_parse(boundary, body, blen, &parts, &n_batch);
+            if (batch == RIAK_OK) {
+                riak_parts_free(parts, n_batch);
+            }
+            riak_mpstream *ms = riak_mpstream_new(boundary, 0, count_part, &n_stream);
+            if (ms) {
+                riak_status st = RIAK_OK;
+                for (size_t off = 0; st == RIAK_OK && off < blen; off += step) {
+                    st = riak_mpstream_feed(ms, body + off, blen - off < step ? blen - off : step);
+                }
+                if (st == RIAK_OK) {
+                    st = riak_mpstream_finish(ms);
+                }
+                if ((st == RIAK_OK) != (batch == RIAK_OK) ||
+                    (st == RIAK_OK && n_stream != n_batch)) {
+                    abort();
+                }
+                riak_mpstream_free(ms);
+            }
         }
         free(boundary);
         free(ctype);

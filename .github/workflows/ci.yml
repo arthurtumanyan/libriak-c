@@ -65,36 +65,38 @@ jobs:
   live:
     name: live Riak node
     runs-on: ubuntu-24.04
-    services:
-      riak:
-        image: basho/riak-kv:latest
-        ports: ["8098:8098"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Start Riak (leveldb backend, Search enabled)
+        run: |
+          docker build -t libriak-riak tests/docker
+          docker run -d --name riak -p 8098:8098 libriak-riak
       - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON && cmake --build build -j
-      - name: Wait for Riak
+      - name: Wait for Riak and create an allow_mult bucket type
         run: |
           for _ in $(seq 1 90); do
             curl -sf http://127.0.0.1:8098/ping && break
             sleep 2
           done
-          docker exec "${{ job.services.riak.id }}" riak-admin wait-for-service riak_kv
-      - name: Create allow_mult bucket type
-        run: |
-          id="${{ job.services.riak.id }}"
-          docker exec "$id" riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
+          docker exec riak riak-admin wait-for-service riak_kv
+          docker exec riak riak-admin wait-for-service yokozuna
+          docker exec riak riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
           for _ in $(seq 1 30); do
-            docker exec "$id" riak-admin bucket-type activate libriak_multi && break
+            docker exec riak riak-admin bucket-type activate libriak_multi && break
             sleep 2
           done
       - name: Live tests
         env:
           RIAK_TEST_URL: http://127.0.0.1:8098
           RIAK_TEST_TYPE: libriak_multi
+          RIAK_TEST_FEATURES: 2i,search
         run: ctest --test-dir build --output-on-failure -R live
+      - name: Riak logs
+        if: failure()
+        run: docker logs riak | tail -100
 
   coverage:
     runs-on: ubuntu-24.04

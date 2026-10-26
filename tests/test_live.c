@@ -9,7 +9,11 @@
    riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
    riak-admin bucket-type activate libriak_multi
    RIAK_TEST_TYPE=libriak_multi
+ Secondary index and Search tests need a node built from tests/docker
+ (leveldb backend, search = on) and RIAK_TEST_FEATURES=2i,search.
  */
+
+#define _POSIX_C_SOURCE 200809L /* nanosleep */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +25,19 @@
 
 static riak_client *rc;
 static char bucket[64];
-static const char *multi_type; /* bucket type with allow_mult, from RIAK_TEST_TYPE */
+static const char *multi_type;    /* bucket type with allow_mult, from RIAK_TEST_TYPE */
+static const char *features = ""; /* RIAK_TEST_FEATURES, e.g. "2i,search" */
+
+static bool has_feature(const char *f) {
+    const char *p = strstr(features, f);
+    size_t n = strlen(f);
+    return p && (p == features || p[-1] == ',') && (p[n] == '\0' || p[n] == ',');
+}
+
+static void sleep_ms(long ms) {
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
 
 static void test_ping(void) {
     CHECK_EQ_INT(riak_ping(rc), RIAK_OK);
@@ -163,6 +179,179 @@ static void test_types_and_siblings(void) {
     CHECK_EQ_INT(riak_delete(rc, bucket, "s", &o), RIAK_OK);
 }
 
+static bool count_key(const char *key, const char *term, void *ctx) {
+    (void)key;
+    (void)term;
+    (*(size_t *)ctx)++;
+    return true;
+}
+
+static void test_secondary_indexes(void) {
+    if (!has_feature("2i")) {
+        fprintf(stderr, "2i not in RIAK_TEST_FEATURES; skipping\n");
+        return;
+    }
+    /* a fresh bucket: $bucket would also list tombstones of other tests */
+    char b2i[80];
+    snprintf(b2i, sizeof b2i, "%s-2i", bucket);
+    for (int i = 0; i < 5; i++) {
+        char key[8], age[8], name[8];
+        snprintf(key, sizeof key, "p%d", i);
+        snprintf(age, sizeof age, "%d", 20 + i);
+        snprintf(name, sizeof name, "n%d", i);
+        riak_kv_pair idx[] = {{"age_int", age}, {"name_bin", name}};
+        riak_opts o = {.content_type = "text/plain", .indexes = idx, .n_indexes = 2};
+        CHECK_EQ_INT(riak_put(rc, b2i, key, "x", 1, &o, NULL, NULL), RIAK_OK);
+    }
+    riak_index_result r;
+    riak_index_query exact = {.index = "age_int", .value = "22"};
+    CHECK_EQ_INT(riak_index_query_run(rc, b2i, &exact, &r), RIAK_OK);
+    CHECK(r.count == 1 && strcmp(r.keys[0], "p2") == 0);
+    riak_index_result_free(&r);
+
+    riak_index_query range = {.index = "name_bin",
+                              .range_min = "n1",
+                              .range_max = "n3",
+                              .return_terms = true,
+                              .max_results = 2};
+    CHECK_EQ_INT(riak_index_query_run(rc, b2i, &range, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 2);
+    CHECK(r.continuation != NULL);
+    if (r.count == 2 && r.terms) {
+        CHECK_EQ_STR(r.terms[0], "n1");
+        CHECK_EQ_STR(r.keys[0], "p1");
+    }
+    range.continuation = r.continuation;
+    riak_index_result page2;
+    CHECK_EQ_INT(riak_index_query_run(rc, b2i, &range, &page2), RIAK_OK);
+    CHECK(page2.count == 1 && strcmp(page2.keys[0], "p3") == 0);
+    riak_index_result_free(&page2);
+    riak_index_result_free(&r);
+
+    size_t n = 0;
+    riak_index_query all = {.index = "$key", .range_min = "p0", .range_max = "p9"};
+    CHECK_EQ_INT(riak_index_query_stream(rc, b2i, &all, count_key, &n, NULL), RIAK_OK);
+    CHECK_EQ_INT(n, 5);
+    riak_index_query bkt = {.index = "$bucket", .value = b2i};
+    CHECK_EQ_INT(riak_index_query_run(rc, b2i, &bkt, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 5);
+    riak_index_result_free(&r);
+    for (int i = 0; i < 5; i++) {
+        char key[8];
+        snprintf(key, sizeof key, "p%d", i);
+        riak_delete(rc, b2i, key, NULL);
+    }
+}
+
+static void test_search(void) {
+    if (!has_feature("search")) {
+        fprintf(stderr, "search not in RIAK_TEST_FEATURES; skipping\n");
+        return;
+    }
+    char index[80];
+    snprintf(index, sizeof index, "%s_idx", bucket);
+    for (char *p = index; *p; p++) {
+        if (*p == '-') *p = '_';
+    }
+    CHECK_EQ_INT(riak_search_index_create(rc, index, NULL, 0), RIAK_OK);
+    char *json = NULL;
+    /* index creation is asynchronous: wait until it is visible */
+    riak_status st = RIAK_E_NOT_FOUND;
+    for (int i = 0; i < 60 && st != RIAK_OK; i++) {
+        st = riak_search_index_get(rc, index, &json);
+        if (st != RIAK_OK) sleep_ms(500);
+    }
+    CHECK_EQ_INT(st, RIAK_OK);
+    CHECK(json && strstr(json, "_yz_default"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_search_index_list(rc, &json), RIAK_OK);
+    CHECK(json && strstr(json, index));
+    riak_free(json);
+    /* the Solr core starts after the index is visible; wait until it answers */
+    riak_search_query probe = {.q = "*:*", .rows = 1};
+    riak_search_result res = {0};
+    st = RIAK_E_HTTP;
+    for (int i = 0; i < 60 && st != RIAK_OK; i++) {
+        st = riak_search(rc, index, &probe, &res);
+        riak_search_result_free(&res);
+        if (st != RIAK_OK) sleep_ms(500);
+    }
+    CHECK_EQ_INT(st, RIAK_OK);
+    CHECK_EQ_INT(riak_search_schema_get(rc, "_yz_default", &json), RIAK_OK);
+    CHECK(json && strstr(json, "<schema"));
+    riak_free(json);
+
+    char props[160];
+    snprintf(props, sizeof props, "{\"props\":{\"search_index\":\"%s\"}}", index);
+    CHECK_EQ_INT(riak_set_bucket_props(rc, bucket, props), RIAK_OK);
+    riak_opts o = {.content_type = "application/json"};
+    const char *alice = "{\"name_s\":\"alice\",\"age_i\":30}";
+    const char *bob = "{\"name_s\":\"bob\",\"age_i\":40}";
+    CHECK_EQ_INT(riak_put(rc, bucket, "u1", alice, strlen(alice), &o, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, bucket, "u2", bob, strlen(bob), &o, NULL, NULL), RIAK_OK);
+    riak_search_query q = {.q = "name_s:alice"};
+    /* documents become searchable after Solr's soft commit (~1 s) */
+    for (int i = 0; i < 30; i++) {
+        riak_search_result_free(&res);
+        st = riak_search(rc, index, &q, &res);
+        if (st != RIAK_OK || res.num_found > 0) break;
+        sleep_ms(500);
+    }
+    CHECK_EQ_INT(st, RIAK_OK);
+    CHECK_EQ_INT(res.num_found, 1);
+    if (res.count == 1) {
+        CHECK_EQ_STR(res.docs[0].key, "u1");
+        CHECK_EQ_STR(res.docs[0].bucket, bucket);
+    }
+    CHECK(res.raw != NULL);
+    riak_search_result_free(&res);
+
+    riak_search_query sorted = {.q = "age_i:[1 TO 100]", .sort = "age_i desc", .rows = 1};
+    CHECK_EQ_INT(riak_search(rc, index, &sorted, &res), RIAK_OK);
+    CHECK(res.count == 1 && res.num_found == 2 && strcmp(res.docs[0].key, "u2") == 0);
+    riak_search_result_free(&res);
+
+    riak_delete(rc, bucket, "u1", NULL);
+    riak_delete(rc, bucket, "u2", NULL);
+    CHECK_EQ_INT(riak_reset_bucket_props(rc, bucket), RIAK_OK);
+    CHECK_EQ_INT(riak_search_index_delete(rc, index), RIAK_OK);
+}
+
+static bool collect_phase(unsigned phase, const char *data, void *ctx) {
+    size_t *seen = ctx;
+    if (phase == 1 && strcmp(data, "[2]") == 0) {
+        seen[1]++;
+    } else if (phase == 0) {
+        seen[0]++;
+    }
+    return true;
+}
+
+static void test_mapreduce(void) {
+    riak_opts o = {.content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, bucket, "m1", "va", 2, &o, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, bucket, "m2", "vb", 2, &o, NULL, NULL), RIAK_OK);
+    char job[512];
+    snprintf(job, sizeof job,
+             "{\"inputs\":[[\"%s\",\"m1\"],[\"%s\",\"m2\"]],\"query\":["
+             "{\"map\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+             "\"function\":\"map_object_value\",\"keep\":true}},"
+             "{\"reduce\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+             "\"function\":\"reduce_count_inputs\",\"keep\":true}}]}",
+             bucket, bucket);
+    char *result = NULL;
+    CHECK_EQ_INT(riak_mapred(rc, job, &result), RIAK_OK);
+    CHECK(result && strstr(result, "2"));
+    riak_free(result);
+    size_t seen[2] = {0, 0};
+    CHECK_EQ_INT(riak_mapred_stream(rc, job, collect_phase, seen), RIAK_OK);
+    CHECK(seen[0] >= 1);
+    CHECK_EQ_INT(seen[1], 1);
+    CHECK_EQ_INT(riak_mapred(rc, "{\"inputs\":", &result), RIAK_E_HTTP);
+    riak_delete(rc, bucket, "m1", NULL);
+    riak_delete(rc, bucket, "m2", NULL);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -175,6 +364,9 @@ int main(void) {
     if (sscanf(url, "%7[^:]://%255[^:/]:%u", scheme, host, &port) < 2) {
         fprintf(stderr, "cannot parse RIAK_TEST_URL=%s\n", url);
         return 1;
+    }
+    if (getenv("RIAK_TEST_FEATURES")) {
+        features = getenv("RIAK_TEST_FEATURES");
     }
     multi_type = getenv("RIAK_TEST_TYPE");
     if (multi_type && *multi_type == '\0') {
@@ -199,6 +391,9 @@ int main(void) {
     RUN(test_bucket_props);
     RUN(test_conditional_and_stats);
     RUN(test_types_and_siblings);
+    RUN(test_secondary_indexes);
+    RUN(test_search);
+    RUN(test_mapreduce);
 
     riak_client_free(rc);
     riak_global_cleanup();

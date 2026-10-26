@@ -432,6 +432,240 @@ static void test_server_timeout_and_stats(void) {
     CHECK_EQ_INT(riak_stats(NULL, &json), RIAK_E_INVALID_ARG);
 }
 
+typedef struct {
+    size_t n;
+    size_t stop_at;
+    char last_key[32];
+    char last_term[32];
+} index_seen;
+
+static bool on_index(const char *key, const char *term, void *ctx) {
+    index_seen *s = ctx;
+    s->n++;
+    snprintf(s->last_key, sizeof s->last_key, "%s", key);
+    snprintf(s->last_term, sizeof s->last_term, "%s", term ? term : "-");
+    return s->stop_at == 0 || s->n < s->stop_at;
+}
+
+static void test_secondary_indexes(void) {
+    for (int i = 0; i < 5; i++) {
+        char key[8], age[8];
+        snprintf(key, sizeof key, "p%d", i);
+        snprintf(age, sizeof age, "%d", 20 + i * 5);
+        riak_kv_pair idx[] = {{"age_int", age}, {"group_bin", i % 2 ? "odd" : "even"}};
+        riak_opts o = {.indexes = idx, .n_indexes = 2};
+        CHECK_EQ_INT(riak_put(rc, "people", key, "x", 1, &o, NULL, NULL), RIAK_OK);
+    }
+    riak_index_result r;
+    riak_index_query exact = {.index = "group_bin", .value = "odd"};
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &exact, &r), RIAK_OK);
+    CHECK(r.count == 2 && r.terms == NULL && r.keys[2] == NULL && r.continuation == NULL);
+    riak_index_result_free(&r);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/buckets/people/index/group_bin/odd");
+    json_object_put(last);
+
+    /* integer range with terms, paged two at a time */
+    riak_index_query range = {.index = "age_int",
+                              .range_min = "21",
+                              .range_max = "40",
+                              .return_terms = true,
+                              .max_results = 2,
+                              .server_timeout_ms = 900};
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &range, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 2);
+    if (r.count == 2 && r.terms) {
+        CHECK_EQ_STR(r.keys[0], "p1");
+        CHECK_EQ_STR(r.terms[0], "25");
+        CHECK(r.terms[2] == NULL);
+    }
+    CHECK(r.continuation != NULL);
+    last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"),
+                 "/buckets/people/index/age_int/21/40?max_results=2&return_terms=true&timeout=900");
+    json_object_put(last);
+    riak_index_query next = range;
+    next.continuation = r.continuation;
+    riak_index_result r2;
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &next, &r2), RIAK_OK);
+    /* ages 25..40 match p1..p4: the second page is p3, p4 and the last one */
+    CHECK(r2.count == 2 && strcmp(r2.keys[0], "p3") == 0 && strcmp(r2.keys[1], "p4") == 0);
+    CHECK(r2.continuation == NULL);
+    riak_index_result_free(&r2);
+    riak_index_result_free(&r);
+
+    /* streaming, including the continuation and an early stop */
+    index_seen seen = {0};
+    char *cont = NULL;
+    CHECK_EQ_INT(riak_index_query_stream(rc, "people", &range, on_index, &seen, &cont), RIAK_OK);
+    CHECK_EQ_INT(seen.n, 2);
+    CHECK_EQ_STR(seen.last_term, "30");
+    CHECK(cont != NULL);
+    riak_free(cont);
+    memset(&seen, 0, sizeof seen);
+    riak_index_query keys = {.index = "$key", .range_min = "p0", .range_max = "p9"};
+    seen.stop_at = 3;
+    CHECK_EQ_INT(riak_index_query_stream(rc, "people", &keys, on_index, &seen, NULL), RIAK_OK);
+    CHECK_EQ_INT(seen.n, 3);
+    CHECK_EQ_STR(seen.last_key, "p2");
+    CHECK_EQ_INT(riak_ping(rc), RIAK_OK); /* the client is usable after an aborted stream */
+
+    riak_index_query bkt = {.index = "$bucket", .value = "people"};
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &bkt, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 5);
+    riak_index_result_free(&r);
+
+    riak_index_query typed = {.index = "x_bin", .value = "v", .bucket_type = "t1"};
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &typed, &r), RIAK_OK);
+    CHECK(r.count == 0 && r.keys != NULL && r.keys[0] == NULL);
+    riak_index_result_free(&r);
+    last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/types/t1/buckets/people/index/x_bin/v");
+    json_object_put(last);
+
+    riak_index_query both = {.index = "a_bin", .value = "x", .range_min = "a", .range_max = "b"};
+    riak_index_query none = {.index = "a_bin"};
+    riak_index_query half = {.index = "a_bin", .range_min = "a"};
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &both, &r), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &none, &r), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", &half, &r), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_index_query_run(rc, "people", NULL, &r), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_index_query_stream(rc, "people", &exact, NULL, NULL, NULL),
+                 RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_index_query_run(rc, "unavailable", &exact, &r), RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_index_query_stream(rc, "unavailable", &exact, on_index, &seen, &cont),
+                 RIAK_E_HTTP);
+    CHECK(cont == NULL);
+}
+
+static void test_search(void) {
+    CHECK_EQ_INT(riak_search_index_create(rc, "users_idx", "_yz_default", 2), RIAK_OK);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "method"), "PUT");
+    CHECK_EQ_STR(jstr(last, "path"), "/search/index/users_idx");
+    json_object_put(last);
+    CHECK_EQ_INT(riak_search_index_create(rc, "plain_idx", NULL, 0), RIAK_OK);
+    CHECK_EQ_INT(riak_search_index_create(rc, "bad", "x\"y", 0), RIAK_E_INVALID_ARG);
+
+    char *json = NULL;
+    CHECK_EQ_INT(riak_search_index_get(rc, "users_idx", &json), RIAK_OK);
+    CHECK(json && strstr(json, "\"n_val\": 2"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_search_index_list(rc, &json), RIAK_OK);
+    CHECK(json && json[0] == '[' && strstr(json, "plain_idx"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_search_index_get(rc, "missing", &json), RIAK_E_NOT_FOUND);
+
+    CHECK_EQ_INT(riak_search_schema_put(rc, "mine", "<schema name=\"mine\"/>"), RIAK_OK);
+    CHECK_EQ_INT(riak_search_schema_get(rc, "mine", &json), RIAK_OK);
+    CHECK_EQ_STR(json, "<schema name=\"mine\"/>");
+    riak_free(json);
+
+    CHECK_EQ_INT(riak_set_bucket_props(rc, "users", "{\"props\":{\"search_index\":\"users_idx\"}}"),
+                 RIAK_OK);
+    riak_opts o = {.content_type = "application/json"};
+    const char *docs[] = {"{\"name_s\":\"alice\",\"age_i\":30,\"tags_ss\":[\"a\",\"b\"]}",
+                          "{\"name_s\":\"bob\",\"age_i\":40}"};
+    CHECK_EQ_INT(riak_put(rc, "users", "u1", docs[0], strlen(docs[0]), &o, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, "users", "u2", docs[1], strlen(docs[1]), &o, NULL, NULL), RIAK_OK);
+
+    riak_search_query q = {.q = "name_s:alice"};
+    riak_search_result res;
+    CHECK_EQ_INT(riak_search(rc, "users_idx", &q, &res), RIAK_OK);
+    CHECK_EQ_INT(res.num_found, 1);
+    if (res.count == 1) {
+        CHECK_EQ_STR(res.docs[0].key, "u1");
+        CHECK_EQ_STR(res.docs[0].bucket, "users");
+        CHECK_EQ_STR(res.docs[0].bucket_type, "default");
+        size_t tags = 0;
+        for (size_t i = 0; i < res.docs[0].n_fields; i++) {
+            tags += strcmp(res.docs[0].fields[i].name, "tags_ss") == 0;
+        }
+        CHECK_EQ_INT(tags, 2);
+    }
+    CHECK(res.raw && strstr(res.raw, "numFound"));
+    riak_search_result_free(&res);
+
+    riak_search_query all = {.q = "*:*",
+                             .sort = "age_i desc",
+                             .rows = 1,
+                             .start = 0,
+                             .filter = "age_i:[1 TO 99]",
+                             .fields = "name_s,age_i",
+                             .default_field = "name_s",
+                             .op = "AND"};
+    CHECK_EQ_INT(riak_search(rc, "users_idx", &all, &res), RIAK_OK);
+    CHECK(res.num_found == 2 && res.count == 1 && strcmp(res.docs[0].key, "u2") == 0);
+    riak_search_result_free(&res);
+    last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"),
+                 "/search/query/users_idx?wt=json&q=%2A%3A%2A&fq=age_i%3A%5B1%20TO%2099%5D"
+                 "&sort=age_i%20desc&fl=name_s%2Cage_i&df=name_s&q.op=AND&rows=1");
+    json_object_put(last);
+
+    CHECK_EQ_INT(riak_search(rc, "missing", &q, &res), RIAK_E_NOT_FOUND);
+    riak_search_query empty = {0};
+    CHECK_EQ_INT(riak_search(rc, "users_idx", &empty, &res), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_search(rc, "users_idx", NULL, &res), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_search_index_delete(rc, "plain_idx"), RIAK_OK);
+    CHECK_EQ_INT(riak_search_index_delete(rc, "plain_idx"), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_search_index_delete(rc, ""), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_search_schema_put(rc, "mine", NULL), RIAK_E_INVALID_ARG);
+}
+
+static bool on_phase(unsigned phase, const char *data, void *ctx) {
+    size_t *count = ctx;
+    count[phase < 2 ? phase : 2]++;
+    if (phase == 1) {
+        CHECK_EQ_STR(data, "[2]");
+    }
+    return count[0] < 100;
+}
+
+static bool stop_now(unsigned phase, const char *data, void *ctx) {
+    (void)phase;
+    (void)data;
+    (*(size_t *)ctx)++;
+    return false;
+}
+
+static void test_mapreduce(void) {
+    CHECK_EQ_INT(riak_put(rc, "mr", "a", "\"va\"", 4, NULL, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, "mr", "b", "\"vb\"", 4, NULL, NULL, NULL), RIAK_OK);
+    const char *job = "{\"inputs\":[[\"mr\",\"a\"],[\"mr\",\"b\"]],\"query\":["
+                      "{\"map\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+                      "\"function\":\"map_object_value\"}},"
+                      "{\"reduce\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+                      "\"function\":\"reduce_count_inputs\"}}]}";
+    char *result = NULL;
+    CHECK_EQ_INT(riak_mapred(rc, job, &result), RIAK_OK);
+    CHECK_EQ_STR(result, "[2]");
+    riak_free(result);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "method"), "POST");
+    CHECK_EQ_STR(last_header(last, "Content-Type"), "application/json");
+    json_object_put(last);
+
+    size_t count[3] = {0, 0, 0};
+    CHECK_EQ_INT(riak_mapred_stream(rc, job, on_phase, count), RIAK_OK);
+    CHECK_EQ_INT(count[0], 2);
+    CHECK_EQ_INT(count[1], 1);
+    last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/mapred?chunked=true");
+    json_object_put(last);
+
+    size_t calls = 0;
+    CHECK_EQ_INT(riak_mapred_stream(rc, job, stop_now, &calls), RIAK_OK);
+    CHECK_EQ_INT(calls, 1);
+
+    CHECK_EQ_INT(riak_mapred(rc, "{\"inputs\":", &result), RIAK_E_HTTP);
+    CHECK(result == NULL);
+    CHECK_EQ_INT(riak_mapred(rc, NULL, &result), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_mapred(rc, job, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_mapred_stream(rc, job, NULL, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_mapred_stream(NULL, job, stop_now, &calls), RIAK_E_INVALID_ARG);
+}
+
 static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
@@ -483,6 +717,9 @@ int main(void) {
     RUN(test_siblings);
     RUN(test_conditional);
     RUN(test_server_timeout_and_stats);
+    RUN(test_secondary_indexes);
+    RUN(test_search);
+    RUN(test_mapreduce);
     RUN(test_client_id_header);
 
     riak_client_free(rc);

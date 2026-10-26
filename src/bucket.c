@@ -19,7 +19,7 @@ static riak_status check_type(riak_client *c, const char *type) {
     return type ? riak_check_name(c, type, "bucket type") : RIAK_OK;
 }
 
-riak_status riak_get_json(riak_client *c, const char *url, char **json) {
+riak_status riak_get_body(riak_client *c, const char *url, int kind, char **body) {
     riak_request req = {.method = "GET", .url = url};
     riak_response resp = {0};
     riak_status st = riak_perform(c, &req, &resp);
@@ -29,10 +29,16 @@ riak_status riak_get_json(riak_client *c, const char *url, char **json) {
     if (resp.status != 200) {
         st = riak_http_error(c, &resp);
     } else {
-        json_object *obj = json_tokener_parse(resp.body.data ? resp.body.data : "");
-        if (obj == NULL || !json_object_is_type(obj, json_type_object)) {
-            st = riak_set_error(c, RIAK_E_PARSE, "response is not a JSON object");
-        } else if ((*json = riak_buf_steal(&resp.body, NULL)) == NULL) {
+        json_object *obj = NULL;
+        if (kind != RIAK_BODY_RAW) {
+            obj = json_tokener_parse(resp.body.data ? resp.body.data : "");
+            enum json_type want = kind == RIAK_BODY_JSON_ARRAY ? json_type_array : json_type_object;
+            if (obj == NULL || !json_object_is_type(obj, want)) {
+                st = riak_set_error(c, RIAK_E_PARSE, "response is not a JSON %s",
+                                    kind == RIAK_BODY_JSON_ARRAY ? "array" : "object");
+            }
+        }
+        if (st == RIAK_OK && (*body = riak_buf_steal(&resp.body, NULL)) == NULL) {
             st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
         }
         json_object_put(obj);
@@ -176,7 +182,7 @@ riak_status riak_type_get_bucket_props(riak_client *client, const char *type, co
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }
-    st = riak_get_json(client, url.data, json);
+    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, json);
     riak_buf_free(&url);
     return st;
 }
@@ -243,7 +249,7 @@ riak_status riak_get_type_props(riak_client *client, const char *type, char **js
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }
-    st = riak_get_json(client, url.data, json);
+    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, json);
     riak_buf_free(&url);
     return st;
 }
@@ -259,7 +265,7 @@ riak_status riak_stats(riak_client *client, char **json) {
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }
-    riak_status st = riak_get_json(client, url.data, json);
+    riak_status st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, json);
     riak_buf_free(&url);
     return st;
 }

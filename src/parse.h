@@ -9,6 +9,7 @@
 #ifndef RIAK_PARSE_H
 #define RIAK_PARSE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "riak/riak.h"
@@ -26,5 +27,19 @@ riak_status riak_keystream_feed(riak_keystream *ks, const char *data, size_t len
 /* Move the collected keys into out; fails if the input ended mid-object. */
 riak_status riak_keystream_finish(riak_keystream *ks, riak_strlist *out);
 void riak_keystream_free(riak_keystream *ks);
+
+/* One page (or streamed chunk) of a 2i response: {"keys":[...]} or
+ * {"results":[{"<term>":"<key>"},...]}, optionally with "continuation".
+ * visit() returns false to stop (the call then returns RIAK_OK with
+ * *stopped set). *continuation is replaced when the page carries one. */
+typedef bool (*riak_index_visit_fn)(const char *key, const char *term, void *ctx);
+riak_status riak_parse_index_json(const char *json, size_t len, riak_index_visit_fn visit,
+                                  void *ctx, char **continuation, bool *stopped);
+
+/* Solr JSON response (wt=json) into a riak_search_result; raw is not set. */
+riak_status riak_parse_search(const char *json, size_t len, riak_search_result *out);
+
+/* One MapReduce chunk {"phase":N,"data":<json>}; *data is newly allocated. */
+riak_status riak_parse_mapred_chunk(const char *json, size_t len, unsigned *phase, char **data);
 
 #endif /* RIAK_PARSE_H */

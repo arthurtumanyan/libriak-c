@@ -13,6 +13,18 @@
 - `riak_object` now carries user metadata, secondary index entries, links and
   a tombstone flag.
 - `riak_opts.server_timeout_ms` (Riak `timeout` parameter) and `riak_stats()`.
+- Secondary index queries: exact and range matches, `$key`/`$bucket`,
+  `return_terms`, `term_regex`, pagination with continuations
+  (`riak_index_query_run()`) and streamed results through a callback
+  (`riak_index_query_stream()`).
+- Riak Search: `riak_search()` with filter, sort, field list, paging and
+  parsed documents; index and schema administration.
+- MapReduce: `riak_mapred()` and streamed phase results via
+  `riak_mapred_stream()`.
+- Streamed responses are parsed incrementally; a callback can stop a stream
+  early, which aborts the transfer.
+- `tests/docker`: Riak image with the leveldb backend and Search enabled for
+  the live tests.
 - Debian and RPM packages via CPack (runtime and development components),
   `packaging/build-packages.sh` and a package smoke test.
 - Release workflow: builds and install-tests packages on Ubuntu 22.04/24.04,
