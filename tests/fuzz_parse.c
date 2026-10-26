@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "multipart.h"
 #include "parse.h"
 #include "util.h"
 
@@ -46,6 +47,29 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
 
     free(riak_url_unescape(s, size));
+
+    /* multipart: boundary from the first line, body from the rest */
+    const char *nl = memchr(s, '\n', size);
+    if (nl != NULL) {
+        char *ctype = riak_strndup(s, (size_t)(nl - s));
+        char *boundary = ctype ? riak_multipart_boundary(ctype) : NULL;
+        riak_part *parts;
+        size_t n;
+        if (boundary && riak_multipart_parse(boundary, nl + 1, size - (size_t)(nl - s) - 1, &parts,
+                                             &n) == RIAK_OK) {
+            for (size_t i = 0; i < n; i++) {
+                riak_object obj = {0};
+                if (parts[i].body[parts[i].len] != '\0' ||
+                    riak_object_from_headers(&parts[i].headers, NULL, &obj) != 0) {
+                    abort();
+                }
+                riak_object_free(&obj);
+            }
+            riak_parts_free(parts, n);
+        }
+        free(boundary);
+        free(ctype);
+    }
 
     /* escaping then unescaping must round-trip */
     char *z = riak_strndup(s, size);

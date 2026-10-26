@@ -64,7 +64,8 @@ typedef enum {
     RIAK_E_SIBLINGS,     /* 300: the object has siblings */
     RIAK_E_PRECONDITION, /* 412: conditional request failed */
     RIAK_E_HTTP,         /* any other unexpected HTTP status */
-    RIAK_E_PARSE         /* malformed response body */
+    RIAK_E_PARSE,        /* malformed response body */
+    RIAK_E_NOT_MODIFIED  /* 304: conditional get, object unchanged */
 } riak_status;
 
 /* Quorum values; positive numbers are passed through as-is. */
@@ -90,6 +91,37 @@ typedef struct {
 } riak_kv_pair;
 
 typedef struct {
+    char *name;
+    char *value;
+} riak_header;
+
+typedef struct {
+    char *data; /* NUL-terminated for convenience; len excludes it */
+    size_t len;
+    char *content_type;
+    char *vclock;
+    char *etag;
+    char *last_modified;
+    bool deleted;      /* tombstone sibling (X-Riak-Deleted) */
+    riak_header *meta; /* user metadata, names without "X-Riak-Meta-" */
+    size_t n_meta;
+    riak_header *indexes; /* secondary indexes, names without "X-Riak-Index-" */
+    size_t n_indexes;
+    char *links; /* raw Link header value(s), comma separated */
+} riak_object;
+
+/* All siblings of one key; vclock is shared by every sibling. */
+typedef struct {
+    riak_object *items;
+    size_t count;
+    char *vclock;
+} riak_object_set;
+
+/* Choose one of `count` siblings; return its index, or >= count to give up
+ * (the call then fails with RIAK_E_SIBLINGS). */
+typedef size_t (*riak_resolver_fn)(const riak_object *siblings, size_t count, void *ctx);
+
+typedef struct {
     int r, pr, w, dw, pw, rw; /* RIAK_Q_* or a replica count */
     const char *content_type; /* put only; default application/octet-stream */
     const char *vclock;       /* X-Riak-Vclock from a previous get */
@@ -99,17 +131,16 @@ typedef struct {
     size_t n_indexes;
     const char *const *links; /* raw Link header values */
     size_t n_links;
-    bool return_body; /* put only */
+    bool return_body;                /* put only */
+    const char *bucket_type;         /* NULL = "default" */
+    const char *if_none_match;       /* ETag, or "*" on put to create only */
+    const char *if_match;            /* ETag */
+    const char *if_modified_since;   /* HTTP date */
+    const char *if_unmodified_since; /* HTTP date */
+    unsigned server_timeout_ms;      /* Riak-side timeout; 0 = server default */
+    riak_resolver_fn resolver;       /* get only: resolve siblings */
+    void *resolver_ctx;
 } riak_opts;
-
-typedef struct {
-    char *data; /* NUL-terminated for convenience; len excludes it */
-    size_t len;
-    char *content_type;
-    char *vclock;
-    char *etag;
-    char *last_modified;
-} riak_object;
 
 typedef struct {
     char **items; /* items[count] == NULL */
@@ -130,8 +161,14 @@ RIAK_API long riak_client_http_status(const riak_client *client);
 
 RIAK_API riak_status riak_ping(riak_client *client);
 
+/* With opts->resolver set, siblings are fetched and the resolver picks the
+ * object returned; its vclock covers all siblings, so writing it back
+ * resolves the conflict. */
 RIAK_API riak_status riak_get(riak_client *client, const char *bucket, const char *key,
                               const riak_opts *opts, riak_object *out);
+/* Fetch every sibling of a key (a single object when there are none). */
+RIAK_API riak_status riak_get_siblings(riak_client *client, const char *bucket, const char *key,
+                                       const riak_opts *opts, riak_object_set *out);
 /* key == NULL lets Riak generate one; it is returned through created_key. */
 RIAK_API riak_status riak_put(riak_client *client, const char *bucket, const char *key,
                               const void *value, size_t len, const riak_opts *opts,
@@ -149,7 +186,25 @@ RIAK_API riak_status riak_set_bucket_props(riak_client *client, const char *buck
                                            const char *json);
 RIAK_API riak_status riak_reset_bucket_props(riak_client *client, const char *bucket);
 
+/* Bucket-type aware variants; type == NULL means the default type. */
+RIAK_API riak_status riak_type_list_buckets(riak_client *client, const char *type,
+                                            riak_strlist *out);
+RIAK_API riak_status riak_type_list_keys(riak_client *client, const char *type, const char *bucket,
+                                         riak_strlist *out);
+RIAK_API riak_status riak_type_get_bucket_props(riak_client *client, const char *type,
+                                                const char *bucket, char **json);
+RIAK_API riak_status riak_type_set_bucket_props(riak_client *client, const char *type,
+                                                const char *bucket, const char *json);
+RIAK_API riak_status riak_type_reset_bucket_props(riak_client *client, const char *type,
+                                                  const char *bucket);
+/* Properties of a bucket type itself: {"props":{...}} */
+RIAK_API riak_status riak_get_type_props(riak_client *client, const char *type, char **json);
+
+/* Node statistics from /stats as a JSON object. */
+RIAK_API riak_status riak_stats(riak_client *client, char **json);
+
 RIAK_API void riak_object_free(riak_object *obj);
+RIAK_API void riak_object_set_free(riak_object_set *set);
 RIAK_API void riak_strlist_free(riak_strlist *list);
 RIAK_API void riak_free(void *ptr);
 

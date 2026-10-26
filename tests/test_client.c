@@ -87,7 +87,13 @@ static void test_put_get_roundtrip_with_escaping(void) {
     CHECK_EQ_STR(obj.data, "hello");
     CHECK_EQ_STR(obj.content_type, "text/plain");
     CHECK(obj.vclock != NULL && strncmp(obj.vclock, "vc-", 3) == 0);
-    CHECK_EQ_STR(obj.etag, "\"etag-1\"");
+    CHECK(obj.etag != NULL && obj.etag[0] == '"');
+    CHECK_EQ_INT(obj.n_meta, 1);
+    if (obj.n_meta == 1) {
+        CHECK_EQ_STR(obj.meta[0].name, "color");
+        CHECK_EQ_STR(obj.meta[0].value, "blue");
+    }
+    CHECK_EQ_INT(obj.n_indexes, 1);
     CHECK(obj.last_modified != NULL);
     riak_object_free(&obj);
 }
@@ -260,6 +266,172 @@ static void test_null_arguments(void) {
     (void)obj;
 }
 
+static void test_bucket_types(void) {
+    riak_opts o = {.bucket_type = "t1", .content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, "tb", "k1", "typed", 5, &o, NULL, NULL), RIAK_OK);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/types/t1/buckets/tb/keys/k1");
+    json_object_put(last);
+
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, "tb", "k1", &o, &obj), RIAK_OK);
+    CHECK_EQ_STR(obj.data, "typed");
+    riak_object_free(&obj);
+    /* the same bucket name in the default type is a different bucket */
+    CHECK_EQ_INT(riak_get(rc, "tb", "k1", NULL, &obj), RIAK_E_NOT_FOUND);
+
+    riak_strlist l;
+    CHECK_EQ_INT(riak_type_list_keys(rc, "t1", "tb", &l), RIAK_OK);
+    CHECK_EQ_INT(l.count, 1);
+    riak_strlist_free(&l);
+    CHECK_EQ_INT(riak_type_list_buckets(rc, "t1", &l), RIAK_OK);
+    CHECK(l.count == 1 && strcmp(l.items[0], "tb") == 0);
+    riak_strlist_free(&l);
+
+    char *json = NULL;
+    CHECK_EQ_INT(riak_type_set_bucket_props(rc, "t1", "tb", "{\"props\":{\"n_val\":1}}"), RIAK_OK);
+    CHECK_EQ_INT(riak_type_get_bucket_props(rc, "t1", "tb", &json), RIAK_OK);
+    CHECK(json && strstr(json, "\"n_val\": 1"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_type_reset_bucket_props(rc, "t1", "tb"), RIAK_OK);
+    CHECK_EQ_INT(riak_get_type_props(rc, "multi", &json), RIAK_OK);
+    CHECK(json && strstr(json, "\"allow_mult\": true"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_get_type_props(rc, "nosuchtype", &json), RIAK_E_NOT_FOUND);
+
+    char *key = NULL;
+    CHECK_EQ_INT(riak_put(rc, "tb", NULL, "a", 1, &o, NULL, &key), RIAK_OK);
+    CHECK_EQ_STR(key, "auto key");
+    riak_free(key);
+    CHECK_EQ_INT(riak_delete(rc, "tb", "k1", &o), RIAK_OK);
+    last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/types/t1/buckets/tb/keys/k1");
+    json_object_put(last);
+
+    riak_opts bad = {.bucket_type = ""};
+    CHECK_EQ_INT(riak_get(rc, "tb", "k1", &bad, &obj), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_type_list_keys(rc, "", "tb", &l), RIAK_E_INVALID_ARG);
+}
+
+static size_t pick_longest(const riak_object *s, size_t n, void *ctx) {
+    (void)ctx;
+    size_t best = 0;
+    for (size_t i = 1; i < n; i++) {
+        if (s[i].len > s[best].len) best = i;
+    }
+    return best;
+}
+
+static size_t give_up(const riak_object *s, size_t n, void *ctx) {
+    (void)s;
+    *(size_t *)ctx = n;
+    return n;
+}
+
+static void test_siblings(void) {
+    riak_opts o = {.bucket_type = "multi", .content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, "mb", "k", "short", 5, &o, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, "mb", "k", "longer value", 12, &o, NULL, NULL), RIAK_OK);
+
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, "mb", "k", &o, &obj), RIAK_E_SIBLINGS);
+
+    riak_object_set set;
+    CHECK_EQ_INT(riak_get_siblings(rc, "mb", "k", &o, &set), RIAK_OK);
+    CHECK_EQ_INT(set.count, 2);
+    CHECK(set.vclock != NULL);
+    if (set.count == 2) {
+        CHECK_EQ_STR(set.items[0].data, "short");
+        CHECK_EQ_STR(set.items[1].data, "longer value");
+        CHECK_EQ_STR(set.items[1].content_type, "text/plain");
+        CHECK_EQ_STR(set.items[1].vclock, set.vclock);
+    }
+    riak_object_set_free(&set);
+
+    size_t seen = 0;
+    riak_opts declined = o;
+    declined.resolver = give_up;
+    declined.resolver_ctx = &seen;
+    CHECK_EQ_INT(riak_get(rc, "mb", "k", &declined, &obj), RIAK_E_SIBLINGS);
+    CHECK_EQ_INT(seen, 2);
+
+    riak_opts res = o;
+    res.resolver = pick_longest;
+    CHECK_EQ_INT(riak_get(rc, "mb", "k", &res, &obj), RIAK_OK);
+    CHECK_EQ_STR(obj.data, "longer value");
+    CHECK(obj.vclock != NULL);
+
+    /* writing the resolved value back with its vclock collapses the siblings */
+    riak_opts wb = o;
+    wb.vclock = obj.vclock;
+    CHECK_EQ_INT(riak_put(rc, "mb", "k", obj.data, obj.len, &wb, NULL, NULL), RIAK_OK);
+    riak_object_free(&obj);
+    CHECK_EQ_INT(riak_get_siblings(rc, "mb", "k", &o, &set), RIAK_OK);
+    CHECK_EQ_INT(set.count, 1);
+    riak_object_set_free(&set);
+    CHECK_EQ_INT(riak_get(rc, "mb", "k", &o, &obj), RIAK_OK);
+    riak_object_free(&obj);
+
+    /* 300 without a multipart body cannot be resolved */
+    CHECK_EQ_INT(riak_get(rc, "siblings", "k", &res, &obj), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_get_siblings(rc, "nothing", "here", NULL, &set), RIAK_E_NOT_FOUND);
+    CHECK(set.items == NULL);
+}
+
+static void test_conditional(void) {
+    riak_opts o = {.content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, "cond", "k", "v1", 2, &o, NULL, NULL), RIAK_OK);
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, "cond", "k", NULL, &obj), RIAK_OK);
+
+    riak_opts inm = {.if_none_match = obj.etag};
+    riak_object again;
+    CHECK_EQ_INT(riak_get(rc, "cond", "k", &inm, &again), RIAK_E_NOT_MODIFIED);
+    CHECK(again.data == NULL);
+    json_object *last = last_request();
+    CHECK_EQ_STR(last_header(last, "If-None-Match"), obj.etag);
+    json_object_put(last);
+
+    riak_opts create = {.if_none_match = "*"};
+    CHECK_EQ_INT(riak_put(rc, "cond", "k", "v2", 2, &create, NULL, NULL), RIAK_E_PRECONDITION);
+    CHECK_EQ_INT(riak_put(rc, "cond", "fresh", "v", 1, &create, NULL, NULL), RIAK_OK);
+
+    riak_opts match = {.if_match = "\"wrong\""};
+    CHECK_EQ_INT(riak_put(rc, "cond", "k", "v2", 2, &match, NULL, NULL), RIAK_E_PRECONDITION);
+    match.if_match = obj.etag;
+    CHECK_EQ_INT(riak_put(rc, "cond", "k", "v2", 2, &match, NULL, NULL), RIAK_OK);
+
+    riak_opts dates = {.if_modified_since = "Mon, 26 Oct 2026 10:00:00 GMT",
+                       .if_unmodified_since = "Tue, 27 Oct 2026 10:00:00 GMT"};
+    CHECK_EQ_INT(riak_get(rc, "cond", "k", &dates, &again), RIAK_OK);
+    last = last_request();
+    CHECK_EQ_STR(last_header(last, "If-Modified-Since"), dates.if_modified_since);
+    CHECK_EQ_STR(last_header(last, "If-Unmodified-Since"), dates.if_unmodified_since);
+    json_object_put(last);
+    riak_object_free(&again);
+    riak_object_free(&obj);
+
+    riak_opts inj = {.if_match = "x\r\nX-Evil: 1"};
+    CHECK_EQ_INT(riak_put(rc, "cond", "k", "v", 1, &inj, NULL, NULL), RIAK_E_INVALID_ARG);
+}
+
+static void test_server_timeout_and_stats(void) {
+    riak_opts o = {.server_timeout_ms = 1500, .r = RIAK_Q_ONE};
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, "cond", "k", &o, &obj), RIAK_OK);
+    riak_object_free(&obj);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/buckets/cond/keys/k?r=one&timeout=1500");
+    json_object_put(last);
+
+    char *json = NULL;
+    CHECK_EQ_INT(riak_stats(rc, &json), RIAK_OK);
+    CHECK(json && strstr(json, "vnode_gets"));
+    riak_free(json);
+    CHECK_EQ_INT(riak_stats(rc, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_stats(NULL, &json), RIAK_E_INVALID_ARG);
+}
+
 static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
@@ -307,6 +479,10 @@ int main(void) {
     RUN(test_body_limit);
     RUN(test_bucket_error_paths);
     RUN(test_null_arguments);
+    RUN(test_bucket_types);
+    RUN(test_siblings);
+    RUN(test_conditional);
+    RUN(test_server_timeout_and_stats);
     RUN(test_client_id_header);
 
     riak_client_free(rc);

@@ -5,6 +5,10 @@
  Tests against a real Riak node. Skipped unless RIAK_TEST_URL is set, e.g.
    docker run -d -p 8098:8098 basho/riak-kv
    RIAK_TEST_URL=http://127.0.0.1:8098 ctest -R live
+ Bucket type and sibling tests also need an allow_mult bucket type:
+   riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
+   riak-admin bucket-type activate libriak_multi
+   RIAK_TEST_TYPE=libriak_multi
  */
 
 #include <stdio.h>
@@ -17,6 +21,7 @@
 
 static riak_client *rc;
 static char bucket[64];
+static const char *multi_type; /* bucket type with allow_mult, from RIAK_TEST_TYPE */
 
 static void test_ping(void) {
     CHECK_EQ_INT(riak_ping(rc), RIAK_OK);
@@ -86,6 +91,78 @@ static void test_bucket_props(void) {
     CHECK_EQ_INT(riak_reset_bucket_props(rc, bucket), RIAK_OK);
 }
 
+static void test_conditional_and_stats(void) {
+    riak_opts o = {.content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, bucket, "cond", "v1", 2, &o, NULL, NULL), RIAK_OK);
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, bucket, "cond", NULL, &obj), RIAK_OK);
+    CHECK(obj.etag != NULL);
+
+    riak_opts inm = {.if_none_match = obj.etag};
+    riak_object again;
+    CHECK_EQ_INT(riak_get(rc, bucket, "cond", &inm, &again), RIAK_E_NOT_MODIFIED);
+    riak_opts create = {.if_none_match = "*", .content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, bucket, "cond", "v2", 2, &create, NULL, NULL), RIAK_E_PRECONDITION);
+    riak_object_free(&obj);
+    CHECK_EQ_INT(riak_delete(rc, bucket, "cond", NULL), RIAK_OK);
+
+    riak_opts slow = {.server_timeout_ms = 5000};
+    CHECK_EQ_INT(riak_get(rc, bucket, "cond", &slow, &obj), RIAK_E_NOT_FOUND);
+
+    char *json = NULL;
+    CHECK_EQ_INT(riak_stats(rc, &json), RIAK_OK);
+    CHECK(json && strstr(json, "\"vnode_gets\""));
+    riak_free(json);
+}
+
+static size_t pick_last(const riak_object *s, size_t n, void *ctx) {
+    (void)s;
+    (void)ctx;
+    return n - 1;
+}
+
+static void test_types_and_siblings(void) {
+    if (multi_type == NULL) {
+        fprintf(stderr, "RIAK_TEST_TYPE not set; skipping bucket type tests\n");
+        return;
+    }
+    char *json = NULL;
+    CHECK_EQ_INT(riak_get_type_props(rc, multi_type, &json), RIAK_OK);
+    CHECK(json && strstr(json, "\"allow_mult\":true"));
+    riak_free(json);
+
+    riak_opts o = {.bucket_type = multi_type, .content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, bucket, "s", "one", 3, &o, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_put(rc, bucket, "s", "two", 3, &o, NULL, NULL), RIAK_OK);
+
+    riak_object obj;
+    CHECK_EQ_INT(riak_get(rc, bucket, "s", &o, &obj), RIAK_E_SIBLINGS);
+    riak_object_set set;
+    CHECK_EQ_INT(riak_get_siblings(rc, bucket, "s", &o, &set), RIAK_OK);
+    CHECK_EQ_INT(set.count, 2);
+    CHECK(set.vclock != NULL);
+    riak_object_set_free(&set);
+
+    riak_opts res = o;
+    res.resolver = pick_last;
+    CHECK_EQ_INT(riak_get(rc, bucket, "s", &res, &obj), RIAK_OK);
+    riak_opts wb = o;
+    wb.vclock = obj.vclock;
+    CHECK_EQ_INT(riak_put(rc, bucket, "s", "merged", 6, &wb, NULL, NULL), RIAK_OK);
+    riak_object_free(&obj);
+    CHECK_EQ_INT(riak_get(rc, bucket, "s", &o, &obj), RIAK_OK);
+    CHECK_EQ_STR(obj.data, "merged");
+    riak_object_free(&obj);
+
+    riak_strlist keys;
+    CHECK_EQ_INT(riak_type_list_keys(rc, multi_type, bucket, &keys), RIAK_OK);
+    CHECK(keys.count == 1 && strcmp(keys.items[0], "s") == 0);
+    riak_strlist_free(&keys);
+    CHECK_EQ_INT(riak_type_get_bucket_props(rc, multi_type, bucket, &json), RIAK_OK);
+    riak_free(json);
+    CHECK_EQ_INT(riak_delete(rc, bucket, "s", &o), RIAK_OK);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -98,6 +175,10 @@ int main(void) {
     if (sscanf(url, "%7[^:]://%255[^:/]:%u", scheme, host, &port) < 2) {
         fprintf(stderr, "cannot parse RIAK_TEST_URL=%s\n", url);
         return 1;
+    }
+    multi_type = getenv("RIAK_TEST_TYPE");
+    if (multi_type && *multi_type == '\0') {
+        multi_type = NULL;
     }
     snprintf(bucket, sizeof bucket, "libriak-c-test-%ld", (long)time(NULL));
 
@@ -116,6 +197,8 @@ int main(void) {
     RUN(test_roundtrip);
     RUN(test_autokey_and_list);
     RUN(test_bucket_props);
+    RUN(test_conditional_and_stats);
+    RUN(test_types_and_siblings);
 
     riak_client_free(rc);
     riak_global_cleanup();

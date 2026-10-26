@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- Bucket types: `riak_opts.bucket_type` for object calls and `riak_type_*`
+  variants of the bucket calls; `riak_get_type_props()`.
+- Siblings: `riak_get_siblings()` parses `multipart/mixed` responses into a
+  `riak_object_set`; `riak_opts.resolver` lets `riak_get()` pick one sibling,
+  returned with the vclock that resolves the conflict on write-back.
+- Conditional requests: `if_none_match`, `if_match`, `if_modified_since`,
+  `if_unmodified_since`; new status `RIAK_E_NOT_MODIFIED` for 304.
+- `riak_object` now carries user metadata, secondary index entries, links and
+  a tombstone flag.
+- `riak_opts.server_timeout_ms` (Riak `timeout` parameter) and `riak_stats()`.
 - Debian and RPM packages via CPack (runtime and development components),
   `packaging/build-packages.sh` and a package smoke test.
 - Release workflow: builds and install-tests packages on Ubuntu 22.04/24.04,

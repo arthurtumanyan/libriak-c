@@ -85,6 +85,39 @@ riak_global_cleanup();
 
 A complete program is in [`examples/basic.c`](examples/basic.c).
 
+### Bucket types, siblings and conditional requests
+
+```c
+/* bucket types: set opts.bucket_type, or use the riak_type_* bucket calls */
+riak_opts o = {.bucket_type = "maps", .content_type = "application/json"};
+riak_type_list_keys(c, "maps", "users", &keys);
+
+/* siblings: fetch them all ... */
+riak_object_set set;
+if (riak_get_siblings(c, "users", "u1", &o, &set) == RIAK_OK) {
+    for (size_t i = 0; i < set.count; i++)
+        printf("%.*s%s\n", (int)set.items[i].len, set.items[i].data,
+               set.items[i].deleted ? " (tombstone)" : "");
+    riak_object_set_free(&set);
+}
+
+/* ... or let a resolver pick one; its vclock covers every sibling, so
+ * writing it back resolves the conflict */
+static size_t newest(const riak_object *s, size_t n, void *ctx);
+o.resolver = newest;
+riak_get(c, "users", "u1", &o, &obj);
+
+/* conditional requests */
+riak_opts cond = {.if_none_match = obj.etag};
+riak_get(c, "users", "u1", &cond, &obj2);        /* RIAK_E_NOT_MODIFIED */
+riak_opts create = {.if_none_match = "*"};
+riak_put(c, "users", "u1", v, n, &create, NULL, NULL); /* RIAK_E_PRECONDITION if it exists */
+```
+
+Objects returned by `riak_get` also carry user metadata (`meta`), secondary
+index entries (`indexes`) and links. `opts.server_timeout_ms` sets Riak's own
+request timeout; `riak_stats()` returns `/stats` as JSON.
+
 ### Rules
 
 - Every function returns a `riak_status`; `riak_client_errmsg()` gives detail

@@ -45,6 +45,8 @@ const char *riak_strerror(riak_status status) {
         return "unexpected HTTP status";
     case RIAK_E_PARSE:
         return "malformed response";
+    case RIAK_E_NOT_MODIFIED:
+        return "not modified";
     }
     return "unknown error";
 }

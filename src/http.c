@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #define RIAK_USER_AGENT "libriak-c/2.0"
 
@@ -63,48 +62,16 @@ static size_t write_cb(char *data, size_t size, size_t nmemb, void *userp) {
     return len;
 }
 
-static int capture(char **dst, const char *line, size_t len, const char *name) {
-    size_t nlen = strlen(name);
-    if (len <= nlen || line[nlen] != ':' || strncasecmp(line, name, nlen) != 0) {
-        return 0;
-    }
-    const char *v = line + nlen + 1;
-    const char *end = line + len;
-    while (v < end && (*v == ' ' || *v == '\t'))
-        v++;
-    while (end > v && (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' '))
-        end--;
-    char *copy = riak_strndup(v, (size_t)(end - v));
-    if (copy == NULL) {
-        return -1;
-    }
-    free(*dst);
-    *dst = copy;
-    return 1;
-}
-
 static size_t header_cb(char *data, size_t size, size_t nitems, void *userp) {
     transfer *t = userp;
-    riak_response *r = t->resp;
     size_t len = size * nitems;
 
     if (len >= 5 && strncmp(data, "HTTP/", 5) == 0) {
         /* a new response (e.g. after 100 Continue): forget earlier headers */
-        free(r->content_type);
-        free(r->vclock);
-        free(r->etag);
-        free(r->last_modified);
-        free(r->location);
-        r->content_type = r->vclock = r->etag = r->last_modified = r->location = NULL;
+        riak_headerlist_clear(&t->resp->headers);
         return len;
     }
-    int rc = 0;
-    if (!rc) rc = capture(&r->content_type, data, len, "Content-Type");
-    if (!rc) rc = capture(&r->vclock, data, len, "X-Riak-Vclock");
-    if (!rc) rc = capture(&r->etag, data, len, "ETag");
-    if (!rc) rc = capture(&r->last_modified, data, len, "Last-Modified");
-    if (!rc) rc = capture(&r->location, data, len, "Location");
-    if (rc < 0) {
+    if (riak_headerlist_add_line(&t->resp->headers, data, len) < 0) {
         return abort_transfer(t, RIAK_E_NOMEM, "out of memory while reading headers");
     }
     return len;
@@ -221,11 +188,7 @@ nomem:
 
 void riak_response_free(riak_response *resp) {
     riak_buf_free(&resp->body);
-    free(resp->content_type);
-    free(resp->vclock);
-    free(resp->etag);
-    free(resp->last_modified);
-    free(resp->location);
+    riak_headerlist_clear(&resp->headers);
     long status = resp->status;
     memset(resp, 0, sizeof *resp);
     resp->status = status;
@@ -236,6 +199,9 @@ riak_status riak_http_error(riak_client *c, const riak_response *resp) {
     switch (resp->status) {
     case 300:
         st = RIAK_E_SIBLINGS;
+        break;
+    case 304:
+        st = RIAK_E_NOT_MODIFIED;
         break;
     case 404:
         st = RIAK_E_NOT_FOUND;
@@ -268,10 +234,16 @@ riak_status riak_add_header(riak_client *c, struct curl_slist **list, const char
     return RIAK_OK;
 }
 
-int riak_url_bucket(riak_buf *b, const riak_client *c, const char *bucket, const char *suffix,
-                    const char *key) {
-    if (riak_buf_append_str(b, c->base_url) != 0 || riak_buf_append_str(b, "buckets/") != 0 ||
-        riak_url_append_escaped(b, bucket) != 0) {
+int riak_url_bucket(riak_buf *b, const riak_client *c, const char *type, const char *bucket,
+                    const char *suffix, const char *key) {
+    if (riak_buf_append_str(b, c->base_url) != 0) {
+        return -1;
+    }
+    if (type && (riak_buf_append_str(b, "types/") != 0 || riak_url_append_escaped(b, type) != 0 ||
+                 riak_buf_append_str(b, "/") != 0)) {
+        return -1;
+    }
+    if (riak_buf_append_str(b, "buckets/") != 0 || riak_url_append_escaped(b, bucket) != 0) {
         return -1;
     }
     if (suffix && (riak_buf_append_str(b, "/") != 0 || riak_buf_append_str(b, suffix) != 0)) {
