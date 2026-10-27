@@ -61,7 +61,7 @@ static bool stream_sink(void *ctx, const char *data, size_t len, riak_status *er
     return true;
 }
 
-/* Perform a streamed request; parts go to fn. */
+/* A streamed request is performed; parts are passed to fn. */
 static riak_status perform_stream(riak_client *c, const riak_request *base, chunk_fn fn,
                                   void *ctx) {
     riak_response resp = {0};

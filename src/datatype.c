@@ -310,7 +310,7 @@ void riak_dt_op_remove(riak_dt_op *set, const char *element) {
     }
 }
 
-/* Find or create a field update. */
+/* A field update is found or created. */
 static map_field *field(riak_dt_op *map, const char *name, riak_dt_type type) {
     if (!check(map, map && map->type == RIAK_DT_MAP && name && *name && embeddable(type))) {
         return NULL;
@@ -449,7 +449,7 @@ static char *field_key(const map_field *f) {
     return riak_strprintf("%s_%s", f->name, type_names[f->type]);
 }
 
-/* Returns NULL with *st set on failure. */
+/* NULL is returned with *st set on failure. */
 static json_object *op_json(const riak_dt_op *op, riak_status *st, int depth);
 
 static bool put_field(json_object *obj, const char *key, json_object *v, riak_status *st) {

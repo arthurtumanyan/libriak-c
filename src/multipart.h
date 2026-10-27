@@ -39,7 +39,7 @@ riak_status riak_mpstream_feed(riak_mpstream *s, const char *data, size_t len);
 riak_status riak_mpstream_finish(riak_mpstream *s);
 void riak_mpstream_free(riak_mpstream *s);
 
-/* Split a complete body into parts. On success *parts holds *n parts. */
+/* A complete body is split into parts. On success *parts holds *n parts. */
 riak_status riak_multipart_parse(const char *boundary, const char *body, size_t len,
                                  riak_part **parts, size_t *n);
 void riak_parts_free(riak_part *parts, size_t n);

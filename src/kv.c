@@ -122,7 +122,7 @@ static riak_status prepare_fetch(riak_client *c, const char *bucket, const char 
     return RIAK_OK;
 }
 
-/* Prepare and run a request, then free what prepare allocated. */
+/* A prepared request is run, then what prepare allocated is freed. */
 static riak_status run(riak_client *c, riak_status st, riak_prepared *p, riak_response *resp) {
     if (st == RIAK_OK) {
         st = riak_perform(c, &p->req, resp);
@@ -131,7 +131,7 @@ static riak_status run(riak_client *c, riak_status st, riak_prepared *p, riak_re
     return st;
 }
 
-/* Turn a 200 or 300 (multipart/mixed) response into a sibling set. */
+/* A 200 or 300 (multipart/mixed) response is turned into a sibling set. */
 static riak_status to_sibling_set(riak_client *c, riak_response *resp, riak_object_set *out) {
     if (resp->status == 200) {
         out->items = calloc(1, sizeof *out->items);

@@ -78,10 +78,10 @@ enum { RIAK_BODY_RAW, RIAK_BODY_JSON_OBJECT, RIAK_BODY_JSON_ARRAY };
 /* GET url, require 200 and a body of the expected kind, return the body. */
 riak_status riak_get_body(riak_client *c, const char *url, int kind, char **body);
 
-/* Validate a bucket/key argument. */
+/* Validation of a bucket/key argument. */
 riak_status riak_check_name(riak_client *c, const char *s, const char *what);
 
-/* Append "Name: value"; validates both parts. */
+/* "Name: value" is appended after both parts are validated. */
 riak_status riak_add_header(riak_client *c, struct curl_slist **list, const char *prefix,
                             const char *name, const char *value);
 
@@ -140,10 +140,10 @@ typedef struct {
     bool cert_requested; /* the server asked for a client certificate */
 } riak_attempt;
 
-/* Configure h for req on the given node. On failure nothing needs freeing. */
+/* h is configured for req on the given node. On failure nothing needs freeing. */
 riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t node,
                                unsigned attempt, const riak_request *req, riak_response *resp);
-/* Collect the outcome of a finished transfer: status, error message, node
+/* The outcome of a finished transfer is collected: status, error message, node
  * health, metrics and log; *retry says what a further attempt may do. */
 riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *retry);
 /* Whether another attempt is allowed after one that returned `retry`. */
@@ -158,7 +158,7 @@ void riak_error_add_node(riak_client *c, riak_status st);
 
 void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_response_free(riak_response *resp);
-/* Map an unexpected HTTP status to an error and record a message. */
+/* An unexpected HTTP status is mapped to an error and a message is recorded. */
 riak_status riak_http_error(riak_client *c, const riak_response *resp);
 
 #endif /* RIAK_INTERNAL_H */

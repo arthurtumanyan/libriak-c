@@ -84,8 +84,8 @@ static void op_free(op *o) {
     free(o);
 }
 
-/* Interpret the final response, run the callback and free the request,
- * which is no longer on the pending list. */
+/* The final response is interpreted, the callback is run and the request,
+ * already removed from the pending list, is freed. */
 static void finish_op(riak_async *a, op *o, riak_status st) {
     riak_client *c = a->c;
     riak_async_result res = {.status = st, .http_status = o->resp.status};
@@ -137,7 +137,7 @@ static void start_attempt(riak_async *a, op *o) {
     o->h = h;
 }
 
-/* Handle every transfer curl reports as done. */
+/* Every transfer that curl reports as done is handled. */
 static void drain(riak_async *a) {
     CURLMsg *msg;
     int left;
@@ -169,7 +169,7 @@ static void drain(riak_async *a) {
     }
 }
 
-/* Start retries whose backoff has passed; returns the earliest one still
+/* Retries whose backoff has passed are started; the result is the earliest one still
  * waiting (0 = none). */
 static long long start_due_retries(riak_async *a) {
     long long now = riak_now_ms();

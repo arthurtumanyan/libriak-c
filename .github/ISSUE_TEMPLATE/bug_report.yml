@@ -6,14 +6,14 @@ body:
     id: what
     attributes:
       label: What happened
-      description: Expected behaviour, actual behaviour, and the riak_status / riak_client_errmsg() you got.
+      description: Expected behaviour, actual behaviour, and the riak_status / riak_client_errmsg() returned.
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
       label: How to reproduce
-      description: Minimal code or steps.
+      description: Minimal code or steps that reproduce the problem.
     validations:
       required: true
   - type: input

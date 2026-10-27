@@ -49,6 +49,12 @@
   attempt (node, attempt, outcome, status, duration, bytes, retry).
 - Secrets are copied by the client and wiped when it is freed.
 - `examples/async.c`.
+- Documentation: guides in `docs/` (getting started, configuration, errors and
+  ownership, objects, queries, data types, clusters, async, security,
+  observability, testing, packaging, migration) and a Doxygen API reference
+  with every public symbol documented (`cmake --build build --target docs`).
+  CI fails on undocumented symbols, and a `docs` test checks that the API
+  names used in the documentation exist and that example programs build.
 - `tests/docker`: Riak image with the leveldb backend and Search enabled for
   the live tests.
 - Debian and RPM packages via CPack (runtime and development components),

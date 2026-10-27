@@ -4,299 +4,94 @@ libriak-c
 A C11 client library for the [Riak KV](https://github.com/basho/riak) HTTP API,
 built on libcurl and json-c.
 
-## Build
+## Features
 
-Requirements: CMake ≥ 3.20, a C11 compiler, libcurl ≥ 7.66, json-c ≥ 0.15.
+- Objects: get, put, delete, metadata, secondary index entries, links,
+  bucket types, sibling resolution, conditional requests
+- Queries: secondary indexes (paged and streamed), Riak Search, MapReduce
+- Data types: counters, sets, maps, HyperLogLogs, grow-only sets
+- Clusters: round-robin or failover node selection, retries with backoff,
+  ejection of failing nodes
+- Asynchronous requests on one thread, with hooks for external event loops
+- Security: verified TLS, HTTP Basic authentication, client certificates
+- Logging and per-request metrics callbacks
+- Debian and RPM packages, a CMake package and a pkg-config file
+
+## Building
 
 ```sh
-sudo apt install libcurl4-openssl-dev libjson-c-dev   # Debian/Ubuntu
-cmake -S . -B build
+sudo apt install cmake libcurl4-openssl-dev libjson-c-dev   # Debian/Ubuntu
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 sudo cmake --install build
 ```
 
-Options: `-DRIAK_SANITIZE=ON` (ASan + UBSan), `-DRIAK_WERROR=ON`,
-`-DRIAK_COVERAGE=ON`, `-DRIAK_FUZZ=ON` (clang/libFuzzer),
-`-DRIAK_BUILD_TESTS=OFF`, `-DRIAK_BUILD_EXAMPLES=OFF`.
+Requirements: CMake ≥ 3.20, a C11 compiler, libcurl ≥ 7.66, json-c ≥ 0.15.
+Prebuilt packages are attached to the
+[releases](https://github.com/arthurtumanyan/libriak-c/releases).
 
-### Tests
-
-- `util`, `parse` — unit tests of the internal helpers.
-- `client` — the public API end to end against `tests/stub_riak.py`, an
-  in-memory emulation of the Riak HTTP API (needs Python 3).
-- `async` — the asynchronous API against the stub, including an external
-  `poll()` loop, retries, cancellation and callback chaining.
-- `tls` — certificate verification, client certificates and Basic auth
-  against the stub in TLS mode (certificates made by `tests/gen_certs.sh`,
-  needs `openssl`).
-- `live` — against a real node; skipped unless `RIAK_TEST_URL` is set:
-
-  ```sh
-  docker run -d -p 8098:8098 basho/riak-kv
-  RIAK_TEST_URL=http://127.0.0.1:8098 ctest --test-dir build -R live
-  ```
-  Secondary index and Search tests also need the node from `tests/docker`
-  (leveldb, `search = on`), an `allow_mult` bucket type and
-  `RIAK_TEST_TYPE=libriak_multi RIAK_TEST_FEATURES=2i,search`; see
-  `tests/test_live.c` and the `live` job in `.github/workflows/ci.yml`.
-  Data type tests (`dt`) need one bucket type per data type
-  (`libriak_counters`, `libriak_sets`, `libriak_maps`, `libriak_hlls`).
-- Fuzzing: `build/tests/fuzz_parse -max_total_time=300` (with `-DRIAK_FUZZ=ON`).
-
-### Packages
-
-Tagged releases (`v*`) publish `.deb` packages for Ubuntu 22.04/24.04 and
-`.rpm` packages for Fedora and EL10, plus a source tarball, `SHA256SUMS` and
-build provenance attestations. Each format has a runtime package
-(`libriak-c2` / `libriak-c`) and a development package (`libriak-c-dev` /
-`libriak-c-devel`). To build them locally:
-
-```sh
-packaging/build-packages.sh DEB   # or RPM; output in dist/
-```
-
-Consumers can use `find_package(libriak-c)` → `riak::riak` / `riak::riak_static`,
-or `pkg-config --cflags --libs libriak-c`.
-
-## Usage
+## Example
 
 ```c
+#include <stdio.h>
 #include <riak/riak.h>
 
-riak_global_init();
+int main(void) {
+    riak_global_init();
+    riak_config cfg;
+    riak_config_init(&cfg);                 /* 127.0.0.1:8098 */
+    riak_client *c;
+    if (riak_client_new(&cfg, &c) != RIAK_OK)
+        return 1;
 
-riak_config cfg;
-riak_config_init(&cfg);          /* 127.0.0.1:8098, TLS verification on */
-cfg.timeout_ms = 5000;
+    riak_opts o = {.content_type = "text/plain"};
+    riak_put(c, "greetings", "hello", "world", 5, &o, NULL, NULL);
 
-riak_client *c;
-if (riak_client_new(&cfg, &c) != RIAK_OK) { /* ... */ }
+    riak_object obj;
+    riak_status st = riak_get(c, "greetings", "hello", NULL, &obj);
+    if (st == RIAK_OK) {
+        printf("%.*s\n", (int)obj.len, obj.data);
+        riak_object_free(&obj);
+    } else {
+        fprintf(stderr, "%s: %s\n", riak_strerror(st), riak_client_errmsg(c));
+    }
 
-riak_opts put = {.content_type = "text/plain", .w = RIAK_Q_QUORUM};
-riak_status st = riak_put(c, "test", "doc", "hello", 5, &put, NULL, NULL);
-if (st != RIAK_OK)
-    fprintf(stderr, "%s: %s\n", riak_strerror(st), riak_client_errmsg(c));
-
-riak_object obj;
-if (riak_get(c, "test", "doc", NULL, &obj) == RIAK_OK) {
-    printf("%.*s (vclock %s)\n", (int)obj.len, obj.data, obj.vclock);
-    riak_object_free(&obj);
+    riak_client_free(c);
+    riak_global_cleanup();
+    return 0;
 }
-
-riak_strlist keys;
-if (riak_list_keys(c, "test", &keys) == RIAK_OK) {
-    for (char **k = keys.items; *k; k++) puts(*k);
-    riak_strlist_free(&keys);
-}
-
-riak_client_free(c);
-riak_global_cleanup();
 ```
 
-A complete program is in [`examples/basic.c`](examples/basic.c).
+The program is linked with `pkg-config --cflags --libs libriak-c` or, in
+CMake, with `find_package(libriak-c)` and the `riak::riak` target.
 
-### Bucket types, siblings and conditional requests
+## Documentation
 
-```c
-/* bucket types: set opts.bucket_type, or use the riak_type_* bucket calls */
-riak_opts o = {.bucket_type = "maps", .content_type = "application/json"};
-riak_type_list_keys(c, "maps", "users", &keys);
+The guides are found in [`docs/`](docs/index.md):
 
-/* siblings: fetch them all ... */
-riak_object_set set;
-if (riak_get_siblings(c, "users", "u1", &o, &set) == RIAK_OK) {
-    for (size_t i = 0; i < set.count; i++)
-        printf("%.*s%s\n", (int)set.items[i].len, set.items[i].data,
-               set.items[i].deleted ? " (tombstone)" : "");
-    riak_object_set_free(&set);
-}
+- [Getting started](docs/getting-started.md)
+- [Configuration](docs/configuration.md)
+- [Errors and ownership](docs/errors.md)
+- [Objects and buckets](docs/objects.md)
+- [Queries](docs/queries.md)
+- [Data types](docs/datatypes.md)
+- [Clusters and retries](docs/clusters.md)
+- [Asynchronous requests](docs/async.md)
+- [Security](docs/security.md)
+- [Logging and metrics](docs/observability.md)
+- [Testing](docs/testing.md)
+- [Packaging and releases](docs/packaging.md)
+- [Migrating from 1.x](docs/migration.md)
 
-/* ... or let a resolver pick one; its vclock covers every sibling, so
- * writing it back resolves the conflict */
-static size_t newest(const riak_object *s, size_t n, void *ctx);
-o.resolver = newest;
-riak_get(c, "users", "u1", &o, &obj);
-
-/* conditional requests */
-riak_opts cond = {.if_none_match = obj.etag};
-riak_get(c, "users", "u1", &cond, &obj2);        /* RIAK_E_NOT_MODIFIED */
-riak_opts create = {.if_none_match = "*"};
-riak_put(c, "users", "u1", v, n, &create, NULL, NULL); /* RIAK_E_PRECONDITION if it exists */
-```
-
-Objects returned by `riak_get` also carry user metadata (`meta`), secondary
-index entries (`indexes`) and links. `opts.server_timeout_ms` sets Riak's own
-request timeout; `riak_stats()` returns `/stats` as JSON.
-
-### Queries
-
-```c
-/* secondary indexes (leveldb or memory backend) */
-riak_index_query q = {.index = "age_int", .range_min = "18", .range_max = "65",
-                      .return_terms = true, .max_results = 100};
-riak_index_result page;
-while (riak_index_query_run(c, "users", &q, &page) == RIAK_OK) {
-    for (size_t i = 0; i < page.count; i++)
-        printf("%s = %s\n", page.keys[i], page.terms[i]);
-    char *next = page.continuation ? strdup(page.continuation) : NULL;
-    riak_index_result_free(&page);
-    if (next == NULL) break;
-    q.continuation = next; /* free after the next call */
-}
-/* or stream matches through a callback: riak_index_query_stream() */
-
-/* Riak Search */
-riak_search_index_create(c, "users_idx", NULL, 0);
-riak_search_query sq = {.q = "name_s:alice", .sort = "age_i desc", .rows = 10};
-riak_search_result found;
-if (riak_search(c, "users_idx", &sq, &found) == RIAK_OK) {
-    for (size_t i = 0; i < found.count; i++)
-        printf("%s/%s score %.2f\n", found.docs[i].bucket, found.docs[i].key,
-               found.docs[i].score);
-    riak_search_result_free(&found);
-}
-
-/* MapReduce (not available on OpenRiak 4.x) */
-char *result;
-riak_mapred(c, "{\"inputs\":\"users\",\"query\":[...]}", &result);
-```
-
-### Data types (CRDTs)
-
-Buckets must belong to a bucket type created with a `datatype` property, e.g.
-`riak-admin bucket-type create counters '{"props":{"datatype":"counter"}}'`.
-
-```c
-riak_dt_op *op = riak_dt_op_new(RIAK_DT_MAP);
-riak_dt_op_map_register(op, "name", "alice");
-riak_dt_op_map_counter(op, "visits", 1);
-riak_dt_op_add(riak_dt_op_map_set(op, "tags"), "admin");
-riak_dt_opts o = {.return_body = true};
-riak_datatype user;
-if (riak_dt_update(c, "maps", "users", "u1", op, NULL, &o, &user, NULL) == RIAK_OK) {
-    const riak_dt_value *v = riak_dt_map_get(&user.value, "visits", RIAK_DT_COUNTER);
-    printf("visits: %lld\n", (long long)v->counter);
-    riak_datatype_free(&user);
-}
-riak_dt_op_free(op);
-
-/* removals need the context of a previous fetch */
-riak_datatype tags;
-riak_dt_fetch(c, "sets", "groups", "g1", NULL, &tags);
-riak_dt_op *rm = riak_dt_op_new(RIAK_DT_SET);
-riak_dt_op_remove(rm, "old-member");
-riak_dt_update(c, "sets", "groups", "g1", rm, tags.context, NULL, NULL, NULL);
-```
-
-Counters, sets, maps (with counter, set, map, register and flag fields),
-HyperLogLogs (Riak 2.2+) and grow-only sets (Riak 2.9+) are supported.
-
-### Clusters, failover and retries
-
-```c
-riak_node nodes[] = {{"10.0.0.1", 8098}, {"10.0.0.2", 8098}, {"10.0.0.3", 8098}};
-riak_config cfg;
-riak_config_init(&cfg);
-cfg.nodes = nodes;
-cfg.n_nodes = 3;
-cfg.balance = RIAK_BALANCE_ROUND_ROBIN; /* or RIAK_BALANCE_FAILOVER */
-cfg.max_retries = 2;                    /* defaults shown */
-cfg.retry_base_ms = 50;
-cfg.retry_max_ms = 2000;
-cfg.fail_threshold = 3;
-cfg.eject_ms = 5000;
-```
-
-Every call picks a node; failed attempts move to the next node after an
-exponential backoff with jitter. Requests that never reached a node are always
-retried. GET, PUT and DELETE are also retried after a transport error or a 503;
-POST requests (counter increments, generated keys) and streams that already
-delivered data are not, so nothing is applied twice. A node with
-`fail_threshold` consecutive failures is skipped for `eject_ms`.
-`riak_client_check_nodes()` pings every node and `riak_client_node_info()`
-reports per-node health and counters. Error messages name the node.
-
-### Asynchronous requests
-
-```c
-static void done(riak_async_result *res, void *ctx) {
-    if (res->status == RIAK_OK && res->object.data)
-        printf("%.*s\n", (int)res->object.len, res->object.data);
-}
-
-riak_async *a;
-riak_async_new(&cfg, &a);            /* same riak_config, including nodes */
-riak_async_get(a, "users", "u1", NULL, done, NULL);
-riak_async_put(a, "users", "u2", "{}", 2, &opts, done, NULL);
-riak_async_run(a, 5000);             /* or drive it from your own event loop */
-riak_async_free(a);
-```
-
-Any number of get, put, delete and ping requests run concurrently on one
-thread, with the same failover, retry (as timers, never sleeping) and hooks as
-the blocking API. To integrate with libuv, libevent or epoll, register
-`riak_async_set_loop()` callbacks for descriptors and timers and call
-`riak_async_on_socket()` / `riak_async_on_timeout()`; see `tests/test_async.c`
-for a `poll()` loop and `examples/async.c`.
-
-### Security, logging and metrics
-
-```c
-cfg.tls = true;
-cfg.ca_file = "/etc/riak/ca.pem";
-cfg.username = "app";                 /* Riak security: HTTP Basic over TLS */
-cfg.password = "secret";
-cfg.tls_cert_file = "client.pem";     /* or certificate authentication */
-cfg.tls_key_file = "client.key";
-cfg.log_fn = my_log;                  /* RIAK_LOG_DEBUG .. RIAK_LOG_ERROR */
-cfg.log_level = RIAK_LOG_WARN;
-cfg.metrics_fn = my_metrics;          /* one riak_request_metrics per attempt */
-```
-
-Credentials are refused without TLS. 401/403 map to `RIAK_E_UNAUTHORIZED`; a
-server that rejects or demands a client certificate gives `RIAK_E_TLS`.
-Metrics carry method, path, node, attempt number, outcome, HTTP status,
-duration, bytes received and whether a retry follows.
-
-### Rules
-
-- Every function returns a `riak_status`; `riak_client_errmsg()` gives detail
-  and `riak_client_http_status()` the last HTTP status.
-- Anything returned through an out-parameter belongs to the caller: free it
-  with `riak_object_free()`, `riak_strlist_free()` or `riak_free()`.
-- String lists are NULL-terminated and also carry `count`.
-- Bucket and key names are percent-encoded for you; header values containing
-  CR/LF are rejected with `RIAK_E_INVALID_ARG`.
-- `riak_put()` with `key == NULL` lets Riak choose a key and returns it
-  through `created_key`.
-- Call `riak_global_init()` once before starting threads. A client is not
-  thread-safe; use one client per thread.
-- TLS certificates are verified by default (`tls_verify`, `ca_file`).
-- Responses larger than `max_body_bytes` (default 64 MiB) are rejected.
-
-## Migrating from 1.x
-
-| 1.x | 2.0 |
-|---|---|
-| `RiakInit(host, port, ssl)` | `riak_config_init()` + `riak_client_new()` |
-| `RiakClose(h)` | `riak_client_free(c)` |
-| `RiakPing(h)` → `bool` | `riak_ping(c)` → `riak_status` |
-| `RiakGetKey(h, b, k)` + `RiakFreeMem(get_key_op_result.body)` | `riak_get(c, b, k, opts, &obj)` + `riak_object_free(&obj)` |
-| `RiakSetKey(h, b, k, v, &op)` | `riak_put(c, b, k, v, len, &opts, out, created_key)` |
-| `RiakDeleteKey(h, b, k, &op)` | `riak_delete(c, b, k, &opts)` |
-| `RiakListBuckets(h)` | `riak_list_buckets(c, &list)` |
-| `RiakListKeys(h, b, stream)` | `riak_list_keys(c, b, &list)` (always streamed) |
-| `RiakGetBucketProps(b)` (stub) | `riak_get_bucket_props(c, b, &json)` |
-| `RiakResetBucketProps(h, b)` | `riak_reset_bucket_props(c, b)` |
-| `_riak_optional_p` | `riak_opts` |
-
-See [CHANGELOG.md](CHANGELOG.md) for the bugs fixed in 2.0.
+The API reference is generated from `include/riak/riak.h` with
+`cmake --build build --target docs` (Doxygen). Changes between versions are
+listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md); report security issues as described in
-[SECURITY.md](SECURITY.md).
+Contribution rules are described in [CONTRIBUTING.md](CONTRIBUTING.md);
+security issues are reported as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
