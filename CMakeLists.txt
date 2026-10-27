@@ -122,6 +122,17 @@ if(RIAK_BUILD_EXAMPLES)
   target_link_libraries(riak_async_example PRIVATE riak riak_warnings)
 endif()
 
+find_package(Doxygen QUIET)
+if(DOXYGEN_FOUND)
+  add_custom_target(docs
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_BINARY_DIR}/docs
+    COMMAND ${CMAKE_COMMAND} -E env RIAK_DOCS_OUT=${PROJECT_BINARY_DIR}/docs
+            ${DOXYGEN_EXECUTABLE} docs/Doxyfile
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Generating the API reference in ${PROJECT_BINARY_DIR}/docs/html"
+    VERBATIM)
+endif()
+
 if(RIAK_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -112,7 +112,7 @@ void riak_config_init(riak_config *cfg) {
     cfg->log_level = RIAK_LOG_WARN;
 }
 
-/* Overwrite a secret before freeing it; volatile keeps the stores. */
+/* A secret is overwritten before it is freed; volatile keeps the stores. */
 static void free_secret(char *s) {
     if (s) {
         for (volatile char *p = s; *p; p++) {

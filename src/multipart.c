@@ -112,7 +112,7 @@ void riak_mpstream_free(riak_mpstream *s) {
     }
 }
 
-/* Parse the header block [p, end); lines end with CRLF. */
+/* The header block [p, end) is parsed; lines end with CRLF. */
 static riak_status parse_headers(riak_headerlist *h, const char *p, const char *end) {
     while (p < end) {
         const char *eol = find(p, (size_t)(end - p), "\r\n", 2);
@@ -125,7 +125,7 @@ static riak_status parse_headers(riak_headerlist *h, const char *p, const char *
     return RIAK_OK;
 }
 
-/* Build a part from [p, next) and hand it to the callback. */
+/* A part is built from [p, next) and handed to the callback. */
 static riak_status emit(riak_mpstream *s, const char *p, const char *next) {
     const char *hdr_end;
     const char *data;

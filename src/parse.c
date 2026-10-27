@@ -23,7 +23,7 @@ struct riak_keystream {
     bool pending; /* an object has started but not finished */
 };
 
-/* Append every string of obj[field] to out. */
+/* Every string of obj[field] is appended to out. */
 static riak_status collect(json_object *obj, const char *field, riak_strlist *out, size_t *cap) {
     json_object *arr;
     if (!json_object_is_type(obj, json_type_object) ||
@@ -160,7 +160,7 @@ void riak_keystream_free(riak_keystream *ks) {
     free(ks);
 }
 
-/* Parse a complete JSON document; NULL on syntax error or ENOMEM. */
+/* A complete JSON document is parsed; NULL on syntax error or ENOMEM. */
 static json_object *parse_doc(const char *json, size_t len, riak_status *st) {
     *st = RIAK_E_PARSE;
     if (len > INT_MAX) {

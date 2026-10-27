@@ -1,0 +1,35 @@
+# API reference, generated from the repository root:
+#   cmake --build build --target docs        (output: build/docs/html/)
+#   mkdir -p out && RIAK_DOCS_OUT=out doxygen docs/Doxyfile
+# Warnings, including undocumented public symbols, fail the run.
+PROJECT_NAME           = libriak-c
+PROJECT_NUMBER         = 2.0.0
+PROJECT_BRIEF          = "C client for the Riak KV HTTP API"
+OUTPUT_DIRECTORY       = $(RIAK_DOCS_OUT)
+INPUT                  = include/riak/riak.h docs/index.md docs
+FILE_PATTERNS          = *.md
+RECURSIVE              = NO
+USE_MDFILE_AS_MAINPAGE = docs/index.md
+EXCLUDE_PATTERNS       = */Doxyfile
+OPTIMIZE_OUTPUT_FOR_C  = YES
+EXTRACT_ALL            = NO
+EXTRACT_STATIC         = NO
+HIDE_UNDOC_MEMBERS     = NO
+SHOW_INCLUDE_FILES     = NO
+SORT_MEMBER_DOCS       = NO
+TYPEDEF_HIDES_STRUCT   = YES
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = RIAK_API=
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = FAIL_ON_WARNINGS
+QUIET                  = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+HTML_COLORSTYLE        = AUTO_LIGHT
+FULL_PATH_NAMES        = NO

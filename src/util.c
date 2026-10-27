@@ -350,7 +350,7 @@ static int copy_header(char **dst, const riak_headerlist *h, const char *name) {
     return *dst ? 0 : -1;
 }
 
-/* Collect headers named <prefix><rest> as {rest, value}. */
+/* Headers named <prefix><rest> are collected as {rest, value}. */
 static int collect_prefixed(const riak_headerlist *h, const char *prefix, riak_header **out,
                             size_t *n) {
     size_t plen = strlen(prefix);

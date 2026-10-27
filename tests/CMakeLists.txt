@@ -24,6 +24,18 @@ if(Python3_Interpreter_FOUND)
   set_tests_properties(async PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 
+if(Python3_Interpreter_FOUND)
+  file(GLOB RIAK_DOC_FILES ${PROJECT_SOURCE_DIR}/docs/*.md)
+  add_test(NAME docs
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_docs.py
+            ${CMAKE_C_COMPILER} ${PROJECT_SOURCE_DIR}/include $<TARGET_FILE:riak>
+            ${PROJECT_SOURCE_DIR}/README.md ${RIAK_DOC_FILES})
+  if(RIAK_SANITIZE)
+    set_tests_properties(docs PROPERTIES
+      ENVIRONMENT "CHECK_DOCS_FLAGS=-fsanitize=address,undefined")
+  endif()
+endif()
+
 find_program(OPENSSL_EXECUTABLE openssl)
 add_executable(test_tls test_tls.c)
 target_link_libraries(test_tls PRIVATE riak riak_warnings)
