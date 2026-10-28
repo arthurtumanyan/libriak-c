@@ -156,7 +156,7 @@ static void drain(riak_async *a) {
         a->c->http_status = 0;
         riak_status st = riak_attempt_finish(&o->at, rc, &retry);
         give_handle(a, h);
-        if (riak_retry_allowed(a->c, &o->p.req, retry, o->attempt + 1)) {
+        if (riak_retry_allowed(a->c, riak_request_idempotent(&o->p.req), retry, o->attempt + 1)) {
             riak_response_free(&o->resp);
             o->retry_at = riak_now_ms() + riak_backoff_ms(a->c, o->attempt);
             if (o->retry_at <= 0) o->retry_at = 1;

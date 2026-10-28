@@ -146,15 +146,41 @@ riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t 
 /* The outcome of a finished transfer is collected: status, error message, node
  * health, metrics and log; *retry says what a further attempt may do. */
 riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *retry);
+/* Whether an HTTP request may be repeated (GET, PUT, DELETE). */
+bool riak_request_idempotent(const riak_request *req);
+
+/* ---- cluster behavior shared by every transport (cluster.c) ---- */
+
 /* Whether another attempt is allowed after one that returned `retry`. */
-bool riak_retry_allowed(const riak_client *c, const riak_request *req, enum riak_retry retry,
+bool riak_retry_allowed(const riak_client *c, bool idempotent, enum riak_retry retry,
                         unsigned attempts_done);
 /* Next node (SIZE_MAX: first attempt of a request). */
 size_t riak_pick_node(riak_client *c, size_t after);
 /* Backoff before attempt number `attempt` + 1, in milliseconds. */
 long long riak_backoff_ms(riak_client *c, unsigned attempt);
+/* The health of a node is updated after an attempt; failures may eject it. */
+void riak_node_result(riak_client *c, size_t node, bool ok);
 /* Prefix the current error message with the node of the last attempt. */
 void riak_error_add_node(riak_client *c, riak_status st);
+void riak_sleep_ms(long long ms);
+
+/* Outcome of one attempt, passed to riak_attempt_report(). */
+typedef struct {
+    const char *method; /* HTTP method or protocol message name */
+    const char *path;
+    size_t node;
+    unsigned attempt;
+    riak_status status;
+    long http_status;
+    long long started_ms;
+    size_t received;
+    enum riak_retry retry;
+    bool will_retry;
+    const char *failure; /* logged when status is RIAK_OK but the attempt failed */
+} riak_attempt_info;
+
+/* The metrics callback is run and a failed attempt is logged. */
+void riak_attempt_report(riak_client *c, const riak_attempt_info *info);
 
 void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_response_free(riak_response *resp);

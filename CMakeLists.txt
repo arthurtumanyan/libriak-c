@@ -58,6 +58,7 @@ set(RIAK_SOURCES
   src/async.c
   src/bucket.c
   src/client.c
+  src/cluster.c
   src/datatype.c
   src/http.c
   src/kv.c
