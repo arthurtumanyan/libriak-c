@@ -6,6 +6,9 @@
 
 #include "internal.h"
 
+#include "parse.h"
+#include "pb.h"
+
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,7 +17,8 @@
 #include <time.h>
 
 #define RIAK_DEFAULT_HOST "127.0.0.1"
-#define RIAK_DEFAULT_PORT 8098u
+#define RIAK_DEFAULT_HTTP_PORT 8098u
+#define RIAK_DEFAULT_PB_PORT 8087u
 #define RIAK_DEFAULT_MAX_BODY ((size_t)64 * 1024 * 1024)
 
 riak_status riak_global_init(void) {
@@ -53,6 +57,10 @@ const char *riak_strerror(riak_status status) {
         return "unauthorized";
     case RIAK_E_CANCELLED:
         return "cancelled";
+    case RIAK_E_UNSUPPORTED:
+        return "not supported by the transport";
+    case RIAK_E_SERVER:
+        return "server error";
     }
     return "unknown error";
 }
@@ -100,8 +108,9 @@ riak_status riak_check_name(riak_client *c, const char *s, const char *what) {
 
 void riak_config_init(riak_config *cfg) {
     memset(cfg, 0, sizeof *cfg);
+    cfg->transport = RIAK_TRANSPORT_PB;
     cfg->host = RIAK_DEFAULT_HOST;
-    cfg->port = RIAK_DEFAULT_PORT;
+    cfg->port = 0; /* the transport's default */
     cfg->tls_verify = true;
     cfg->max_body_bytes = RIAK_DEFAULT_MAX_BODY;
     cfg->max_retries = 2;
@@ -134,18 +143,29 @@ static bool host_ok(const char *h) {
     return h != NULL && *h != '\0' && strpbrk(h, "/?#@ \t\r\n") == NULL;
 }
 
-static riak_status add_node(riak_client *c, size_t i, const char *host, unsigned port) {
-    if (!host_ok(host) || port > 65535) {
+static riak_status add_node(riak_client *c, size_t i, const char *host, unsigned port,
+                            unsigned http_port) {
+    if (!host_ok(host) || port > 65535 || http_port > 65535) {
         return RIAK_E_INVALID_ARG;
     }
+    bool pb = riak_is_pb(c);
     riak_node_state *n = &c->nodes[i];
-    n->port = port ? port : RIAK_DEFAULT_PORT;
+    n->port = port ? port : pb ? RIAK_DEFAULT_PB_PORT : RIAK_DEFAULT_HTTP_PORT;
     n->host = riak_strdup(host);
+    if (n->host == NULL) {
+        return RIAK_E_NOMEM;
+    }
+    /* HTTP requests go to the node port, or under Protocol Buffers to the
+     * optional HTTP port (riak_stats) */
+    unsigned hp = pb ? http_port : n->port;
+    if (hp == 0) {
+        return RIAK_OK;
+    }
     /* bracket bare IPv6 literals */
     bool v6 = strchr(host, ':') != NULL && host[0] != '[';
     n->base = riak_strprintf("%s://%s%s%s:%u", c->cfg.tls ? "https" : "http", v6 ? "[" : "", host,
-                             v6 ? "]" : "", n->port);
-    return n->host && n->base ? RIAK_OK : RIAK_E_NOMEM;
+                             v6 ? "]" : "", hp);
+    return n->base ? RIAK_OK : RIAK_E_NOMEM;
 }
 
 riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
@@ -161,7 +181,8 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
     }
     if ((cfg->client_id && !riak_header_value_ok(cfg->client_id)) ||
         (cfg->n_nodes > 0 && cfg->nodes == NULL) || cfg->n_nodes > 1024 ||
-        (unsigned)cfg->balance > RIAK_BALANCE_FAILOVER || cfg->retry_base_ms < 0 ||
+        (unsigned)cfg->balance > RIAK_BALANCE_FAILOVER ||
+        (unsigned)cfg->transport > RIAK_TRANSPORT_HTTP || cfg->retry_base_ms < 0 ||
         cfg->retry_max_ms < 0 || cfg->eject_ms < 0 || (unsigned)cfg->log_level > RIAK_LOG_ERROR ||
         /* Riak only accepts credentials over TLS; never send them in clear */
         (cfg->username && !cfg->tls) || (cfg->password && cfg->username == NULL)) {
@@ -185,12 +206,15 @@ riak_status riak_client_new(const riak_config *cfg, riak_client **out) {
         !copy_opt(&c->key_password, cfg->tls_key_password)) {
         st = RIAK_E_NOMEM;
     } else if (cfg->n_nodes == 0) {
-        st = add_node(c, 0, (cfg->host && *cfg->host) ? cfg->host : RIAK_DEFAULT_HOST,
-                      cfg->port ? cfg->port : RIAK_DEFAULT_PORT);
+        st = add_node(c, 0, (cfg->host && *cfg->host) ? cfg->host : RIAK_DEFAULT_HOST, cfg->port,
+                      cfg->http_port);
     } else {
         for (size_t i = 0; st == RIAK_OK && i < cfg->n_nodes; i++) {
-            st = add_node(c, i, cfg->nodes[i].host, cfg->nodes[i].port);
+            st = add_node(c, i, cfg->nodes[i].host, cfg->nodes[i].port, cfg->nodes[i].http_port);
         }
+    }
+    if (st == RIAK_OK && riak_is_pb(c)) {
+        st = riak_pb_client_init(c);
     }
     if (st != RIAK_OK) {
         riak_client_free(c);
@@ -225,6 +249,7 @@ void riak_client_free(riak_client *client) {
     if (client == NULL) {
         return;
     }
+    riak_pb_client_free(client);
     if (client->curl) {
         curl_easy_cleanup(client->curl);
     }
@@ -267,6 +292,10 @@ size_t riak_client_check_nodes(riak_client *client) {
     }
     size_t healthy = 0;
     for (size_t i = 0; i < client->n_nodes; i++) {
+        if (riak_is_pb(client)) {
+            healthy += riak_pb_ping(client, i + 1) == RIAK_OK;
+            continue;
+        }
         riak_request req = {.method = "GET", .url = "/ping", .pin = i + 1};
         riak_response resp = {0};
         riak_status st = riak_perform(client, &req, &resp);
@@ -302,6 +331,9 @@ riak_status riak_ping(riak_client *client) {
     if (client == NULL) {
         return RIAK_E_INVALID_ARG;
     }
+    if (riak_is_pb(client)) {
+        return riak_pb_ping(client, 0);
+    }
     riak_prepared p;
     riak_response resp = {0};
     riak_status st = riak_prepare_ping(client, &p);
@@ -314,4 +346,37 @@ riak_status riak_ping(riak_client *client) {
     }
     riak_response_free(&resp);
     return st;
+}
+
+/* ---- server information ---------------------------------------------- */
+
+void riak_server_info_free(riak_server_info *info) {
+    if (info == NULL) {
+        return;
+    }
+    free(info->node);
+    free(info->version);
+    memset(info, 0, sizeof *info);
+}
+
+riak_status riak_get_server_info(riak_client *client, riak_server_info *out) {
+    if (client == NULL || out == NULL) {
+        return RIAK_E_INVALID_ARG;
+    }
+    memset(out, 0, sizeof *out);
+    if (riak_is_pb(client)) {
+        return riak_pb_server_info(client, out);
+    }
+    char *json = NULL;
+    riak_status st = riak_get_body(client, "/stats", RIAK_BODY_JSON_OBJECT, &json);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    st = riak_parse_server_info(json, strlen(json), &out->node, &out->version);
+    free(json);
+    if (st != RIAK_OK) {
+        riak_server_info_free(out);
+        return riak_set_error(client, st, "cannot parse /stats");
+    }
+    return RIAK_OK;
 }

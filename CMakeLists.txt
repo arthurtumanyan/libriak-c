@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(libriak-c VERSION 2.0.0 LANGUAGES C
-        DESCRIPTION "C client for the Riak KV HTTP API")
+        DESCRIPTION "C client for Riak KV (Protocol Buffers and HTTP)")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -29,6 +29,32 @@ if(NOT TARGET json-c::json-c)
   pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c>=0.15)
   add_library(json-c::json-c ALIAS PkgConfig::JSONC)
 endif()
+find_package(OpenSSL 1.1.1 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PROTOBUFC REQUIRED IMPORTED_TARGET libprotobuf-c>=1.3)
+find_program(PROTOC_C protoc-c REQUIRED)
+
+# C code for the Riak protocol buffer messages is generated from proto/.
+set(RIAK_PROTOS riak riak_kv riak_dt riak_search riak_yokozuna)
+set(RIAK_PB_DIR ${PROJECT_BINARY_DIR}/pb)
+set(RIAK_PB_SOURCES)
+set(RIAK_PB_FILES)
+foreach(p ${RIAK_PROTOS})
+  list(APPEND RIAK_PB_SOURCES ${RIAK_PB_DIR}/${p}.pb-c.c)
+  list(APPEND RIAK_PB_FILES ${PROJECT_SOURCE_DIR}/proto/${p}.proto)
+endforeach()
+string(REPLACE ".pb-c.c" ".pb-c.h" RIAK_PB_HEADERS "${RIAK_PB_SOURCES}")
+add_custom_command(
+  OUTPUT ${RIAK_PB_SOURCES} ${RIAK_PB_HEADERS}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${RIAK_PB_DIR}
+  COMMAND ${PROTOC_C} --proto_path=${PROJECT_SOURCE_DIR}/proto --c_out=${RIAK_PB_DIR}
+          ${RIAK_PB_FILES}
+  DEPENDS ${RIAK_PB_FILES}
+  COMMENT "Generating protocol buffer code"
+  VERBATIM)
+add_library(riak_pbgen OBJECT ${RIAK_PB_SOURCES})
+target_include_directories(riak_pbgen PUBLIC $<BUILD_INTERFACE:${RIAK_PB_DIR}>)
+target_link_libraries(riak_pbgen PUBLIC PkgConfig::PROTOBUFC)
 
 add_library(riak_warnings INTERFACE)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -56,6 +82,7 @@ endif()
 
 set(RIAK_SOURCES
   src/async.c
+  src/async_pb.c
   src/bucket.c
   src/client.c
   src/cluster.c
@@ -64,6 +91,11 @@ set(RIAK_SOURCES
   src/kv.c
   src/multipart.c
   src/parse.c
+  src/pb.c
+  src/pb_dt.c
+  src/pb_kv.c
+  src/pb_query.c
+  src/pbconn.c
   src/query.c
   src/util.c)
 
@@ -74,17 +106,17 @@ target_include_directories(riak_objects PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 target_compile_definitions(riak_objects PRIVATE RIAK_BUILDING _POSIX_C_SOURCE=200809L)
-target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c
-                      PRIVATE $<BUILD_INTERFACE:riak_warnings>)
+target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c OpenSSL::SSL
+                      riak_pbgen PRIVATE $<BUILD_INTERFACE:riak_warnings>)
 
-add_library(riak SHARED $<TARGET_OBJECTS:riak_objects>)
-add_library(riak_static STATIC $<TARGET_OBJECTS:riak_objects>)
+add_library(riak SHARED $<TARGET_OBJECTS:riak_objects> $<TARGET_OBJECTS:riak_pbgen>)
+add_library(riak_static STATIC $<TARGET_OBJECTS:riak_objects> $<TARGET_OBJECTS:riak_pbgen>)
 foreach(t riak riak_static)
   target_include_directories(${t} PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c
-                        $<BUILD_INTERFACE:riak_warnings>)
+  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c OpenSSL::SSL
+                        PkgConfig::PROTOBUFC $<BUILD_INTERFACE:riak_warnings>)
   set_target_properties(${t} PROPERTIES OUTPUT_NAME riak-c)
 endforeach()
 target_compile_definitions(riak INTERFACE RIAK_SHARED)

@@ -83,7 +83,9 @@ typedef enum {
     RIAK_E_PARSE,        /**< The response body could not be parsed. */
     RIAK_E_NOT_MODIFIED, /**< HTTP 304: a conditional get found the object unchanged. */
     RIAK_E_UNAUTHORIZED, /**< HTTP 401 or 403: authentication or permission failure. */
-    RIAK_E_CANCELLED     /**< An async request was dropped by riak_async_free(). */
+    RIAK_E_CANCELLED,    /**< An async request was dropped by riak_async_free(). */
+    RIAK_E_UNSUPPORTED,  /**< The operation or option is not available on the selected transport. */
+    RIAK_E_SERVER        /**< Protocol Buffers: the server returned an error message. */
 } riak_status;
 
 /** Severity passed to a ::riak_log_fn. */
@@ -102,22 +104,30 @@ typedef enum {
  */
 typedef void (*riak_log_fn)(riak_log_level level, const char *message, void *ctx);
 
-/** Measurements of one HTTP attempt, reported through riak_config::metrics_fn. */
+/** Wire protocol used to talk to Riak, see riak_config::transport. */
+typedef enum {
+    RIAK_TRANSPORT_PB = 0, /**< Protocol Buffers (default port 8087). */
+    RIAK_TRANSPORT_HTTP    /**< HTTP (default port 8098). */
+} riak_transport;
+
+/** Measurements of one attempt, reported through riak_config::metrics_fn. */
 typedef struct {
-    const char *method;    /**< "GET", "PUT", "POST" or "DELETE". */
-    const char *path;      /**< Request path and query, without scheme and host. */
-    const char *host;      /**< Node the attempt was sent to. */
-    unsigned port;         /**< Port of that node. */
-    unsigned attempt;      /**< 0 for the first try, 1 for the first retry, and so on. */
-    riak_status status;    /**< ::RIAK_OK when a response arrived, whatever its HTTP code. */
-    long http_status;      /**< HTTP status, 0 when no response was received. */
-    double duration_ms;    /**< Time from sending to completion. */
-    size_t bytes_received; /**< Size of the response body. */
-    bool will_retry;       /**< Whether another attempt follows. */
+    const char *method;       /**< HTTP method, or the request message name ("RpbGetReq"). */
+    const char *path;         /**< Request path and query, without scheme and host; for
+                                   Protocol Buffers the equivalent HTTP resource path. */
+    const char *host;         /**< Node the attempt was sent to. */
+    unsigned port;            /**< Port of that node. */
+    unsigned attempt;         /**< 0 for the first try, 1 for the first retry, and so on. */
+    riak_status status;       /**< ::RIAK_OK when a response arrived, whatever its HTTP code. */
+    long http_status;         /**< HTTP status, 0 when no response was received. */
+    double duration_ms;       /**< Time from sending to completion. */
+    size_t bytes_received;    /**< Size of the response body. */
+    bool will_retry;          /**< Whether another attempt follows. */
+    riak_transport transport; /**< Transport of the attempt. */
 } riak_request_metrics;
 
 /**
- * Metrics callback, called once for every HTTP attempt.
+ * Metrics callback, called once for every attempt.
  * @param m Measurements; valid only during the call.
  * @param ctx riak_config::metrics_ctx.
  */
@@ -137,8 +147,9 @@ typedef struct riak_client riak_client;
 
 /** One node of a cluster, see riak_config::nodes. */
 typedef struct {
-    const char *host; /**< Host name or IP address (IPv6 literals are accepted). */
-    unsigned port;    /**< HTTP port; 0 selects 8098. */
+    const char *host;   /**< Host name or IP address (IPv6 literals are accepted). */
+    unsigned port;      /**< Port; 0 selects 8087 (Protocol Buffers) or 8098 (HTTP). */
+    unsigned http_port; /**< Protocol Buffers: HTTP port used by riak_stats(); 0: none. */
 } riak_node;
 
 /** Node selection strategy of a multi-node client. */
@@ -153,15 +164,21 @@ typedef enum {
  * copied by riak_client_new(); the structure may be discarded afterwards.
  */
 typedef struct {
-    const char *host;        /**< Node address; default "127.0.0.1". Ignored when #nodes is set. */
-    unsigned port;           /**< Node HTTP port; default 8098. Ignored when #nodes is set. */
-    bool tls;                /**< HTTPS is used. */
+    riak_transport transport; /**< Wire protocol; default ::RIAK_TRANSPORT_PB. */
+    const char *host;         /**< Node address; default "127.0.0.1". Ignored when #nodes is set. */
+    /** Node port; 0 (the default) selects 8087 for Protocol Buffers and 8098
+     *  for HTTP. Ignored when #nodes is set. */
+    unsigned port;
+    unsigned http_port;      /**< Protocol Buffers: HTTP port for riak_stats(); 0: none. */
+    bool tls;                /**< HTTPS, or STARTTLS on a Protocol Buffers connection. */
     bool tls_verify;         /**< Peer certificate and host name are verified; default true. */
     const char *ca_file;     /**< CA bundle (PEM) used for verification; NULL: system store. */
     long connect_timeout_ms; /**< Connection timeout; 0: libcurl default. */
     long timeout_ms;         /**< Whole-request timeout; 0: no limit. */
-    const char *client_id;   /**< Sent as X-Riak-ClientId when set. */
-    size_t max_body_bytes;   /**< Response size limit; 0 selects 64 MiB. */
+    const char *client_id;   /**< Sent as X-Riak-ClientId, or with RpbSetClientIdReq. */
+    size_t max_body_bytes;   /**< Response size limit (per message on streams); 0: 64 MiB. */
+    /** Async Protocol Buffers requests: connections opened per node; 0 selects 8. */
+    unsigned pb_max_connections_per_node;
 
     /** Cluster nodes. When #n_nodes is greater than 0 they replace #host and #port. */
     const riak_node *nodes;
@@ -181,16 +198,24 @@ typedef struct {
     unsigned fail_threshold; /**< Consecutive failures after which a node is ejected; default 3. */
     long eject_ms;           /**< Time an ejected node is skipped; default 5000. */
 
-    const char *username; /**< Riak security user (HTTP Basic); refused unless #tls is set. */
+    const char *username; /**< Riak security user; refused unless #tls is set. */
     const char *password; /**< Password of #username; wiped from memory when the client is freed. */
     const char *tls_cert_file;    /**< Client certificate (PEM) for certificate authentication. */
     const char *tls_key_file;     /**< Private key (PEM) of #tls_cert_file. */
     const char *tls_key_password; /**< Passphrase of an encrypted #tls_key_file. */
+    /**
+     * Interoperability with nodes on an old Erlang/OTP TLS stack (Riak KV 2.2
+     * and older), which reject OpenSSL 3 clients: TLS 1.2 at most, no RSA-PSS
+     * or EdDSA signature algorithms, legacy renegotiation accepted and no DHE
+     * key exchange (such nodes then use RSA key exchange, without forward
+     * secrecy). Off by default; meant only for such nodes.
+     */
+    bool tls_legacy;
 
     riak_log_fn log_fn;         /**< Log callback, run on the thread issuing the request. */
     riak_log_level log_level;   /**< Minimum level passed to #log_fn; default ::RIAK_LOG_WARN. */
     void *log_ctx;              /**< Passed to #log_fn. */
-    riak_metrics_fn metrics_fn; /**< Metrics callback, called after every HTTP attempt. */
+    riak_metrics_fn metrics_fn; /**< Metrics callback, called after every attempt. */
     void *metrics_ctx;          /**< Passed to #metrics_fn. */
 } riak_config;
 
@@ -277,6 +302,17 @@ typedef struct {
      *  clock covering all of them, so writing it back resolves the conflict. */
     riak_resolver_fn resolver;
     void *resolver_ctx; /**< Passed to #resolver. */
+    bool head;          /**< Get: only metadata is returned; riak_object::data is empty. */
+    bool basic_quorum;  /**< Get: a not-found answer is returned once a quorum agrees. */
+    bool notfound_ok;   /**< Get: a not-found answer counts towards the read quorum. */
+    bool sloppy_quorum; /**< Protocol Buffers: fallback vnodes count towards quorums. */
+    unsigned n_val;     /**< Protocol Buffers: replica count for this request; 0: bucket's. */
+    /** Protocol Buffers get: ::RIAK_E_NOT_MODIFIED is returned when the stored
+     *  object still has the vector clock #vclock. */
+    bool if_modified;
+    /** Protocol Buffers put: ::RIAK_E_PRECONDITION is returned unless the
+     *  stored object still has the vector clock #vclock. */
+    bool if_not_modified;
 } riak_opts;
 
 /** NULL-terminated string list; released with riak_strlist_free(). */
@@ -516,11 +552,128 @@ RIAK_API riak_status riak_type_reset_bucket_props(riak_client *client, const cha
 RIAK_API riak_status riak_get_type_props(riak_client *client, const char *type, char **json);
 
 /**
- * Node statistics (/stats) as a JSON object.
+ * Node statistics (/stats) as a JSON object. Statistics are served only over
+ * HTTP: with the Protocol Buffers transport the request goes to the first
+ * node with an HTTP port (riak_config::http_port, riak_node::http_port).
  * @param client Client handle.
  * @param json Receives the document; released with riak_free().
+ * @return ::RIAK_OK, or ::RIAK_E_UNSUPPORTED over Protocol Buffers without an HTTP port.
  */
 RIAK_API riak_status riak_stats(riak_client *client, char **json);
+
+/** Node name and version reported by riak_server_info(); released with riak_server_info_free(). */
+typedef struct {
+    char *node;    /**< Erlang node name, e.g. "riak@127.0.0.1". */
+    char *version; /**< Riak version. */
+} riak_server_info;
+
+/**
+ * Name and version of the node that answers.
+ * @param client Client handle.
+ * @param out Receives the information; released with riak_server_info_free().
+ */
+RIAK_API riak_status riak_get_server_info(riak_client *client, riak_server_info *out);
+
+/**
+ * Frees a ::riak_server_info; NULL is accepted.
+ * @param info Information to clear.
+ */
+RIAK_API void riak_server_info_free(riak_server_info *info);
+
+/** One vnode of a preference list. */
+typedef struct {
+    long long partition; /**< Partition index. */
+    char *node;          /**< Node that owns the vnode. */
+    bool primary;        /**< The vnode is a primary, not a fallback. */
+} riak_preflist_item;
+
+/** Preference list of a key; released with riak_preflist_free(). */
+typedef struct {
+    riak_preflist_item *items; /**< The vnodes. */
+    size_t count;              /**< Number of entries in #items. */
+} riak_preflist;
+
+/**
+ * Preference list (the vnodes that hold the replicas) of a key.
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param out Receives the list; released with riak_preflist_free().
+ */
+RIAK_API riak_status riak_get_preflist(riak_client *client, const char *type, const char *bucket,
+                                       const char *key, riak_preflist *out);
+
+/**
+ * Frees a ::riak_preflist; NULL is accepted.
+ * @param list List to clear.
+ */
+RIAK_API void riak_preflist_free(riak_preflist *list);
+
+/**
+ * Callback of riak_list_keys_stream() and riak_list_buckets_stream().
+ * @param name A key or bucket name; valid only during the call.
+ * @param len Length of @p name.
+ * @param ctx Context passed to the listing call.
+ * @return true to continue, false to stop the listing.
+ */
+typedef bool (*riak_name_cb)(const char *name, size_t len, void *ctx);
+
+/**
+ * Lists the keys of a bucket, passing each to @p cb as it arrives (expensive:
+ * every key in the cluster is visited).
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param cb Called with each key.
+ * @param ctx Passed unchanged to the callback.
+ */
+RIAK_API riak_status riak_list_keys_stream(riak_client *client, const char *type,
+                                           const char *bucket, riak_name_cb cb, void *ctx);
+
+/**
+ * Lists the buckets of a bucket type, passing each to @p cb as it arrives.
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param cb Called with each bucket name.
+ * @param ctx Passed unchanged to the callback.
+ */
+RIAK_API riak_status riak_list_buckets_stream(riak_client *client, const char *type,
+                                              riak_name_cb cb, void *ctx);
+
+/** One entry of a coverage plan. */
+typedef struct {
+    char *host;          /**< Address of the node to query. */
+    unsigned port;       /**< Protocol Buffers port of that node. */
+    char *description;   /**< Human-readable key space description. */
+    char *cover_context; /**< Opaque context (base64) for riak_index_query::cover_context. */
+} riak_coverage_entry;
+
+/** Coverage plan of a bucket; released with riak_coverage_free(). */
+typedef struct {
+    riak_coverage_entry *entries; /**< The entries. */
+    size_t count;                 /**< Number of entries. */
+} riak_coverage_plan;
+
+/**
+ * Coverage plan for parallel secondary index queries (Protocol Buffers only).
+ * Each entry is queried with riak_index_query::cover_context set.
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param min_partitions Minimum number of entries; 0 selects the server default.
+ * @param out Receives the plan; released with riak_coverage_free().
+ * @return ::RIAK_OK, or ::RIAK_E_UNSUPPORTED over HTTP or when the node does not
+ *         implement coverage requests.
+ */
+RIAK_API riak_status riak_get_coverage(riak_client *client, const char *type, const char *bucket,
+                                       unsigned min_partitions, riak_coverage_plan *out);
+
+/**
+ * Frees a ::riak_coverage_plan; NULL is accepted.
+ * @param plan Plan to clear.
+ */
+RIAK_API void riak_coverage_free(riak_coverage_plan *plan);
 
 /** @} */
 
@@ -540,6 +693,8 @@ typedef struct {
     const char *term_regex;     /**< Range queries: terms are filtered by this regex. */
     const char *bucket_type;    /**< Bucket type; NULL selects the default type. */
     unsigned server_timeout_ms; /**< Riak-side timeout; 0 selects the server default. */
+    /** Protocol Buffers: limits the query to one entry of riak_coverage(). */
+    const char *cover_context;
 } riak_index_query;
 
 /** One page of index results; released with riak_index_result_free(). */

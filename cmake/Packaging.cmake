@@ -35,7 +35,7 @@ set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME libriak-c${PROJECT_VERSION_MAJOR})
 set(CPACK_DEBIAN_DEV_PACKAGE_NAME libriak-c-dev)
 set(CPACK_DEBIAN_DEV_PACKAGE_SECTION libdevel)
 set(CPACK_DEBIAN_DEV_PACKAGE_DEPENDS
-  "libriak-c${PROJECT_VERSION_MAJOR} (= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE}), libcurl4-openssl-dev | libcurl-dev, libjson-c-dev")
+  "libriak-c${PROJECT_VERSION_MAJOR} (= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE}), libcurl4-openssl-dev | libcurl-dev, libjson-c-dev, libprotobuf-c-dev, libssl-dev")
 
 # RPM
 set(CPACK_RPM_COMPONENT_INSTALL ON)
@@ -47,7 +47,7 @@ set(CPACK_RPM_PACKAGE_GROUP "System Environment/Libraries")
 set(CPACK_RPM_PACKAGE_AUTOREQ ON)
 set(CPACK_RPM_RUNTIME_PACKAGE_NAME libriak-c)
 set(CPACK_RPM_DEV_PACKAGE_NAME libriak-c-devel)
-set(CPACK_RPM_DEV_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}, libcurl-devel, json-c-devel")
+set(CPACK_RPM_DEV_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}, libcurl-devel, json-c-devel, protobuf-c-devel, openssl-devel")
 set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
 
 include(CPack)

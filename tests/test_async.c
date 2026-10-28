@@ -45,6 +45,7 @@ static double now_ms(void) {
 static riak_async *make(const riak_node *nodes, size_t n, unsigned retries) {
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.nodes = nodes;
     cfg.n_nodes = n;
     cfg.balance = RIAK_BALANCE_FAILOVER;
@@ -79,7 +80,7 @@ static void count(riak_async_result *res, void *ctx) {
 }
 
 static void test_basic_ops(void) {
-    riak_node node[1] = {{"127.0.0.1", ports[0]}};
+    riak_node node[1] = {{"127.0.0.1", ports[0], 0}};
     riak_async *a = make(node, 1, 0);
     tally t = {0};
     CHECK_EQ_INT(riak_async_ping(a, count, &t), RIAK_OK);
@@ -121,7 +122,7 @@ static void test_basic_ops(void) {
 }
 
 static void test_concurrency(void) {
-    riak_node node[1] = {{"127.0.0.1", ports[1]}};
+    riak_node node[1] = {{"127.0.0.1", ports[1], 0}};
     riak_async *a = make(node, 1, 0);
     set_mode(1, "slow"); /* every request takes 300 ms */
     tally t = {0};
@@ -140,7 +141,7 @@ static void test_concurrency(void) {
 
 static void test_retries(void) {
     /* a dead node first: refused connections fail over */
-    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    riak_node nodes[2] = {{"127.0.0.1", 1, 0}, {"127.0.0.1", ports[0], 0}};
     riak_async *a = make(nodes, 2, 2);
     tally t = {0};
     for (int i = 0; i < 5; i++) {
@@ -154,7 +155,7 @@ static void test_retries(void) {
     riak_async_free(a);
 
     /* 503: GET is retried on the next node, POST is not */
-    riak_node two[2] = {{"127.0.0.1", ports[1]}, {"127.0.0.1", ports[2]}};
+    riak_node two[2] = {{"127.0.0.1", ports[1], 0}, {"127.0.0.1", ports[2], 0}};
     a = make(two, 2, 2);
     set_mode(1, "503");
     tally g = {0}, post = {0};
@@ -176,7 +177,7 @@ static void cancelled(riak_async_result *res, void *ctx) {
 }
 
 static void test_cancel_and_timeout(void) {
-    riak_node node[1] = {{"127.0.0.1", ports[2]}};
+    riak_node node[1] = {{"127.0.0.1", ports[2], 0}};
     riak_async *a = make(node, 1, 0);
     set_mode(2, "slow");
     tally t = {0};
@@ -205,7 +206,7 @@ static void keep_and_delete(riak_async_result *res, void *ctx) {
 }
 
 static void test_chaining_and_ownership(void) {
-    riak_node node[1] = {{"127.0.0.1", ports[0]}};
+    riak_node node[1] = {{"127.0.0.1", ports[0], 0}};
     chain c = {.a = make(node, 1, 0)};
     CHECK_EQ_INT(riak_async_get(c.a, "ab", "k2", NULL, keep_and_delete, &c), RIAK_OK);
     CHECK_EQ_INT(riak_async_run(c.a, 5000), 0);
@@ -268,7 +269,7 @@ static void drive(riak_async *a, loop *l) {
 }
 
 static void test_external_loop(void) {
-    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    riak_node nodes[2] = {{"127.0.0.1", 1, 0}, {"127.0.0.1", ports[0], 0}};
     riak_async *a = make(nodes, 2, 2);
     loop l = {.timer_ms = -1};
     CHECK_EQ_INT(riak_async_set_loop(a, on_socket, on_timer, &l), RIAK_OK);

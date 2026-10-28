@@ -21,7 +21,7 @@ certificate signed by the test CA, node 2 requires neither.
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
 vclock create siblings). Special buckets: "many" (1000 streamed keys),
-"siblings" (always 300 with a text body), "unavailable" (503), "truncated"
+"siblings" (always 300 with a text body), "needs-https" (426), "unavailable" (503), "truncated"
 (cut-off key stream), "notjson" (props are not an object), "nolocation"
 (POST without Location).
 """
@@ -163,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        if body:
+        if body and self.command != "HEAD":
             self.wfile.write(body)
 
     def _json(self, code, doc):
@@ -218,6 +218,9 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     # ---- GET ----------------------------------------------------------
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
         btype, parts, query = self._route()
         if parts == ["_last"]:
@@ -231,10 +234,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"hits": hits})
         if self._failing():
             return None
+        if len(parts) == 4 and parts[1] == "needs-https":
+            return self._send(426, "Security is enabled and Riak does not accept credentials "
+                                   "over HTTP. Try HTTPS instead.\n")
         if parts == ["ping"]:
             return self._send(200, "OK", {"Content-Type": "text/plain"})
         if parts == ["stats"]:
-            return self._json(200, {"vnode_gets": 0, "node_gets": 0, "ring_num_partitions": 64})
+            return self._json(200, {"vnode_gets": 0, "node_gets": 0, "ring_num_partitions": 64,
+                                    "nodename": "riak@stub", "riak_kv_version": "2.2.3"})
         if len(parts) == 3 and parts[0] == "types" and parts[2] == "props":
             if parts[1] not in TYPES:
                 return self._send(404, "no such bucket type\n")
@@ -247,6 +254,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._dt_get(btype, parts[1], parts[3], query)
         if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "index":
             return self._index_query(btype, parts[1], parts[3], parts[4:], query)
+        if parts == ["buckets"] and query.get("buckets") == ["stream"]:
+            with LOCK:
+                names = sorted({b for t, b, _ in STORE if t == btype} | {STREAM_BUCKET})
+            body = "".join(json.dumps({"buckets": names[i:i + 2]}) for i in range(0, len(names), 2))
+            return self._send(200, '{"buckets":[]}' + body, {"Content-Type": "application/json"})
+        if len(parts) == 5 and parts[0] == "buckets" and parts[4] == "preflist":
+            return self._json(200, {"preflist": [
+                {"partition": 0, "node": "riak@a", "primary": True},
+                {"partition": 1, "node": "riak@b", "primary": False}]})
         if parts == ["buckets"] and query.get("buckets") == ["true"]:
             with LOCK:
                 names = {b for t, b, _ in STORE if t == btype}

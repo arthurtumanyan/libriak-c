@@ -17,10 +17,10 @@
 #include <json-c/json.h>
 
 #include "internal.h"
+#include "pb.h"
 #include "util.h"
 
-/* Maps nest; parsing, building and serializing stop at this depth. */
-#define MAX_DEPTH 32
+#define MAX_DEPTH RIAK_DT_MAX_DEPTH
 
 /* ---- names --------------------------------------------------------- */
 
@@ -213,29 +213,6 @@ riak_status riak_dt_parse(const char *json, size_t len, riak_datatype *out) {
 }
 
 /* ---- operations ---------------------------------------------------- */
-
-typedef struct {
-    char *name;
-    riak_dt_type type;
-    riak_dt_op *nested; /* SET / MAP fields */
-    char *reg;
-    bool flag;
-    int64_t delta;
-} map_field;
-
-struct riak_dt_op {
-    riak_dt_type type;
-    int depth; /* nesting level inside a map operation */
-    bool invalid;
-    bool nomem;
-    int64_t delta;
-    riak_strlist adds, removes;
-    size_t add_cap, remove_cap;
-    map_field *fields; /* updates */
-    size_t n_fields, field_cap;
-    map_field *removed; /* removals: name + type only */
-    size_t n_removed, removed_cap;
-};
 
 riak_dt_op *riak_dt_op_new(riak_dt_type type) {
     if (!valid_type(type) || type == RIAK_DT_REGISTER || type == RIAK_DT_FLAG) {
@@ -648,6 +625,10 @@ riak_status riak_dt_fetch(riak_client *client, const char *type, const char *buc
     if (st == RIAK_OK) {
         st = dt_url(client, type, bucket, key, &url);
     }
+    if (st == RIAK_OK && riak_is_pb(client)) {
+        riak_buf_free(&url);
+        return riak_pb_dt_fetch(client, type, bucket, key, o, out);
+    }
     if (st == RIAK_OK &&
         (riak_url_append_quorum(&url, "r", o->r) != 0 ||
          riak_url_append_quorum(&url, "pr", o->pr) != 0 ||
@@ -687,6 +668,15 @@ riak_status riak_dt_update(riak_client *client, const char *type, const char *bu
         return RIAK_E_INVALID_ARG;
     }
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
+    if (riak_is_pb(client)) {
+        riak_status st;
+        if ((st = riak_check_name(client, type, "bucket type")) != RIAK_OK ||
+            (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK ||
+            (key && (st = riak_check_name(client, key, "key")) != RIAK_OK)) {
+            return st;
+        }
+        return riak_pb_dt_update(client, type, bucket, key, op, context, o, out, created_key);
+    }
     char *body = NULL;
     riak_status st = riak_dt_op_to_json(op, context, &body);
     if (st != RIAK_OK) {

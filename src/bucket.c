@@ -14,6 +14,7 @@
 #include <json-c/json.h>
 
 #include "parse.h"
+#include "pb.h"
 
 static riak_status check_type(riak_client *c, const char *type) {
     return type ? riak_check_name(c, type, "bucket type") : RIAK_OK;
@@ -47,6 +48,42 @@ riak_status riak_get_body(riak_client *c, const char *url, int kind, char **body
     return st;
 }
 
+typedef struct {
+    riak_strlist list;
+    size_t cap;
+    bool nomem;
+} name_acc;
+
+static bool collect_name(const char *name, size_t len, void *ctx) {
+    name_acc *a = ctx;
+    if (riak_strlist_push(&a->list, &a->cap, name, len) != 0) {
+        a->nomem = true;
+        return false;
+    }
+    return true;
+}
+
+/* Protocol Buffers: a listing is collected into a NULL-terminated list. */
+static riak_status collect_names(riak_client *c, const char *type, const char *bucket,
+                                 riak_strlist *out) {
+    name_acc a = {0};
+    riak_status st = bucket ? riak_pb_list_keys(c, type, bucket, collect_name, &a)
+                            : riak_pb_list_buckets(c, type, collect_name, &a);
+    if (st == RIAK_OK && a.nomem) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    if (st == RIAK_OK && a.list.items == NULL &&
+        (a.list.items = (char **)calloc(1, sizeof(char *))) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    if (st != RIAK_OK) {
+        riak_strlist_free(&a.list);
+        return st;
+    }
+    *out = a.list;
+    return RIAK_OK;
+}
+
 riak_status riak_type_list_buckets(riak_client *client, const char *type, riak_strlist *out) {
     if (client == NULL || out == NULL) {
         return RIAK_E_INVALID_ARG;
@@ -55,6 +92,9 @@ riak_status riak_type_list_buckets(riak_client *client, const char *type, riak_s
     riak_status st = check_type(client, type);
     if (st != RIAK_OK) {
         return st;
+    }
+    if (riak_is_pb(client)) {
+        return collect_names(client, type, NULL, out);
     }
     riak_buf url = {0};
     if (riak_buf_append_str(&url, client->root) != 0 ||
@@ -108,6 +148,9 @@ riak_status riak_type_list_keys(riak_client *client, const char *type, const cha
     if ((st = check_type(client, type)) != RIAK_OK ||
         (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
         return st;
+    }
+    if (riak_is_pb(client)) {
+        return collect_names(client, type, bucket, out);
     }
     riak_keystream *ks = riak_keystream_new();
     riak_buf url = {0};
@@ -177,6 +220,9 @@ riak_status riak_type_get_bucket_props(riak_client *client, const char *type, co
         (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
         return st;
     }
+    if (riak_is_pb(client)) {
+        return riak_pb_get_bucket_props(client, type, bucket, json);
+    }
     riak_buf url = {0};
     if (riak_url_bucket(&url, client, type, bucket, "props", NULL) != 0) {
         riak_buf_free(&url);
@@ -195,6 +241,14 @@ riak_status riak_type_set_bucket_props(riak_client *client, const char *type, co
                                        const char *json) {
     if (client == NULL || json == NULL) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (riak_is_pb(client)) {
+        riak_status st;
+        if ((st = check_type(client, type)) != RIAK_OK ||
+            (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
+            return st;
+        }
+        return riak_pb_set_bucket_props(client, type, bucket, json);
     }
     riak_response resp = {0};
     riak_status st = props_request(client, type, bucket, "PUT", json, &resp);
@@ -216,6 +270,14 @@ riak_status riak_type_reset_bucket_props(riak_client *client, const char *type,
                                          const char *bucket) {
     if (client == NULL) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (riak_is_pb(client)) {
+        riak_status st;
+        if ((st = check_type(client, type)) != RIAK_OK ||
+            (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
+            return st;
+        }
+        return riak_pb_reset_bucket_props(client, type, bucket);
     }
     riak_response resp = {0};
     riak_status st = props_request(client, type, bucket, "DELETE", NULL, &resp);
@@ -242,6 +304,9 @@ riak_status riak_get_type_props(riak_client *client, const char *type, char **js
     if (st != RIAK_OK) {
         return st;
     }
+    if (riak_is_pb(client)) {
+        return riak_pb_get_type_props(client, type, json);
+    }
     riak_buf url = {0};
     if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "types/") != 0 ||
         riak_url_append_escaped(&url, type) != 0 || riak_buf_append_str(&url, "/props") != 0) {
@@ -258,12 +323,215 @@ riak_status riak_stats(riak_client *client, char **json) {
         return RIAK_E_INVALID_ARG;
     }
     *json = NULL;
+    size_t pin = 0;
+    if (riak_is_pb(client)) {
+        /* Protocol Buffers has no statistics: the node's HTTP port serves them */
+        for (size_t i = 0; pin == 0 && i < client->n_nodes; i++) {
+            if (client->nodes[i].base != NULL) {
+                pin = i + 1;
+            }
+        }
+        if (pin == 0) {
+            return riak_set_error(client, RIAK_E_UNSUPPORTED,
+                                  "statistics need an HTTP port (riak_config.http_port)");
+        }
+    }
+    riak_request req = {.method = "GET", .url = "/stats", .pin = pin};
+    riak_response resp = {0};
+    riak_status st = riak_perform(client, &req, &resp);
+    if (st == RIAK_OK) {
+        json_object *obj = NULL;
+        if (resp.status != 200) {
+            st = riak_http_error(client, &resp);
+        } else if ((obj = json_tokener_parse(resp.body.data ? resp.body.data : "")) == NULL ||
+                   !json_object_is_type(obj, json_type_object)) {
+            st = riak_set_error(client, RIAK_E_PARSE, "response is not a JSON object");
+        } else if ((*json = riak_buf_steal(&resp.body, NULL)) == NULL) {
+            st = riak_set_error(client, RIAK_E_NOMEM, "out of memory");
+        }
+        json_object_put(obj);
+    }
+    riak_response_free(&resp);
+    return st;
+}
+
+/* ---- streamed listings ------------------------------------------------ */
+
+typedef struct {
+    riak_keystream *ks;
+    riak_name_cb cb;
+    void *ctx;
+    bool stopped;
+} name_stream;
+
+/* Names parsed so far are handed to the callback as the body arrives. */
+static bool name_sink(void *ctx, const char *data, size_t len, riak_status *abort_status) {
+    name_stream *s = ctx;
+    riak_status st = riak_keystream_feed(s->ks, data, len);
+    if (st != RIAK_OK) {
+        *abort_status = st;
+        return false;
+    }
+    riak_strlist l;
+    riak_keystream_take(s->ks, &l);
+    bool more = true;
+    for (size_t i = 0; more && i < l.count; i++) {
+        more = s->cb(l.items[i], strlen(l.items[i]), s->ctx);
+    }
+    riak_strlist_free(&l);
+    if (!more) {
+        s->stopped = true;
+        *abort_status = RIAK_E_PARSE;
+    }
+    return more;
+}
+
+static riak_status http_list_stream(riak_client *c, const char *type, const char *bucket,
+                                    riak_name_cb cb, void *ctx) {
     riak_buf url = {0};
-    if (riak_buf_append_str(&url, client->root) != 0 || riak_buf_append_str(&url, "stats") != 0) {
+    int rc;
+    if (bucket) {
+        rc = riak_url_bucket(&url, c, type, bucket, "keys", NULL) ||
+             riak_url_append_query(&url, "keys", "stream");
+    } else {
+        rc = riak_buf_append_str(&url, c->root) ||
+             (type && (riak_buf_append_str(&url, "types/") || riak_url_append_escaped(&url, type) ||
+                       riak_buf_append_str(&url, "/"))) ||
+             riak_buf_append_str(&url, "buckets?buckets=stream");
+    }
+    name_stream s = {.ks = rc ? NULL : riak_keystream_new_field(bucket ? "keys" : "buckets"),
+                     .cb = cb,
+                     .ctx = ctx};
+    if (s.ks == NULL) {
+        riak_buf_free(&url);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    riak_request req = {
+        .method = "GET", .url = url.data, .sink = name_sink, .sink_ctx = &s, .unbounded = true};
+    riak_response resp = {0};
+    riak_status st = riak_perform(c, &req, &resp);
+    if (s.stopped) {
+        riak_clear_error(c); /* the callback asked to stop */
+        st = RIAK_OK;
+    } else if (st == RIAK_OK) {
+        riak_strlist rest;
+        if (resp.status != 200) {
+            st = riak_http_error(c, &resp);
+        } else if ((st = riak_keystream_finish(s.ks, &rest)) != RIAK_OK) {
+            riak_set_error(c, st, "truncated listing");
+        } else {
+            riak_strlist_free(&rest);
+        }
+    }
+    riak_response_free(&resp);
+    riak_keystream_free(s.ks);
+    riak_buf_free(&url);
+    return st;
+}
+
+riak_status riak_list_keys_stream(riak_client *client, const char *type, const char *bucket,
+                                  riak_name_cb cb, void *ctx) {
+    if (client == NULL || cb == NULL) {
+        return RIAK_E_INVALID_ARG;
+    }
+    riak_status st;
+    if ((st = check_type(client, type)) != RIAK_OK ||
+        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
+        return st;
+    }
+    return riak_is_pb(client) ? riak_pb_list_keys(client, type, bucket, cb, ctx)
+                              : http_list_stream(client, type, bucket, cb, ctx);
+}
+
+riak_status riak_list_buckets_stream(riak_client *client, const char *type, riak_name_cb cb,
+                                     void *ctx) {
+    if (client == NULL || cb == NULL) {
+        return RIAK_E_INVALID_ARG;
+    }
+    riak_status st = check_type(client, type);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    return riak_is_pb(client) ? riak_pb_list_buckets(client, type, cb, ctx)
+                              : http_list_stream(client, type, NULL, cb, ctx);
+}
+
+/* ---- preference lists and coverage ------------------------------------ */
+
+void riak_preflist_free(riak_preflist *list) {
+    if (list == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i].node);
+    }
+    free(list->items);
+    memset(list, 0, sizeof *list);
+}
+
+riak_status riak_get_preflist(riak_client *client, const char *type, const char *bucket,
+                              const char *key, riak_preflist *out) {
+    if (client == NULL || out == NULL) {
+        return RIAK_E_INVALID_ARG;
+    }
+    memset(out, 0, sizeof *out);
+    riak_status st;
+    if ((st = check_type(client, type)) != RIAK_OK ||
+        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK ||
+        (st = riak_check_name(client, key, "key")) != RIAK_OK) {
+        return st;
+    }
+    if (riak_is_pb(client)) {
+        return riak_pb_preflist(client, type, bucket, key, out);
+    }
+    riak_buf url = {0};
+    if (riak_url_bucket(&url, client, type ? type : "default", bucket, "keys", key) != 0 ||
+        riak_buf_append_str(&url, "/preflist") != 0) {
         riak_buf_free(&url);
         return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
     }
-    riak_status st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, json);
+    char *body = NULL;
+    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, &body);
     riak_buf_free(&url);
-    return st;
+    if (st != RIAK_OK) {
+        return st;
+    }
+    st = body ? riak_parse_preflist(body, strlen(body), out) : RIAK_E_PARSE;
+    free(body);
+    if (st != RIAK_OK) {
+        riak_preflist_free(out);
+        return riak_set_error(client, st, "cannot parse preference list");
+    }
+    return RIAK_OK;
+}
+
+void riak_coverage_free(riak_coverage_plan *plan) {
+    if (plan == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < plan->count; i++) {
+        free(plan->entries[i].host);
+        free(plan->entries[i].description);
+        free(plan->entries[i].cover_context);
+    }
+    free(plan->entries);
+    memset(plan, 0, sizeof *plan);
+}
+
+riak_status riak_get_coverage(riak_client *client, const char *type, const char *bucket,
+                              unsigned min_partitions, riak_coverage_plan *out) {
+    if (client == NULL || out == NULL) {
+        return RIAK_E_INVALID_ARG;
+    }
+    memset(out, 0, sizeof *out);
+    riak_status st;
+    if ((st = check_type(client, type)) != RIAK_OK ||
+        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
+        return st;
+    }
+    if (!riak_is_pb(client)) {
+        return riak_set_error(client, RIAK_E_UNSUPPORTED,
+                              "coverage plans need the Protocol Buffers transport");
+    }
+    return riak_pb_coverage(client, type, bucket, min_partitions, out);
 }

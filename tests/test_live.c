@@ -31,6 +31,22 @@ static char bucket[64];
 static const char *multi_type; /* bucket type with allow_mult, from RIAK_TEST_TYPE */
 static const char *features = "";
 static const char *live_host;
+static riak_transport live_transport; /* pb:// or pbs:// select Protocol Buffers */
+static unsigned live_http_port;       /* RIAK_TEST_HTTP_PORT, for riak_stats() over PB */
+static bool live_tls;
+
+/* Transport, TLS and credentials of the node under test: RIAK_TEST_USER,
+ * RIAK_TEST_PASSWORD, RIAK_TEST_CA and RIAK_TEST_TLS_LEGACY=1. */
+static void live_config(riak_config *cfg) {
+    const char *legacy = getenv("RIAK_TEST_TLS_LEGACY");
+    cfg->transport = live_transport;
+    cfg->tls = live_tls;
+    cfg->username = getenv("RIAK_TEST_USER");
+    cfg->password = getenv("RIAK_TEST_PASSWORD");
+    cfg->ca_file = getenv("RIAK_TEST_CA");
+    cfg->tls_legacy = legacy != NULL && strcmp(legacy, "1") == 0;
+    cfg->timeout_ms = 30000;
+}
 static unsigned live_port; /* RIAK_TEST_FEATURES, e.g. "2i,search" */
 
 static bool has_feature(const char *f) {
@@ -120,6 +136,10 @@ static void test_conditional_and_stats(void) {
     CHECK(obj.etag != NULL);
 
     riak_opts inm = {.if_none_match = obj.etag};
+    if (live_transport == RIAK_TRANSPORT_PB) {
+        /* ETags are HTTP only; the vector clock serves the same purpose */
+        inm = (riak_opts){.if_modified = true, .vclock = obj.vclock};
+    }
     riak_object again;
     CHECK_EQ_INT(riak_get(rc, bucket, "cond", &inm, &again), RIAK_E_NOT_MODIFIED);
     riak_opts create = {.if_none_match = "*", .content_type = "text/plain"};
@@ -352,7 +372,8 @@ static void test_mapreduce(void) {
     CHECK_EQ_INT(riak_mapred_stream(rc, job, collect_phase, seen), RIAK_OK);
     CHECK(seen[0] >= 1);
     CHECK_EQ_INT(seen[1], 1);
-    CHECK_EQ_INT(riak_mapred(rc, "{\"inputs\":", &result), RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_mapred(rc, "{\"inputs\":", &result),
+                 live_transport == RIAK_TRANSPORT_PB ? RIAK_E_SERVER : RIAK_E_HTTP);
     riak_delete(rc, bucket, "m1", NULL);
     riak_delete(rc, bucket, "m2", NULL);
 }
@@ -469,16 +490,17 @@ static void test_datatypes(void) {
     riak_dt_op *wrong = riak_dt_op_new(RIAK_DT_SET);
     riak_dt_op_add(wrong, "x");
     CHECK_EQ_INT(riak_dt_update(rc, "libriak_counters", bucket, "c", wrong, NULL, NULL, NULL, NULL),
-                 RIAK_E_HTTP);
-    CHECK_EQ_INT(riak_client_http_status(rc), 400);
+                 live_transport == RIAK_TRANSPORT_PB ? RIAK_E_SERVER : RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_client_http_status(rc), live_transport == RIAK_TRANSPORT_PB ? 0 : 400);
     riak_dt_op_free(wrong);
 }
 
 static void test_failover(void) {
     /* a dead node (nothing listens on port 1) ahead of the real one */
-    riak_node nodes[2] = {{"127.0.0.1", 1}, {live_host, live_port}};
+    riak_node nodes[2] = {{"127.0.0.1", 1, 0}, {live_host, live_port, 0}};
     riak_config cfg;
     riak_config_init(&cfg);
+    live_config(&cfg);
     cfg.nodes = nodes;
     cfg.n_nodes = 2;
     cfg.balance = RIAK_BALANCE_FAILOVER;
@@ -512,6 +534,7 @@ static void async_count(riak_async_result *res, void *ctx) {
 static void test_async(void) {
     riak_config cfg;
     riak_config_init(&cfg);
+    live_config(&cfg);
     cfg.host = live_host;
     cfg.port = live_port;
     cfg.timeout_ms = 30000;
@@ -541,6 +564,66 @@ static void test_async(void) {
     riak_async_free(a);
 }
 
+static bool count_name(const char *name, size_t len, void *ctx) {
+    (void)name;
+    (void)len;
+    (*(size_t *)ctx)++;
+    return true;
+}
+
+typedef struct {
+    size_t matches;
+} cover_tally;
+
+static bool count_match(const char *key, const char *term, void *ctx) {
+    (void)key;
+    (void)term;
+    ((cover_tally *)ctx)->matches++;
+    return true;
+}
+
+static void test_server_info_preflist_coverage(void) {
+    riak_server_info info;
+    CHECK_EQ_INT(riak_get_server_info(rc, &info), RIAK_OK);
+    CHECK(info.node && strchr(info.node, '@') != NULL);
+    CHECK(info.version && *info.version);
+    riak_server_info_free(&info);
+
+    riak_opts o = {.content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, bucket, "pl", "x", 1, &o, NULL, NULL), RIAK_OK);
+    riak_preflist pl;
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, bucket, "pl", &pl), RIAK_OK);
+    CHECK(pl.count >= 1);
+    riak_preflist_free(&pl);
+    size_t keys = 0;
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, bucket, count_name, &keys), RIAK_OK);
+    CHECK(keys >= 1);
+
+    if (live_transport != RIAK_TRANSPORT_PB || !has_feature("2i")) {
+        riak_delete(rc, bucket, "pl", NULL);
+        return;
+    }
+    /* a coverage plan splits a $bucket query; together the parts find the key */
+    riak_coverage_plan plan;
+    riak_status st = riak_get_coverage(rc, NULL, bucket, 0, &plan);
+    if (st == RIAK_E_UNSUPPORTED) {
+        fprintf(stderr, "skip coverage: %s\n", riak_client_errmsg(rc));
+        riak_delete(rc, bucket, "pl", NULL);
+        return;
+    }
+    CHECK_EQ_INT(st, RIAK_OK);
+    CHECK(plan.count >= 1);
+    cover_tally t = {0};
+    for (size_t i = 0; i < plan.count; i++) {
+        riak_index_query q = {
+            .index = "$bucket", .value = bucket, .cover_context = plan.entries[i].cover_context};
+        CHECK_EQ_INT(riak_index_query_stream(rc, bucket, &q, count_match, &t, NULL), RIAK_OK);
+    }
+    CHECK(t.matches >= 1);
+    riak_coverage_free(&plan);
+    riak_delete(rc, bucket, "pl", NULL);
+}
+
 int main(void) {
     const char *url = getenv("RIAK_TEST_URL");
     if (url == NULL || *url == '\0') {
@@ -554,6 +637,12 @@ int main(void) {
         fprintf(stderr, "cannot parse RIAK_TEST_URL=%s\n", url);
         return 1;
     }
+    /* pb://host:8087 and pbs://host:8087 (STARTTLS) select Protocol Buffers */
+    live_transport = strncmp(scheme, "pb", 2) == 0 ? RIAK_TRANSPORT_PB : RIAK_TRANSPORT_HTTP;
+    live_tls = strcmp(scheme, "https") == 0 || strcmp(scheme, "pbs") == 0;
+    if (getenv("RIAK_TEST_HTTP_PORT")) {
+        live_http_port = (unsigned)strtoul(getenv("RIAK_TEST_HTTP_PORT"), NULL, 10);
+    }
     if (getenv("RIAK_TEST_FEATURES")) {
         features = getenv("RIAK_TEST_FEATURES");
     }
@@ -566,11 +655,13 @@ int main(void) {
     CHECK_EQ_INT(riak_global_init(), RIAK_OK);
     riak_config cfg;
     riak_config_init(&cfg);
+    live_config(&cfg);
     cfg.host = host;
     cfg.port = port;
+    cfg.http_port = live_http_port;
     live_host = host;
     live_port = port;
-    cfg.tls = strcmp(scheme, "https") == 0;
+
     cfg.timeout_ms = 30000;
     if (riak_client_new(&cfg, &rc) != RIAK_OK) {
         return 1;
@@ -586,6 +677,7 @@ int main(void) {
     RUN(test_search);
     RUN(test_mapreduce);
     RUN(test_datatypes);
+    RUN(test_server_info_preflist_coverage);
     RUN(test_failover);
     RUN(test_async);
 

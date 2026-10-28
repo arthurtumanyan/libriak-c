@@ -131,10 +131,20 @@ static riak_status map_curl_error(riak_attempt *a, CURLcode rc) {
 #if LIBCURL_VERSION_NUM >= 0x074400
     case CURLE_SSL_CLIENTCERT:
 #endif
+        if (rc == CURLE_SSL_CONNECT_ERROR && !a->c->cfg.tls_legacy) {
+            return riak_set_error(a->c, RIAK_E_TLS, "%s%s", detail, LEGACY_HINT);
+        }
         return riak_set_error(a->c, RIAK_E_TLS, "%s", detail);
     default:
         return riak_set_error(a->c, RIAK_E_TRANSPORT, "%s", detail);
     }
+}
+
+/* CURLOPT_SSL_CTX_FUNCTION: riak_config::tls_legacy on curl's OpenSSL context. */
+static CURLcode legacy_ctx_cb(CURL *h, void *ssl_ctx, void *userp) {
+    (void)h;
+    (void)userp;
+    return riak_tls_legacy_ctx(ssl_ctx) == 0 ? CURLE_OK : CURLE_SSL_CIPHER;
 }
 
 static riak_status append_header(struct curl_slist **list, const char *line) {
@@ -180,6 +190,16 @@ riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t 
     }
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, c->cfg.tls_verify ? 1L : 0L);
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, c->cfg.tls_verify ? 2L : 0L);
+    if (c->cfg.tls && c->cfg.tls_legacy) {
+        curl_easy_setopt(h, CURLOPT_SSLVERSION,
+                         (long)((unsigned long)CURL_SSLVERSION_TLSv1_2 |
+                                (unsigned long)CURL_SSLVERSION_MAX_TLSv1_2));
+        if (curl_easy_setopt(h, CURLOPT_SSL_CTX_FUNCTION, legacy_ctx_cb) != CURLE_OK) {
+            free(a->url);
+            a->url = NULL;
+            return riak_set_error(c, RIAK_E_TLS, "tls_legacy needs libcurl built with OpenSSL");
+        }
+    }
     if (c->ca_file) {
         curl_easy_setopt(h, CURLOPT_CAINFO, c->ca_file);
     }
@@ -210,7 +230,9 @@ riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t 
     curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(h, CURLOPT_HEADERDATA, a);
 
-    if (strcmp(req->method, "GET") != 0) {
+    if (strcmp(req->method, "HEAD") == 0) {
+        curl_easy_setopt(h, CURLOPT_NOBODY, 1L);
+    } else if (strcmp(req->method, "GET") != 0) {
         if (strcmp(req->method, "POST") == 0) {
             curl_easy_setopt(h, CURLOPT_POST, 1L);
         } else {
@@ -296,7 +318,8 @@ riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *r
                               .received = a->received,
                               .retry = *retry,
                               .will_retry = again,
-                              .failure = "HTTP 503"};
+                              .failure = "HTTP 503",
+                              .transport = RIAK_TRANSPORT_HTTP};
     riak_attempt_report(c, &info);
     free(a->url);
     a->url = NULL;
@@ -304,8 +327,8 @@ riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *r
 }
 
 bool riak_request_idempotent(const riak_request *req) {
-    return strcmp(req->method, "GET") == 0 || strcmp(req->method, "PUT") == 0 ||
-           strcmp(req->method, "DELETE") == 0;
+    return strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0 ||
+           strcmp(req->method, "PUT") == 0 || strcmp(req->method, "DELETE") == 0;
 }
 
 riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp) {
@@ -349,6 +372,7 @@ riak_status riak_http_error(riak_client *c, const riak_response *resp) {
         break;
     case 401:
     case 403:
+    case 426: /* security is enabled and the request was not sent over HTTPS */
         st = RIAK_E_UNAUTHORIZED;
         break;
     case 404:

@@ -124,7 +124,8 @@ void riak_attempt_report(riak_client *c, const riak_attempt_info *info) {
                                   .http_status = info->http_status,
                                   .duration_ms = (double)(riak_now_ms() - info->started_ms),
                                   .bytes_received = info->received,
-                                  .will_retry = info->will_retry};
+                                  .will_retry = info->will_retry,
+                                  .transport = info->transport};
         c->cfg.metrics_fn(&m, c->cfg.metrics_ctx);
     }
     if (info->retry != RIAK_RETRY_NONE) {

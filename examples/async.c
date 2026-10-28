@@ -3,7 +3,9 @@
  SPDX-License-Identifier: GPL-3.0-or-later
 
  Write and read back many keys concurrently.
- Usage: riak_async_example [host] [port]
+ Usage: riak_async_example [host] [port] [pb|http]
+ The Protocol Buffers transport (port 8087) is used unless "http" is given
+ (port 8098).
  */
 
 #include <stdio.h>
@@ -30,6 +32,7 @@ int main(int argc, char **argv) {
     riak_config_init(&cfg);
     if (argc > 1) cfg.host = argv[1];
     if (argc > 2) cfg.port = (unsigned)strtoul(argv[2], NULL, 10);
+    if (argc > 3 && strcmp(argv[3], "http") == 0) cfg.transport = RIAK_TRANSPORT_HTTP;
 
     riak_global_init();
     riak_async *a = NULL;

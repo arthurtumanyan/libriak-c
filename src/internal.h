@@ -38,7 +38,12 @@ struct riak_client {
     riak_config cfg; /* string members point at the copies above */
     long http_status;
     char errmsg[512];
+    struct riak_pb_state *pb; /* Protocol Buffers transport state */
 };
+
+static inline bool riak_is_pb(const riak_client *c) {
+    return c->cfg.transport == RIAK_TRANSPORT_PB;
+}
 
 /* Data sink for a response body; return false to abort the transfer with
  * the status stored in *abort_status. */
@@ -146,6 +151,13 @@ riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t 
 /* The outcome of a finished transfer is collected: status, error message, node
  * health, metrics and log; *retry says what a further attempt may do. */
 riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *retry);
+/* Appended to handshake failures that an old Erlang/OTP TLS server causes. */
+#define LEGACY_HINT " (nodes on an old Erlang/OTP, such as Riak KV 2.2, need tls_legacy)"
+
+/* The settings of riak_config::tls_legacy are applied to an OpenSSL SSL_CTX
+ * (passed as void * so this header needs no OpenSSL include); 0 on success. */
+int riak_tls_legacy_ctx(void *ssl_ctx);
+
 /* Whether an HTTP request may be repeated (GET, PUT, DELETE). */
 bool riak_request_idempotent(const riak_request *req);
 
@@ -177,6 +189,7 @@ typedef struct {
     enum riak_retry retry;
     bool will_retry;
     const char *failure; /* logged when status is RIAK_OK but the attempt failed */
+    riak_transport transport;
 } riak_attempt_info;
 
 /* The metrics callback is run and a failed attempt is logged. */

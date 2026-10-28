@@ -23,6 +23,10 @@ riak_status riak_parse_string_array(const char *json, size_t len, const char *fi
 typedef struct riak_keystream riak_keystream;
 
 riak_keystream *riak_keystream_new(void);
+/* The same for another array member, e.g. "buckets" (field is not copied). */
+riak_keystream *riak_keystream_new_field(const char *field);
+/* The names collected so far are moved into out (count may be 0, items NULL). */
+void riak_keystream_take(riak_keystream *ks, riak_strlist *out);
 riak_status riak_keystream_feed(riak_keystream *ks, const char *data, size_t len);
 /* The collected keys are moved into out; an input that ended mid-object fails. */
 riak_status riak_keystream_finish(riak_keystream *ks, riak_strlist *out);
@@ -41,5 +45,12 @@ riak_status riak_parse_search(const char *json, size_t len, riak_search_result *
 
 /* One MapReduce chunk {"phase":N,"data":<json>}; *data is newly allocated. */
 riak_status riak_parse_mapred_chunk(const char *json, size_t len, unsigned *phase, char **data);
+
+/* "nodename" and "riak_kv_version" of a /stats document. */
+riak_status riak_parse_server_info(const char *json, size_t len, char **node, char **version);
+
+/* {"preflist":[{"partition":N,"node":"...","primary":true},...]}; on failure
+ * out holds what was parsed and is freed by the caller. */
+riak_status riak_parse_preflist(const char *json, size_t len, riak_preflist *out);
 
 #endif /* RIAK_PARSE_H */

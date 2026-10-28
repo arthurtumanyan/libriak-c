@@ -5,6 +5,6 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 Name: libriak-c
 Description: @PROJECT_DESCRIPTION@
 Version: @PROJECT_VERSION@
-Requires.private: libcurl json-c
+Requires.private: libcurl json-c libprotobuf-c openssl
 Libs: -L${libdir} -lriak-c
 Cflags: -I${includedir}

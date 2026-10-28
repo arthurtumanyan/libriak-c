@@ -14,6 +14,7 @@
 
 #include "multipart.h"
 #include "parse.h"
+#include "pb.h"
 
 /* ---- streamed multipart responses ---------------------------------- */
 
@@ -105,6 +106,10 @@ static riak_status index_url(riak_client *c, const char *bucket, const riak_inde
         return riak_set_error(c, RIAK_E_INVALID_ARG,
                               "set either value or both range_min and range_max");
     }
+    if (q->cover_context) {
+        return riak_set_error(c, RIAK_E_UNSUPPORTED,
+                              "cover_context needs the Protocol Buffers transport");
+    }
     char num[16];
     int rc = riak_url_bucket(url, c, q->bucket_type, bucket, "index", NULL);
     rc = rc || riak_buf_append_str(url, "/") || riak_url_append_escaped(url, q->index);
@@ -155,12 +160,56 @@ static bool accumulate(const char *key, const char *term, void *ctx) {
     return true;
 }
 
+/* The accumulated matches become the result page. */
+static riak_status take_matches(index_acc *acc, riak_index_result *out) {
+    riak_status st = acc->nomem ? RIAK_E_NOMEM : RIAK_OK;
+    if (st == RIAK_OK && acc->keys.items == NULL) {
+        acc->keys.items = (char **)calloc(1, sizeof(char *));
+        st = acc->keys.items ? RIAK_OK : RIAK_E_NOMEM;
+    }
+    if (st == RIAK_OK && acc->want_terms && acc->terms.items == NULL) {
+        acc->terms.items = (char **)calloc(1, sizeof(char *));
+        st = acc->terms.items ? RIAK_OK : RIAK_E_NOMEM;
+    }
+    if (st == RIAK_OK) {
+        out->keys = acc->keys.items;
+        out->terms = acc->terms.items;
+        out->count = acc->keys.count;
+    } else {
+        riak_strlist_free(&acc->keys);
+        riak_strlist_free(&acc->terms);
+    }
+    return st;
+}
+
+static riak_status pb_index_run(riak_client *c, const char *bucket, const riak_index_query *q,
+                                riak_index_result *out) {
+    index_acc acc = {.want_terms = q && q->return_terms};
+    riak_status st = riak_pb_index(c, bucket, q, accumulate, &acc, &out->continuation);
+    if (st == RIAK_OK) {
+        st = take_matches(&acc, out);
+        if (st != RIAK_OK) {
+            riak_set_error(c, st, "out of memory");
+        }
+    } else {
+        riak_strlist_free(&acc.keys);
+        riak_strlist_free(&acc.terms);
+    }
+    if (st != RIAK_OK) {
+        riak_index_result_free(out);
+    }
+    return st;
+}
+
 riak_status riak_index_query_run(riak_client *client, const char *bucket, const riak_index_query *q,
                                  riak_index_result *out) {
     if (client == NULL || out == NULL) {
         return RIAK_E_INVALID_ARG;
     }
     memset(out, 0, sizeof *out);
+    if (riak_is_pb(client)) {
+        return pb_index_run(client, bucket, q, out);
+    }
     riak_buf url = {0};
     riak_status st = index_url(client, bucket, q, false, &url);
     if (st != RIAK_OK) {
@@ -181,21 +230,8 @@ riak_status riak_index_query_run(riak_client *client, const char *bucket, const 
         bool stopped;
         st = riak_parse_index_json(resp.body.data ? resp.body.data : "", resp.body.len, accumulate,
                                    &acc, &out->continuation, &stopped);
-        if (st == RIAK_OK && acc.nomem) {
-            st = RIAK_E_NOMEM;
-        }
-        if (st == RIAK_OK && acc.keys.items == NULL) {
-            acc.keys.items = (char **)calloc(1, sizeof(char *));
-            st = acc.keys.items ? RIAK_OK : RIAK_E_NOMEM;
-        }
-        if (st == RIAK_OK && acc.want_terms && acc.terms.items == NULL) {
-            acc.terms.items = (char **)calloc(1, sizeof(char *));
-            st = acc.terms.items ? RIAK_OK : RIAK_E_NOMEM;
-        }
         if (st == RIAK_OK) {
-            out->keys = acc.keys.items;
-            out->terms = acc.terms.items;
-            out->count = acc.keys.count;
+            st = take_matches(&acc, out);
         } else {
             riak_strlist_free(&acc.keys);
             riak_strlist_free(&acc.terms);
@@ -245,6 +281,14 @@ riak_status riak_index_query_stream(riak_client *client, const char *bucket,
     if (client == NULL || cb == NULL) {
         return RIAK_E_INVALID_ARG;
     }
+    if (riak_is_pb(client)) {
+        riak_status st = riak_pb_index(client, bucket, q, cb, ctx, continuation);
+        if (st != RIAK_OK && continuation) {
+            free(*continuation);
+            *continuation = NULL;
+        }
+        return st;
+    }
     riak_buf url = {0};
     riak_status st = index_url(client, bucket, q, true, &url);
     if (st == RIAK_OK) {
@@ -290,6 +334,9 @@ riak_status riak_search(riak_client *client, const char *index, const riak_searc
     if ((st = riak_check_name(client, index, "index")) != RIAK_OK ||
         (st = riak_check_name(client, q->q, "query")) != RIAK_OK) {
         return st;
+    }
+    if (riak_is_pb(client)) {
+        return riak_pb_search(client, index, q, out);
     }
     riak_buf url = {0};
     char num[16];
@@ -371,6 +418,12 @@ riak_status riak_search_index_create(riak_client *client, const char *index, con
     if (st != RIAK_OK) {
         return st;
     }
+    if (schema && strpbrk(schema, "\"\\\r\n") != NULL) {
+        return riak_set_error(client, RIAK_E_INVALID_ARG, "invalid schema name");
+    }
+    if (riak_is_pb(client)) {
+        return riak_pb_search_index_create(client, index, schema, n_val);
+    }
     riak_buf body = {0};
     int rc = riak_buf_append_str(&body, "{");
     if (schema) {
@@ -415,15 +468,26 @@ static riak_status admin_get(riak_client *c, const char *what, const char *name,
 
 riak_status riak_search_index_get(riak_client *client, const char *index, char **json) {
     riak_status st = client ? riak_check_name(client, index, "index") : RIAK_E_INVALID_ARG;
+    if (st == RIAK_OK && json && riak_is_pb(client)) {
+        *json = NULL;
+        return riak_pb_search_index_get(client, index, json);
+    }
     return st == RIAK_OK ? admin_get(client, "index", index, RIAK_BODY_JSON_OBJECT, json) : st;
 }
 
 riak_status riak_search_index_list(riak_client *client, char **json) {
+    if (client && json && riak_is_pb(client)) {
+        *json = NULL;
+        return riak_pb_search_index_get(client, NULL, json);
+    }
     return admin_get(client, "index", NULL, RIAK_BODY_JSON_ARRAY, json);
 }
 
 riak_status riak_search_index_delete(riak_client *client, const char *index) {
     riak_status st = client ? riak_check_name(client, index, "index") : RIAK_E_INVALID_ARG;
+    if (st == RIAK_OK && riak_is_pb(client)) {
+        return riak_pb_search_index_delete(client, index);
+    }
     return st == RIAK_OK ? admin_write(client, "DELETE", "index", index, NULL, NULL) : st;
 }
 
@@ -432,11 +496,18 @@ riak_status riak_search_schema_put(riak_client *client, const char *name, const 
         return RIAK_E_INVALID_ARG;
     }
     riak_status st = riak_check_name(client, name, "schema");
+    if (st == RIAK_OK && riak_is_pb(client)) {
+        return riak_pb_search_schema_put(client, name, xml);
+    }
     return st == RIAK_OK ? admin_write(client, "PUT", "schema", name, "application/xml", xml) : st;
 }
 
 riak_status riak_search_schema_get(riak_client *client, const char *name, char **xml) {
     riak_status st = client ? riak_check_name(client, name, "schema") : RIAK_E_INVALID_ARG;
+    if (st == RIAK_OK && xml && riak_is_pb(client)) {
+        *xml = NULL;
+        return riak_pb_search_schema_get(client, name, xml);
+    }
     return st == RIAK_OK ? admin_get(client, "schema", name, RIAK_BODY_RAW, xml) : st;
 }
 
@@ -460,6 +531,9 @@ riak_status riak_mapred(riak_client *client, const char *job, char **result) {
     }
     if (result == NULL) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (client && job && riak_is_pb(client)) {
+        return riak_pb_mapred(client, job, NULL, NULL, result);
     }
     riak_buf url = {0};
     struct curl_slist *headers = NULL;
@@ -507,6 +581,9 @@ static bool mapred_chunk(void *ctx, const char *json, size_t len, riak_status *e
 riak_status riak_mapred_stream(riak_client *client, const char *job, riak_mapred_cb cb, void *ctx) {
     if (cb == NULL) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (client && job && riak_is_pb(client)) {
+        return riak_pb_mapred(client, job, cb, ctx, NULL);
     }
     riak_buf url = {0};
     struct curl_slist *headers = NULL;

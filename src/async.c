@@ -10,6 +10,7 @@
  */
 
 #include "internal.h"
+#include "pb.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -38,6 +39,7 @@ struct op {
 
 struct riak_async {
     riak_client *c;
+    riak_pb_async *pb; /* Protocol Buffers: everything below is unused */
     CURLM *multi;
     op *ops; /* every pending request */
     size_t pending;
@@ -220,6 +222,8 @@ static op *new_op(riak_async *a, enum kind kind, const riak_opts *opts, riak_asy
 
 riak_status riak_async_ping(riak_async *a, riak_async_cb cb, void *ctx) {
     if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
+    if (a->pb)
+        return riak_pb_async_submit(a->pb, RIAK_PBA_PING, NULL, NULL, NULL, 0, NULL, cb, ctx);
     op *o = new_op(a, K_PING, NULL, cb, ctx);
     return o ? submit(a, o, riak_prepare_ping(a->c, &o->p)) : RIAK_E_NOMEM;
 }
@@ -227,6 +231,8 @@ riak_status riak_async_ping(riak_async *a, riak_async_cb cb, void *ctx) {
 riak_status riak_async_get(riak_async *a, const char *bucket, const char *key,
                            const riak_opts *opts, riak_async_cb cb, void *ctx) {
     if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
+    if (a->pb)
+        return riak_pb_async_submit(a->pb, RIAK_PBA_GET, bucket, key, NULL, 0, opts, cb, ctx);
     op *o = new_op(a, K_GET, opts, cb, ctx);
     return o ? submit(a, o, riak_kv_prepare_get(a->c, bucket, key, &o->opts, &o->p)) : RIAK_E_NOMEM;
 }
@@ -234,6 +240,10 @@ riak_status riak_async_get(riak_async *a, const char *bucket, const char *key,
 riak_status riak_async_put(riak_async *a, const char *bucket, const char *key, const void *value,
                            size_t len, const riak_opts *opts, riak_async_cb cb, void *ctx) {
     if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
+    if (a->pb) {
+        if (value == NULL && len > 0) return RIAK_E_INVALID_ARG;
+        return riak_pb_async_submit(a->pb, RIAK_PBA_PUT, bucket, key, value, len, opts, cb, ctx);
+    }
     op *o = new_op(a, K_PUT, opts, cb, ctx);
     if (o == NULL) return RIAK_E_NOMEM;
     o->generated_key = key == NULL;
@@ -243,6 +253,9 @@ riak_status riak_async_put(riak_async *a, const char *bucket, const char *key, c
 riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key,
                               const riak_opts *opts, riak_async_cb cb, void *ctx) {
     if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
+    if (a->pb) {
+        return riak_pb_async_submit(a->pb, RIAK_PBA_DELETE, bucket, key, NULL, 0, opts, cb, ctx);
+    }
     op *o = new_op(a, K_DELETE, opts, cb, ctx);
     return o ? submit(a, o, riak_kv_prepare_delete(a->c, bucket, key, &o->opts, &o->p))
              : RIAK_E_NOMEM;
@@ -250,6 +263,7 @@ riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key
 
 size_t riak_async_run(riak_async *a, long timeout_ms) {
     if (a == NULL) return 0;
+    if (a->pb) return riak_pb_async_run(a->pb, timeout_ms);
     long long deadline = timeout_ms >= 0 ? riak_now_ms() + timeout_ms : 0;
     for (;;) {
         long long next_retry = start_due_retries(a);
@@ -311,8 +325,13 @@ static int curl_timer_cb(CURLM *m, long timeout_ms, void *userp) {
 
 riak_status riak_async_set_loop(riak_async *a, riak_socket_fn socket_fn, riak_timer_fn timer_fn,
                                 void *ctx) {
-    if (a == NULL || socket_fn == NULL || timer_fn == NULL || a->pending > 0) {
+    if (a == NULL || socket_fn == NULL || timer_fn == NULL || riak_async_pending(a) > 0) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (a->pb) {
+        a->socket_fn = socket_fn;
+        riak_pb_async_set_loop(a->pb, socket_fn, timer_fn, ctx);
+        return RIAK_OK;
     }
     a->socket_fn = socket_fn;
     a->timer_fn = timer_fn;
@@ -326,6 +345,10 @@ riak_status riak_async_set_loop(riak_async *a, riak_socket_fn socket_fn, riak_ti
 
 void riak_async_on_socket(riak_async *a, int fd, int events) {
     if (a == NULL || a->socket_fn == NULL) return;
+    if (a->pb) {
+        riak_pb_async_on_socket(a->pb, fd, events);
+        return;
+    }
     unsigned ev = (unsigned)events;
     int mask = (int)(((ev & (unsigned)RIAK_POLL_IN) ? (unsigned)CURL_CSELECT_IN : 0U) |
                      ((ev & (unsigned)RIAK_POLL_OUT) ? (unsigned)CURL_CSELECT_OUT : 0U));
@@ -337,6 +360,10 @@ void riak_async_on_socket(riak_async *a, int fd, int events) {
 
 void riak_async_on_timeout(riak_async *a) {
     if (a == NULL || a->socket_fn == NULL) return;
+    if (a->pb) {
+        riak_pb_async_on_timeout(a->pb);
+        return;
+    }
     int running;
     if (a->curl_deadline && riak_now_ms() >= a->curl_deadline) {
         a->curl_deadline = 0;
@@ -361,6 +388,16 @@ riak_status riak_async_new(const riak_config *cfg, riak_async **out) {
         free(a);
         return st;
     }
+    if (riak_is_pb(a->c)) {
+        a->pb = riak_pb_async_new(a->c);
+        if (a->pb == NULL) {
+            riak_client_free(a->c);
+            free(a);
+            return RIAK_E_NOMEM;
+        }
+        *out = a;
+        return RIAK_OK;
+    }
     a->multi = curl_multi_init();
     if (a->multi == NULL) {
         riak_client_free(a->c);
@@ -376,11 +413,17 @@ riak_client *riak_async_client(riak_async *a) {
 }
 
 size_t riak_async_pending(const riak_async *a) {
-    return a ? a->pending : 0;
+    return a ? (a->pb ? riak_pb_async_pending(a->pb) : a->pending) : 0;
 }
 
 void riak_async_free(riak_async *a) {
     if (a == NULL) return;
+    if (a->pb) {
+        riak_pb_async_free(a->pb);
+        riak_client_free(a->c);
+        free(a);
+        return;
+    }
     while (a->ops) {
         op *o = a->ops;
         a->ops = o->next;

@@ -171,6 +171,9 @@ static void test_status_mapping(void) {
     CHECK(strstr(riak_client_errmsg(rc), "300") != NULL);
     riak_opts o = {.vclock = "stale"};
     CHECK_EQ_INT(riak_put(rc, "test", "k", "v", 1, &o, NULL, NULL), RIAK_E_PRECONDITION);
+    /* plain HTTP against a node with security enabled */
+    CHECK_EQ_INT(riak_get(rc, "needs-https", "k", NULL, &obj), RIAK_E_UNAUTHORIZED);
+    CHECK_EQ_INT(riak_client_http_status(rc), 426);
 }
 
 static void test_list_keys_stream(void) {
@@ -229,6 +232,7 @@ static void test_transport_error(void) {
     riak_config cfg;
     riak_client *c = NULL;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.port = 1; /* nothing listens here */
     cfg.connect_timeout_ms = 2000;
     CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
@@ -252,6 +256,7 @@ static void test_body_limit(void) {
     riak_config cfg;
     riak_client *c = NULL;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.port = port;
     cfg.max_body_bytes = 100;
     CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
@@ -817,6 +822,7 @@ static riak_client *cluster(const riak_node *nodes, size_t n, riak_balance balan
                             unsigned retries) {
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.nodes = nodes;
     cfg.n_nodes = n;
     cfg.balance = balance;
@@ -843,7 +849,7 @@ static void sleep_ms(long ms) {
 
 static void test_cluster_round_robin(void) {
     riak_node nodes[3] = {
-        {"127.0.0.1", ports[0]}, {"127.0.0.1", ports[1]}, {"127.0.0.1", ports[2]}};
+        {"127.0.0.1", ports[0], 0}, {"127.0.0.1", ports[1], 0}, {"127.0.0.1", ports[2], 0}};
     for (int i = 0; i < 3; i++)
         hits(i);
     riak_client *c = cluster(nodes, 3, RIAK_BALANCE_ROUND_ROBIN, 0);
@@ -867,7 +873,7 @@ static void test_cluster_round_robin(void) {
 
 static void test_cluster_failover(void) {
     /* port 1: nothing listens, connections are refused */
-    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    riak_node nodes[2] = {{"127.0.0.1", 1, 0}, {"127.0.0.1", ports[0], 0}};
     hits(0);
     riak_client *c = cluster(nodes, 2, RIAK_BALANCE_FAILOVER, 1);
     CHECK_EQ_INT(riak_ping(c), RIAK_OK); /* refused, then retried on the next node */
@@ -897,7 +903,7 @@ static void test_cluster_failover(void) {
     riak_client_free(c);
 
     /* 503 on a GET is retried elsewhere; on a POST it is not */
-    riak_node two[2] = {{"127.0.0.1", ports[1]}, {"127.0.0.1", ports[2]}};
+    riak_node two[2] = {{"127.0.0.1", ports[1], 0}, {"127.0.0.1", ports[2], 0}};
     c = cluster(two, 2, RIAK_BALANCE_FAILOVER, 2);
     set_mode(1, "503");
     hits(1);
@@ -927,7 +933,7 @@ static void test_cluster_failover(void) {
 }
 
 static void test_cluster_backoff_and_limits(void) {
-    riak_node dead[2] = {{"127.0.0.1", 1}, {"127.0.0.1", 1}};
+    riak_node dead[2] = {{"127.0.0.1", 1, 0}, {"127.0.0.1", 1, 0}};
     riak_client *c = cluster(dead, 2, RIAK_BALANCE_ROUND_ROBIN, 2);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -936,7 +942,7 @@ static void test_cluster_backoff_and_limits(void) {
     CHECK(elapsed_ms(&t0) >= 14.0);
     riak_client_free(c);
 
-    riak_node one[1] = {{"127.0.0.1", 1}};
+    riak_node one[1] = {{"127.0.0.1", 1, 0}};
     c = cluster(one, 1, RIAK_BALANCE_ROUND_ROBIN, 0);
     clock_gettime(CLOCK_MONOTONIC, &t0);
     CHECK_EQ_INT(riak_ping(c), RIAK_E_TRANSPORT);
@@ -947,8 +953,9 @@ static void test_cluster_backoff_and_limits(void) {
 
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     riak_client *bad = NULL;
-    riak_node badhost[1] = {{"no/slash", 0}};
+    riak_node badhost[1] = {{"no/slash", 0, 0}};
     cfg.nodes = badhost;
     cfg.n_nodes = 1;
     CHECK_EQ_INT(riak_client_new(&cfg, &bad), RIAK_E_INVALID_ARG);
@@ -994,12 +1001,13 @@ static void on_log(riak_log_level level, const char *msg, void *ctx) {
 }
 
 static void test_observability(void) {
-    riak_node nodes[2] = {{"127.0.0.1", 1}, {"127.0.0.1", ports[0]}};
+    riak_node nodes[2] = {{"127.0.0.1", 1, 0}, {"127.0.0.1", ports[0], 0}};
     metrics_log ml = {0};
     log_sink ls;
     memset(&ls, 0, sizeof ls);
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.nodes = nodes;
     cfg.n_nodes = 2;
     cfg.balance = RIAK_BALANCE_FAILOVER;
@@ -1032,7 +1040,7 @@ static void test_observability(void) {
     memset(&ls, 0, sizeof ls);
     cfg.log_level = RIAK_LOG_DEBUG;
     cfg.metrics_fn = NULL;
-    riak_node dead[1] = {{"127.0.0.1", 1}};
+    riak_node dead[1] = {{"127.0.0.1", 1, 0}};
     cfg.nodes = dead;
     cfg.n_nodes = 1;
     CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
@@ -1048,6 +1056,7 @@ static void test_client_id_header(void) {
     riak_config cfg;
     riak_client *c = NULL;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.port = port;
     cfg.client_id = "client-7";
     CHECK_EQ_INT(riak_client_new(&cfg, &c), RIAK_OK);
@@ -1056,6 +1065,89 @@ static void test_client_id_header(void) {
     CHECK_EQ_STR(last_header(last, "X-Riak-ClientId"), "client-7");
     json_object_put(last);
     riak_client_free(c);
+}
+
+static bool count_name(const char *name, size_t len, void *ctx) {
+    size_t *n = ctx;
+    (*n)++;
+    return len > 0 && name[len] == '\0' && *n < 5000;
+}
+
+static bool stop_after_three(const char *name, size_t len, void *ctx) {
+    (void)name;
+    (void)len;
+    return ++*(size_t *)ctx < 3;
+}
+
+static void test_info_preflist_streams(void) {
+    riak_server_info info;
+    CHECK_EQ_INT(riak_get_server_info(rc, &info), RIAK_OK);
+    CHECK_EQ_STR(info.node, "riak@stub");
+    CHECK_EQ_STR(info.version, "2.2.3");
+    riak_server_info_free(&info);
+    CHECK_EQ_INT(riak_get_server_info(rc, NULL), RIAK_E_INVALID_ARG);
+
+    riak_preflist pl;
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_OK);
+    CHECK_EQ_INT(pl.count, 2);
+    CHECK_EQ_STR(pl.items[1].node, "riak@b");
+    CHECK(pl.items[0].primary && !pl.items[1].primary);
+    riak_preflist_free(&pl);
+    json_object *last = last_request();
+    CHECK_EQ_STR(jstr(last, "path"), "/types/default/buckets/b/keys/k/preflist");
+    json_object_put(last);
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "", "k", &pl), RIAK_E_INVALID_ARG);
+
+    size_t n = 0;
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "many", count_name, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 1000);
+    n = 0;
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "many", stop_after_three, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 3);
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "truncated", count_name, &n), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "unavailable", count_name, &n), RIAK_E_HTTP);
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "b", NULL, &n), RIAK_E_INVALID_ARG);
+    n = 0;
+    CHECK_EQ_INT(riak_list_buckets_stream(rc, NULL, count_name, &n), RIAK_OK);
+    CHECK(n >= 1);
+    CHECK_EQ_INT(riak_list_buckets_stream(rc, "", count_name, &n), RIAK_E_INVALID_ARG);
+
+    riak_coverage_plan plan;
+    CHECK_EQ_INT(riak_get_coverage(rc, NULL, "b", 0, &plan), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_get_coverage(rc, NULL, "b", 0, NULL), RIAK_E_INVALID_ARG);
+    riak_coverage_free(&plan);
+}
+
+static void test_read_flags_and_head(void) {
+    riak_opts put = {.content_type = "text/plain"};
+    CHECK_EQ_INT(riak_put(rc, "flags", "k", "value", 5, &put, NULL, NULL), RIAK_OK);
+    riak_object obj;
+    riak_opts flags = {.basic_quorum = true, .notfound_ok = true};
+    CHECK_EQ_INT(riak_get(rc, "flags", "k", &flags, &obj), RIAK_OK);
+    riak_object_free(&obj);
+    json_object *last = last_request();
+    const char *path = jstr(last, "path");
+    CHECK(path && strstr(path, "basic_quorum=true") && strstr(path, "notfound_ok=true"));
+    json_object_put(last);
+
+    riak_opts head = {.head = true};
+    CHECK_EQ_INT(riak_get(rc, "flags", "k", &head, &obj), RIAK_OK);
+    CHECK_EQ_INT(obj.len, 0);
+    CHECK_EQ_STR(obj.content_type, "text/plain");
+    riak_object_free(&obj);
+
+    riak_opts pb_only[] = {
+        {.sloppy_quorum = true}, {.n_val = 3}, {.if_modified = true}, {.if_not_modified = true}};
+    for (size_t i = 0; i < 4; i++) {
+        CHECK_EQ_INT(riak_get(rc, "flags", "k", &pb_only[i], &obj), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_put(rc, "flags", "k", "v", 1, &pb_only[i], NULL, NULL),
+                     RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_delete(rc, "flags", "k", &pb_only[i]), RIAK_E_UNSUPPORTED);
+    }
+    riak_index_query q = {.index = "$bucket", .value = "flags", .cover_context = "AAAA"};
+    riak_index_result r;
+    CHECK_EQ_INT(riak_index_query_run(rc, "flags", &q, &r), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_delete(rc, "flags", "k", NULL), RIAK_OK);
 }
 
 int main(void) {
@@ -1074,6 +1166,7 @@ int main(void) {
     CHECK_EQ_INT(riak_global_init(), RIAK_OK);
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.port = port;
     CHECK_EQ_INT(riak_client_new(&cfg, &rc), RIAK_OK);
     if (rc == NULL) {
@@ -1109,6 +1202,8 @@ int main(void) {
     RUN(test_cluster_backoff_and_limits);
     RUN(test_observability);
     RUN(test_client_id_header);
+    RUN(test_info_preflist_streams);
+    RUN(test_read_flags_and_head);
 
     riak_client_free(rc);
     riak_global_cleanup();

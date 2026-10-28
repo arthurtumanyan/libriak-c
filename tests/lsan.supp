@@ -1,0 +1,4 @@
+# The protocol buffer stub keeps a TLS context and per-connection sessions
+# alive in detached server threads until the process exits.
+leak:stub_start_tls
+leak:stub_handle
