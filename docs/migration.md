@@ -20,7 +20,17 @@ out-parameter and released by the caller.
 | `_riak_optional_p` | `riak_opts` |
 | `bool` / `int` results | `riak_status` with `riak_client_errmsg()` |
 
-Behaviour changes:
+## From earlier 2.0 snapshots
+
+- The default transport is Protocol Buffers on port 8087. HTTP is selected
+  with `riak_config::transport = RIAK_TRANSPORT_HTTP`; programs that set
+  `port = 8098` explicitly need that line as well.
+- `riak_config_init()` sets `port` to 0, which means the default port of the
+  transport.
+- `riak_stats()` over Protocol Buffers needs `riak_config::http_port`.
+- protobuf-c and OpenSSL are new build and runtime dependencies.
+
+## Behaviour changes from 1.x
 
 - TLS certificates are verified by default (1.x disabled verification).
 - A put without `return_body` that receives HTTP 204 is a success (1.x

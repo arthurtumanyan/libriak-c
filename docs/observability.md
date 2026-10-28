@@ -17,9 +17,9 @@ cfg.log_level = RIAK_LOG_WARN;   /* default */
 
 | Level | Messages |
 |---|---|
-| `RIAK_LOG_DEBUG` | Every HTTP attempt: method, URL, attempt number |
-| `RIAK_LOG_WARN` | Transport failures and HTTP 503 responses that are retried; node ejections |
-| `RIAK_LOG_ERROR` | Transport failures and HTTP 503 responses after which no retry follows |
+| `RIAK_LOG_DEBUG` | Every attempt: method or message name, path, attempt number |
+| `RIAK_LOG_WARN` | Transport failures, HTTP 503 and overload errors that are retried; node ejections |
+| `RIAK_LOG_ERROR` | Transport failures, HTTP 503 and overload errors after which no retry follows |
 
 Other outcomes (HTTP 404, TLS errors, invalid arguments) are reported only
 through the return value and `riak_client_errmsg()`.
@@ -28,18 +28,19 @@ The message string is valid only during the call.
 
 ## Metrics
 
-`metrics_fn` is called once per HTTP attempt, retries included, with a
+`metrics_fn` is called once per attempt, retries included, with a
 `riak_request_metrics`:
 
 | Field | Meaning |
 |---|---|
-| `method`, `path` | Request method, path and query |
+| `transport` | `RIAK_TRANSPORT_PB` or `RIAK_TRANSPORT_HTTP` |
+| `method`, `path` | HTTP method, path and query; over Protocol Buffers the request message name (`"RpbGetReq"`) and the equivalent HTTP path |
 | `host`, `port` | Node the attempt was sent to |
 | `attempt` | 0 for the first try, then 1, 2, ... |
-| `status` | `RIAK_OK` when a response arrived, otherwise the transport/TLS error |
-| `http_status` | HTTP status, 0 without a response |
+| `status` | Over HTTP `RIAK_OK` when a response arrived; over Protocol Buffers also the status of an error message; otherwise the transport/TLS error |
+| `http_status` | HTTP status, 0 without a response and over Protocol Buffers |
 | `duration_ms` | Time from sending to completion |
-| `bytes_received` | Size of the response body |
+| `bytes_received` | Size of the response body (message payloads over Protocol Buffers) |
 | `will_retry` | Whether another attempt follows |
 
 ```c

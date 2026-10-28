@@ -31,6 +31,9 @@ do {
   returning `false` from the callback stops the stream and aborts the
   transfer. The continuation of a paged stream is returned through its last
   parameter.
+- Over Protocol Buffers, `cover_context` limits a query to one entry of a
+  coverage plan from `riak_get_coverage()`, so a large query can be split
+  and run in parallel; see [Transports](transports.md).
 
 ## Riak Search
 

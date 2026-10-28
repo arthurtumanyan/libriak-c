@@ -4,8 +4,42 @@
 
 ### Changed
 - libcurl 7.66 or newer is required (`curl_multi_poll`).
+- HTTP 426 (security enabled, request over plain HTTP) is reported as
+  `RIAK_E_UNAUTHORIZED`, as the equivalent Protocol Buffers error is.
+- Protocol Buffers is the default transport: `riak_config_init()` selects
+  `RIAK_TRANSPORT_PB` and port 0, which means 8087 for Protocol Buffers and
+  8098 for HTTP. HTTP is selected with `riak_config.transport`.
+- protobuf-c 1.3 (with `protoc-c`) and OpenSSL 1.1.1 or newer are required.
+- Retry decisions are taken by the operation rather than the HTTP method;
+  the rules are unchanged and shared by both transports.
 
 ### Added
+- Protocol Buffers transport covering every public call: objects, siblings
+  and resolvers, listings, bucket and bucket-type properties (as the same
+  JSON documents as HTTP), secondary indexes, Riak Search and its
+  administration, MapReduce, data types, the async API (connection pool per
+  node, `riak_config.pb_max_connections_per_node`) and the external event
+  loop hooks. STARTTLS with certificate and host name verification, client
+  certificates and `RpbAuthReq` authentication; cluster balancing, retries
+  and node ejection as over HTTP. The `.proto` files of basho/riak_pb are
+  vendored in `proto/`.
+- `riak_get_server_info()`, `riak_get_preflist()`,
+  `riak_list_keys_stream()`, `riak_list_buckets_stream()` on both
+  transports; `riak_get_coverage()` and `riak_index_query.cover_context` over
+  Protocol Buffers.
+- `riak_opts` fields `head`, `basic_quorum`, `notfound_ok` (both transports)
+  and `sloppy_quorum`, `n_val`, `if_modified`, `if_not_modified` (Protocol
+  Buffers).
+- `riak_config.http_port` and `riak_node.http_port`, used by `riak_stats()`
+  over Protocol Buffers.
+- `riak_config.tls_legacy` for nodes on an old Erlang/OTP TLS stack
+  (Riak KV 2.2 and older), which cannot complete a handshake with OpenSSL 3
+  clients on either transport. Such handshake failures are reported as
+  `RIAK_E_TLS` with a hint instead of a retryable transport error.
+- Status codes `RIAK_E_UNSUPPORTED` and `RIAK_E_SERVER`;
+  `riak_request_metrics.transport`.
+- Tests: an in-process Protocol Buffers stub (`tests/test_pb.c`), live tests
+  on both transports, and the `fuzz_pb` libFuzzer target.
 - Bucket types: `riak_opts.bucket_type` for object calls and `riak_type_*`
   variants of the bucket calls; `riak_get_type_props()`.
 - Siblings: `riak_get_siblings()` parses `multipart/mixed` responses into a

@@ -1,7 +1,8 @@
 # libriak-c documentation {#mainpage}
 
-libriak-c is a C11 client library for the Riak KV HTTP API, built on libcurl
-and json-c.
+libriak-c is a C11 client library for Riak KV. It speaks Riak's Protocol
+Buffers interface (the default) and its HTTP interface, and is built on
+protobuf-c, OpenSSL, libcurl and json-c.
 
 ## Guides
 
@@ -9,13 +10,14 @@ and json-c.
 |---|---|
 | [Getting started](getting-started.md) | Building, installing, linking, a first program |
 | [Configuration](configuration.md) | Every `riak_config` field and its default |
+| [Transports](transports.md) | Protocol Buffers and HTTP, their differences, connections, coverage plans |
 | [Errors and ownership](errors.md) | Status codes, error details, memory ownership, threading |
 | [Objects and buckets](objects.md) | Get, put, delete, metadata, bucket types, siblings, conditional requests |
 | [Queries](queries.md) | Secondary indexes, Riak Search, MapReduce |
 | [Data types](datatypes.md) | Counters, sets, maps, HyperLogLogs, grow-only sets |
 | [Clusters and retries](clusters.md) | Multiple nodes, balancing, retries, node ejection |
 | [Asynchronous requests](async.md) | Concurrent requests, built-in and external event loops |
-| [Security](security.md) | TLS, certificate verification, Basic auth, client certificates |
+| [Security](security.md) | TLS, STARTTLS, certificate verification, authentication, client certificates |
 | [Logging and metrics](observability.md) | Log and metrics callbacks |
 | [Testing](testing.md) | Test suites, stub server, live tests, fuzzing, coverage |
 | [Packaging and releases](packaging.md) | Debian/RPM packages and the release workflow |
@@ -36,6 +38,7 @@ field and function is documented; the build fails on undocumented symbols.
 
 ## Supported servers
 
-The library is tested against Riak KV 2.2.3. Riak KV 2.9+ and the
-community-maintained OpenRiak releases expose the same HTTP API; MapReduce
-is not available on OpenRiak 4.x, and grow-only sets need Riak 2.9 or newer.
+The library is tested against Riak KV 2.2.3 on both transports. Riak KV 2.9+
+and the community-maintained OpenRiak releases expose the same interfaces;
+MapReduce is not available on OpenRiak 4.x, grow-only sets need Riak 2.9 or
+newer, and coverage plans need a node that implements `RpbCoverageReq`.

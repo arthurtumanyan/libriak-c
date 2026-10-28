@@ -1,9 +1,12 @@
 # Asynchronous requests
 
 A `riak_async` handle runs any number of get, put, delete and ping requests
-concurrently on one thread, using libcurl's multi interface. It takes the
-same `riak_config` as a blocking client, including nodes, retries, security
-and hooks.
+concurrently on one thread: over Protocol Buffers with a pool of
+non-blocking connections per node (at most
+`riak_config::pb_max_connections_per_node`, 8 by default; further requests
+wait for a free connection), over HTTP with libcurl's multi interface. It
+takes the same `riak_config` as a blocking client, including the transport,
+nodes, retries, security and hooks.
 
 ## Built-in loop
 

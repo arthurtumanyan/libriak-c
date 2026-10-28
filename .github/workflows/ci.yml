@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev valgrind
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev valgrind
       - name: Configure
         env:
           CC: ${{ matrix.cc }}
@@ -55,6 +55,9 @@ jobs:
           done
           RIAK_TEST_CERTS=build/tests/certs python3 tests/stub_riak.py --tls build/tests/certs \
             valgrind -q --leak-check=full --error-exitcode=1 build/tests/test_tls
+          # the stub's detached server threads leave reachable memory behind
+          RIAK_TEST_CERTS=build/tests/certs valgrind -q --leak-check=full \
+            --errors-for-leak-kinds=definite --error-exitcode=1 build/tests/test_pb
 
   oldest:
     name: oldest supported (ubuntu-22.04)
@@ -63,7 +66,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
       - run: cmake -S . -B build -DRIAK_WERROR=ON && cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
 
@@ -77,8 +80,8 @@ jobs:
       - name: Start Riak (leveldb backend, Search enabled)
         run: |
           docker build -t libriak-riak tests/docker
-          docker run -d --name riak -p 8098:8098 libriak-riak
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+          docker run -d --name riak --ulimit nofile=65536:65536 -p 8098:8098 -p 8087:8087 libriak-riak
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON && cmake --build build -j
       - name: Wait for Riak and create bucket types
         run: |
@@ -100,9 +103,16 @@ jobs:
           for t in counter set map hll; do
             create "libriak_${t}s" '{"props":{"datatype":"'"$t"'"}}'
           done
-      - name: Live tests
+      - name: Live tests (HTTP)
         env:
           RIAK_TEST_URL: http://127.0.0.1:8098
+          RIAK_TEST_TYPE: libriak_multi
+          RIAK_TEST_FEATURES: 2i,search,dt
+        run: ctest --test-dir build --output-on-failure -R live
+      - name: Live tests (Protocol Buffers)
+        env:
+          RIAK_TEST_URL: pb://127.0.0.1:8087
+          RIAK_TEST_HTTP_PORT: "8098"
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: 2i,search,dt
         run: ctest --test-dir build --output-on-failure -R live
@@ -116,7 +126,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev && pipx install gcovr==8.7
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev && pipx install gcovr==8.7
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_COVERAGE=ON && cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
       - name: Coverage report (fails under 85% lines)
@@ -130,15 +140,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
       - name: Build fuzzer
         env:
           CC: clang
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_FUZZ=ON -DRIAK_SANITIZE=ON
-          && cmake --build build -j --target fuzz_parse
-      - name: Fuzz for 60 seconds
-        run: build/tests/fuzz_parse -max_total_time=60 -max_len=4096
+          && cmake --build build -j --target fuzz_parse fuzz_pb
+      - name: Fuzz for 60 seconds each
+        run: |
+          build/tests/fuzz_parse -max_total_time=60 -max_len=4096
+          build/tests/fuzz_pb -max_total_time=60 -max_len=4096
 
   package:
     name: package dry run
@@ -147,7 +159,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev dpkg-dev file
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev dpkg-dev file
       - run: packaging/build-packages.sh DEB
       - run: sudo apt-get install -y ./dist/*.deb && packaging/smoke-test.sh
 
@@ -160,7 +172,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev cppcheck doxygen
+          sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev cppcheck doxygen
           pipx install clang-format==23.1.3
           pipx install clang-tidy==23.1.4
       - name: clang-format
@@ -170,6 +182,7 @@ jobs:
       - name: clang-tidy
         run: |
           cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build build --target riak_pbgen
           clang-tidy -p build --warnings-as-errors='*' src/*.c
       - name: API reference (fails on undocumented symbols)
         run: mkdir -p out && RIAK_DOCS_OUT=out doxygen docs/Doxyfile

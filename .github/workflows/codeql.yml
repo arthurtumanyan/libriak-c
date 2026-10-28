@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
       - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: c-cpp

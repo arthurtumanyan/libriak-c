@@ -22,12 +22,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake dpkg-dev file libcurl4-openssl-dev libjson-c-dev
+          sudo apt-get install -y cmake dpkg-dev file libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
       - name: Build packages
         run: packaging/build-packages.sh DEB
       - name: Install and smoke-test packages
         run: |
-          sudo apt-get remove -y libcurl4-openssl-dev libjson-c-dev
+          sudo apt-get remove -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
           sudo apt-get install -y ./dist/*.deb
           packaging/smoke-test.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -46,7 +46,7 @@ jobs:
         image: ["fedora:latest", "almalinux:10"]
     steps:
       - name: Install build dependencies
-        run: dnf -y install gcc cmake make rpm-build libcurl-devel json-c-devel pkgconf-pkg-config
+        run: dnf -y install gcc cmake make rpm-build libcurl-devel json-c-devel protobuf-c-devel protobuf-c-compiler openssl-devel pkgconf-pkg-config
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -54,7 +54,7 @@ jobs:
         run: packaging/build-packages.sh RPM
       - name: Install and smoke-test packages
         run: |
-          dnf -y remove libcurl-devel json-c-devel
+          dnf -y remove libcurl-devel json-c-devel protobuf-c-devel openssl-devel
           dnf -y install ./dist/*.rpm
           packaging/smoke-test.sh
       - id: name

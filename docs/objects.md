@@ -22,6 +22,9 @@ riak_delete(c, "users", "u1", NULL);
   `riak_opts::vclock`; otherwise siblings may be created in buckets with
   `allow_mult`.
 - `server_timeout_ms` sets Riak's own request timeout.
+- `head` returns the metadata without the value; `basic_quorum` and
+  `notfound_ok` tune how not-found answers count towards the read quorum.
+- Over Protocol Buffers, `sloppy_quorum` and `n_val` are also available.
 
 ## Metadata, secondary index entries, links
 
@@ -75,12 +78,28 @@ marked with `riak_object::deleted`.
 | `if_none_match = "*"` | Put only creates; an existing key gives `RIAK_E_PRECONDITION` |
 | `if_match = etag` | Put only replaces that version |
 | `if_modified_since`, `if_unmodified_since` | HTTP-date conditions |
+| `if_modified = true` + `vclock` | Get returns `RIAK_E_NOT_MODIFIED` when unchanged (Protocol Buffers) |
+| `if_not_modified = true` + `vclock` | Put only replaces that version (Protocol Buffers) |
+
+ETag and date conditions are HTTP features and vector clock conditions are
+Protocol Buffers features; the other transport returns
+`RIAK_E_UNSUPPORTED`, see [Transports](transports.md).
 
 ## Bucket properties and listing
 
 `riak_get_bucket_props()`, `riak_set_bucket_props()` and
 `riak_reset_bucket_props()` exchange JSON documents of the form
 `{"props":{...}}`. `riak_list_buckets()` and `riak_list_keys()` return
-NULL-terminated lists; key listing is streamed from the server. Both walk the
-whole keyspace and are expensive on large clusters; secondary indexes are
-preferred in production. `riak_stats()` returns `/stats` as JSON.
+NULL-terminated lists; key listing is streamed from the server.
+`riak_list_keys_stream()` and `riak_list_buckets_stream()` pass each name to
+a callback as it arrives, and stop when the callback returns false. Listings
+walk the whole keyspace and are expensive on large clusters; secondary
+indexes are preferred in production.
+
+## Node information
+
+- `riak_stats()` returns `/stats` as JSON (over Protocol Buffers through
+  `riak_config::http_port`).
+- `riak_get_server_info()` returns the node name and Riak version.
+- `riak_get_preflist()` returns the vnodes that hold the replicas of a key,
+  each with its partition, node and whether it is a primary.
