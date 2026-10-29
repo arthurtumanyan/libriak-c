@@ -33,6 +33,12 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 - Logging and per-request metrics callbacks
 - Debian and RPM packages, a CMake package and a pkg-config file
 
+## Installing
+
+Prebuilt deb and rpm packages for Ubuntu 22.04 and 24.04, Debian 12,
+Fedora 42 and AlmaLinux 10 are kept under [packages/](packages/2.1.0); see
+[Packaging and releases](docs/packaging.md#prebuilt-packages).
+
 ## Building
 
 ```sh

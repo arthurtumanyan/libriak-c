@@ -51,6 +51,8 @@
   the rules are unchanged and shared by both transports.
 
 ### Added
+- Prebuilt packages for Ubuntu 22.04 and 24.04, Debian 12, Fedora 42
+  and AlmaLinux 10 under `packages/2.1.0/`, with `SHA256SUMS`.
 - Asynchronous data path and streams on both transports:
   `riak_async_get_siblings()`, `riak_async_dt_fetch()`,
   `riak_async_dt_update()`, `riak_async_counter_get()`,

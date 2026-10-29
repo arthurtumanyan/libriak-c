@@ -34,6 +34,23 @@ packaging/build-packages.sh DEB      # or RPM; output in dist/
 `packaging/smoke-test.sh` compiles `examples/basic.c` against the installed
 packages through pkg-config and through the CMake package, shared and static.
 
+## Prebuilt packages
+
+Prebuilt x86_64 packages of each release are kept in the repository under
+`packages/<version>/<distribution>/`, together with a `SHA256SUMS` file:
+
+```sh
+cd packages/2.1.0 && sha256sum -c SHA256SUMS
+sudo apt install ./ubuntu-24.04/libriak-c2_2.1.0-1~ubuntu24.04_amd64.deb \
+                 ./ubuntu-24.04/libriak-c-dev_2.1.0-1~ubuntu24.04_amd64.deb
+sudo dnf install ./fedora-42/libriak-c-2.1.0-1.fc42.x86_64.rpm \
+                 ./fedora-42/libriak-c-devel-2.1.0-1.fc42.x86_64.rpm
+```
+
+The 2.1.0 packages are provided for Ubuntu 22.04 and 24.04, Debian 12,
+Fedora 42 and AlmaLinux 10. Each set was installed into a clean container
+of its distribution and passed `packaging/smoke-test.sh`.
+
 ## Releases
 
 A release is made by updating `project(VERSION ...)` in `CMakeLists.txt`,
