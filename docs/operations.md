@@ -85,16 +85,16 @@ cluster (Protocol Buffers; both need the `riak_repl` application).
 ## Known server issues
 
 Testing the library found three bugs in Riak KV 3.2.6 and 3.4.1 (and in the
-current OpenRiak branches). They have been fixed and offered upstream; the
-test images in `tests/docker/openriak` are built with these fixes (see
-[Testing](testing.md)). The library does not work around them: on a node
+current OpenRiak branches). They have been reported and fixes offered
+upstream (linked below); the test images in `tests/docker/openriak` are
+built with these fixes (see [Testing](testing.md)). The library does not work around them: on a node
 without the fixes the affected calls fail as described.
 
 | Server bug | Affected | Effect on a node without the fix |
 |---|---|---|
-| Query API: a `terms` query with `max_results` crashes when a vnode sends an empty batch (riak_kv `riak_kv_query_server`) | 3.4 | `riak_query_run()` with `max_results` returns `RIAK_E_HTTP` (HTTP 503 "timeout") |
-| Grow-only set update with `return_body` cannot be encoded (riak_pb `riak_pb_dt_codec`) | 3.2, 3.4, Protocol Buffers | `riak_dt_update()` with `return_body` on a gset returns `RIAK_E_SERVER`; the node closes the connection |
-| `RpbMembershipReq` with its optional `queuename` crashes the handler (riak_kv `riak_kv_pb_object`) | 3.2, 3.4 | Not reached by the library, which sends the request without fields, as Riak's own client does |
+| Query API: a paged query (`max_results`, options `terms` and `raw_keys`) crashes when a vnode sends an empty batch (riak_kv `riak_kv_query_server`; [issue](https://github.com/OpenRiak/riak_kv/issues/177), [fix](https://github.com/OpenRiak/riak_kv/pull/179)) | 3.4 | `riak_query_run()` with `max_results` returns `RIAK_E_HTTP` (HTTP 503 "timeout") |
+| Grow-only set update with `return_body` cannot be encoded (riak_pb `riak_pb_dt_codec`; [issue](https://github.com/OpenRiak/riak_pb/issues/5), [fix](https://github.com/OpenRiak/riak_pb/pull/6)) | 3.2, 3.4, Protocol Buffers | `riak_dt_update()` with `return_body` on a gset returns `RIAK_E_SERVER`; the node closes the connection |
+| `RpbMembershipReq` with its optional `queuename` crashes the handler (riak_kv `riak_kv_pb_object`; [issue](https://github.com/OpenRiak/riak_kv/issues/178), [fix](https://github.com/OpenRiak/riak_kv/pull/180)) | 3.2, 3.4 | Not reached by the library, which sends the request without fields, as Riak's own client does |
 
 A crashed request handler makes Riak send "Error processing incoming
 message" and close the connection; the library reports `RIAK_E_SERVER` and
