@@ -89,54 +89,102 @@ jobs:
       - run: ctest --test-dir build --output-on-failure
 
   live:
-    name: live Riak node
+    name: live Riak ${{ matrix.riak }} (${{ matrix.security }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        riak: ["2.2.3", "3.2.6", "3.4.1"]
+        security: [plain, tls]
+        include:
+          # Riak 2.2.3 is the basho package image; 3.x is built from the
+          # OpenRiak sources, layers cached between runs
+          - { riak: "2.2.3", features: "2i,search,dt,counters,fold,linkwalk" }
+          - riak: "3.2.6"
+            otp: "24"
+            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist"
+          - riak: "3.4.1"
+            otp: "26"
+            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist,query"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Start Riak (leveldb backend, Search enabled)
-        run: |
-          docker build -t libriak-riak tests/docker
-          docker run -d --name riak --ulimit nofile=65536:65536 -p 8098:8098 -p 8087:8087 libriak-riak
+      - name: Build Riak 2.2.3 image
+        if: matrix.riak == '2.2.3'
+        run: docker build -t "libriak-riak:${{ matrix.riak }}" tests/docker
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: matrix.riak != '2.2.3'
+      - name: Build Riak ${{ matrix.riak }} image
+        if: matrix.riak != '2.2.3'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: tests/docker/openriak
+          build-args: |
+            OTP=${{ matrix.otp }}
+            RIAK_TAG=riak-${{ matrix.riak }}
+          tags: libriak-riak:${{ matrix.riak }}
+          load: true
+          cache-from: type=gha,scope=riak-${{ matrix.riak }}
+          cache-to: type=gha,mode=max,scope=riak-${{ matrix.riak }}
       - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON && cmake --build build -j
-      - name: Wait for Riak and create bucket types
+      - name: Start Riak, create bucket types
+        env:
+          RIAK: ${{ matrix.riak }}
+          SECURITY: ${{ matrix.security }}
         run: |
-          for _ in $(seq 1 90); do
-            curl -sf http://127.0.0.1:8098/ping && break
-            sleep 2
-          done
-          docker exec riak riak-admin wait-for-service riak_kv
-          docker exec riak riak-admin wait-for-service yokozuna
-          create() {
-            docker exec riak riak-admin bucket-type create "$1" "$2"
-            for _ in $(seq 1 30); do
-              docker exec riak riak-admin bucket-type activate "$1" && return 0
-              sleep 2
-            done
-            return 1
-          }
-          create libriak_multi '{"props":{"allow_mult":true}}'
-          for t in counter set map hll; do
-            create "libriak_${t}s" '{"props":{"datatype":"'"$t"'"}}'
-          done
+          docker run -d --name riak --ulimit nofile=65536:65536 \
+            -p 8098:8098 -p 8087:8087 -p 8443:8443 "libriak-riak:$RIAK"
+          if [ "$SECURITY" = tls ]; then
+            sh tests/gen_certs.sh "$PWD/certs"
+            sh tests/docker/setup-node.sh riak --security "$PWD/certs"
+          else
+            sh tests/docker/setup-node.sh riak
+          fi
       - name: Live tests (HTTP)
+        if: matrix.security == 'plain'
         env:
           RIAK_TEST_URL: http://127.0.0.1:8098
           RIAK_TEST_TYPE: libriak_multi
-          RIAK_TEST_FEATURES: 2i,search,dt
+          RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
       - name: Live tests (Protocol Buffers)
+        if: matrix.security == 'plain'
         env:
           RIAK_TEST_URL: pb://127.0.0.1:8087
           RIAK_TEST_HTTP_PORT: "8098"
           RIAK_TEST_TYPE: libriak_multi
-          RIAK_TEST_FEATURES: 2i,search,dt
+          RIAK_TEST_FEATURES: ${{ matrix.features }}
+        run: ctest --test-dir build --output-on-failure -R live
+      # Riak 2.2.3 runs on an Erlang/OTP that only completes a handshake with
+      # tls_legacy; Riak 3.x needs no such option
+      - name: Live tests (HTTPS, authenticated)
+        if: matrix.security == 'tls'
+        env:
+          RIAK_TEST_URL: https://127.0.0.1:8443
+          RIAK_TEST_USER: alice
+          RIAK_TEST_PASSWORD: secret
+          RIAK_TEST_CA: ${{ github.workspace }}/certs/ca.pem
+          RIAK_TEST_TLS_LEGACY: ${{ matrix.riak == '2.2.3' && '1' || '0' }}
+          RIAK_TEST_TYPE: libriak_multi
+          RIAK_TEST_FEATURES: ${{ matrix.features }}
+        run: ctest --test-dir build --output-on-failure -R live
+      - name: Live tests (Protocol Buffers with STARTTLS, authenticated)
+        if: matrix.security == 'tls'
+        env:
+          RIAK_TEST_URL: pbs://127.0.0.1:8087
+          RIAK_TEST_HTTP_PORT: "8443"
+          RIAK_TEST_USER: alice
+          RIAK_TEST_PASSWORD: secret
+          RIAK_TEST_CA: ${{ github.workspace }}/certs/ca.pem
+          RIAK_TEST_TLS_LEGACY: ${{ matrix.riak == '2.2.3' && '1' || '0' }}
+          RIAK_TEST_TYPE: libriak_multi
+          RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
       - name: Riak logs
         if: failure()
-        run: docker logs riak | tail -100
+        run: docker logs riak 2>&1 | tail -100
 
   coverage:
     runs-on: ubuntu-24.04

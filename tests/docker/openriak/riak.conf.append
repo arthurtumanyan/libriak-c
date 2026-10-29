@@ -1,0 +1,6 @@
+
+## libriak-c live tests: tictac AAE (native with leveled) and a nextgenrepl
+## source queue that receives every change
+tictacaae_active = active
+replrtq_enablesrc = enabled
+replrtq_srcqueue = libriak_q:any
