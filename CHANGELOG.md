@@ -14,6 +14,10 @@
   non-reentrant `strerror()`.
 
 ### Changed
+- Riak Search calls return `RIAK_E_UNSUPPORTED` on a node without Search
+  (Riak 3.x, `search = off`) on both transports; over HTTP they returned
+  `RIAK_E_NOT_FOUND`. A query on a missing index is `RIAK_E_NOT_FOUND` on
+  both transports (it was `RIAK_E_SERVER` over Protocol Buffers).
 - `riak_get_preflist()` over HTTP returns `RIAK_E_UNSUPPORTED`: Riak 2.x's
   HTTP resource ignores the key and answers the same list for every key,
   and Riak 3.0 removed it. Protocol Buffers serves preference lists.

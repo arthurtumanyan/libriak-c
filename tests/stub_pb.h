@@ -1202,8 +1202,14 @@ static int stub_handle(stub_conn *c, uint8_t code, const uint8_t *buf, size_t le
     }
     case 25:
         return stub_index(c, buf, len);
-    case 27:
-        return stub_search(c);
+    case 27: {
+        RpbSearchQueryReq *q = rpb_search_query_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        int missing = stub_is(q->index, "missing");
+        rpb_search_query_req__free_unpacked(q, NULL);
+        /* Yokozuna's answer to a query on an index that does not exist */
+        return missing ? stub_error(c, "No index <<\"missing\">> found.") : stub_search(c);
+    }
     case 29:
         return stub_send(c, 30, NULL);
     case 33: {

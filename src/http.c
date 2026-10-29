@@ -372,11 +372,15 @@ void riak_response_free(riak_response *resp) {
     resp->status = status;
 }
 
+bool riak_http_no_resource(const riak_response *resp) {
+    static const char page[] = "<HTML><HEAD><TITLE>404 Not Found</TITLE>";
+    return resp->status == 404 && resp->body.len >= sizeof page - 1 &&
+           memcmp(resp->body.data, page, sizeof page - 1) == 0;
+}
+
 riak_status riak_http_error_or_unsupported(riak_client *c, const riak_response *resp,
                                            const char *what) {
-    static const char page[] = "<HTML><HEAD><TITLE>404 Not Found</TITLE>";
-    if (resp->status == 404 && resp->body.len >= sizeof page - 1 &&
-        memcmp(resp->body.data, page, sizeof page - 1) == 0) {
+    if (riak_http_no_resource(resp)) {
         return riak_set_error(c, RIAK_E_UNSUPPORTED, "this node does not offer %s", what);
     }
     return riak_http_error(c, resp);

@@ -22,7 +22,7 @@ The table lists what was verified against Riak KV 2.2.3, 3.2.6 and 3.4.1
 | Key and bucket listings, server information | yes | yes | yes | yes | yes |
 | `riak_get_preflist()` | yes | `RIAK_E_UNSUPPORTED` | yes | yes | yes |
 | Secondary indexes, `pagination_sort` | yes | yes | yes | yes | yes |
-| Coverage plans (`riak_get_coverage()`) | yes | `RIAK_E_UNSUPPORTED` | no | no | no |
+| Coverage plans (`riak_get_coverage()`), Riak TS only | yes | `RIAK_E_UNSUPPORTED` | no | no | no |
 | Riak Search and its administration | yes | yes | yes | no | no |
 | MapReduce (Erlang phases) | yes | yes | yes | yes | yes |
 | Data types: counter, set, map, HyperLogLog | yes | yes | yes | yes | yes |
@@ -41,7 +41,11 @@ The table lists what was verified against Riak KV 2.2.3, 3.2.6 and 3.4.1
 Notes:
 
 - "no" means the node does not implement the request: the call returns
-  `RIAK_E_UNSUPPORTED`. Riak 2.2 answers newer Protocol Buffers requests
+  `RIAK_E_UNSUPPORTED`. On a node without Riak Search (Riak 3.x, or
+  `search = off`) that holds for every Search call on both transports; on a
+  node with Search, a missing index or schema is `RIAK_E_NOT_FOUND`.
+- Coverage plans (`RpbCoverageReq`) are served only by Riak TS builds of
+  riak_kv; no Riak KV release implements them. Riak 2.2 answers newer Protocol Buffers requests
   with "Unknown message code" and newer HTTP resources with an HTML 404;
   both are reported as unsupported, never as a missing object.
 - Preference lists are served over Protocol Buffers only. Riak 2.x's HTTP

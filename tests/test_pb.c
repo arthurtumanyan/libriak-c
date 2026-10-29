@@ -300,6 +300,9 @@ static void test_search(void) {
     riak_client *c = client();
     riak_search_query q = {.q = "tag_ss:a", .fields = "_yz_rk, tag_ss", .rows = 10};
     riak_search_result r;
+    riak_search_result none;
+    CHECK_EQ_INT(riak_search(c, "missing", &q, &none), RIAK_E_NOT_FOUND); /* as over HTTP */
+    CHECK(strstr(riak_client_errmsg(c), "No index") != NULL);
     CHECK_EQ_INT(riak_search(c, "people", &q, &r), RIAK_OK);
     CHECK_EQ_INT(r.num_found, 7);
     CHECK_EQ_INT(r.count, 1);

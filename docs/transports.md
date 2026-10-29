@@ -108,8 +108,9 @@ if (riak_get_coverage(c, NULL, "users", 0, &plan) == RIAK_OK) {
 }
 ```
 
-Nodes that do not implement coverage requests (Riak KV 2.2 answers "Unknown
-message code: 70") return `RIAK_E_UNSUPPORTED`.
+Coverage plans are served only by Riak TS builds of riak_kv; every Riak KV
+release answers "Unknown message code: 70", reported as
+`RIAK_E_UNSUPPORTED`.
 
 ## Security
 

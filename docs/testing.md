@@ -118,6 +118,7 @@ limit well above 1024 (`--ulimit nofile=65536:65536`).
 | `nextgenrepl` | Replication queues, membership | | yes | yes |
 | `repl` | `riak_get_cluster_id()`, `riak_repl_get()` | | yes | yes |
 | `query` | Query API | | | yes |
+| `coverage` | Coverage plans (Riak TS only) | | | |
 
 Features that are not enabled are checked to return `RIAK_E_UNSUPPORTED`
 where the node lacks them. The `live` job in `.github/workflows/ci.yml`

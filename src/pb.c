@@ -435,7 +435,8 @@ riak_status riak_pb_server_error(const uint8_t *data, size_t len, char *msg, siz
     size_t n = e->errmsg.len;
     riak_status st = RIAK_E_SERVER;
     if ((n == 8 && memcmp(m, "notfound", 8) == 0) || contains(m, n, "no_type") ||
-        contains(m, n, "No bucket-type") || contains(m, n, "notfound")) {
+        contains(m, n, "No bucket-type") || contains(m, n, "notfound") ||
+        contains(m, n, "No index <<")) { /* Riak Search: a query on a missing index */
         st = RIAK_E_NOT_FOUND;
     } else if ((n == 8 && memcmp(m, "modified", 8) == 0) || contains(m, n, "match_found") ||
                contains(m, n, "precondition")) {

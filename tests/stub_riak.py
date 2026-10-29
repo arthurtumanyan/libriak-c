@@ -446,6 +446,9 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["_old"]:
             self.server.old = query.get("set", ["0"])[0] == "1"
             return self._send(204)
+        if parts == ["_nosearch"]:
+            self.server.nosearch = query.get("set", ["0"])[0] == "1"
+            return self._send(204)
         if parts == ["_malformed"]:
             self.server.malformed = int(query.get("set", ["0"])[0])
             return self._send(204)
@@ -474,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
             if parts[1] not in TYPES:
                 return self._send(404, "no such bucket type\n")
             return self._json(200, {"props": dict(TYPES[parts[1]], n_val=3)})
+        if self._no_search(parts):
+            return None
         if parts[:1] == ["search"]:
             return self._search_get(parts[1:], query)
         if btype not in TYPES:
@@ -632,6 +637,14 @@ class Handler(BaseHTTPRequestHandler):
             result["continuation"] = cont
         return self._json(200, result)
 
+    def _no_search(self, parts):
+        """Without Riak Search no resource matches a /search path."""
+        if parts[:1] == ["search"] and self.server.nosearch:
+            self._body()
+            self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
+            return True
+        return False
+
     def _search_get(self, parts, query):
         if parts == ["index"]:
             return self._json(200, sorted(SEARCH_INDEXES.values(), key=lambda i: i["name"]))
@@ -640,15 +653,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, idx) if idx else self._send(404, "not found\n")
         if len(parts) == 2 and parts[0] == "schema":
             xml = SCHEMAS.get(parts[1])
+            # Riak 2.x: a missing schema gets Webmachine's own 404 page
             return self._send(200, xml, {"Content-Type": "application/xml"}) if xml \
-                else self._send(404, "not found\n")
+                else self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
         if len(parts) == 2 and parts[0] == "query":
             return self._search_query(parts[1], query)
         return self._send(400, "bad request\n")
 
     def _search_query(self, index, query):
         if index not in SEARCH_INDEXES:
-            return self._send(404, "No index found\n")
+            # Riak 2.x: a query on a missing index gets Webmachine's own 404 page
+            return self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
         if query.get("wt") != ["json"] or "q" not in query:
             return self._send(400, "expected wt=json and q\n")
         field, _, value = query["q"][0].partition(":")
@@ -767,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         btype, parts, query = self._route()
-        if self._failing():
+        if self._failing() or self._no_search(parts):
             return None
         if len(parts) == 3 and parts[:2] == ["search", "index"]:
             spec = json.loads(self._body() or b"{}")
@@ -804,7 +819,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         btype, parts, query = self._route()
-        if self._failing():
+        if self._failing() or self._no_search(parts):
             return None
         if parts == ["mapred"]:
             return self._mapred(query)
@@ -836,11 +851,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         btype, parts, query = self._route()
-        if self._failing():
+        if self._failing() or self._no_search(parts):
             return None
         if len(parts) == 3 and parts[:2] == ["search", "index"]:
-            existed = SEARCH_INDEXES.pop(parts[2], None) is not None
-            return self._send(204 if existed else 404)
+            SEARCH_INDEXES.pop(parts[2], None)
+            return self._send(204)  # Riak 2.x: also for an index that does not exist
         if parts[1:] == ["unavailable", "props"]:
             return self._send(503, "service unavailable\n")
         if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "props":
@@ -860,6 +875,7 @@ class Server(ThreadingHTTPServer):
     auth = None
     old = False  # answer the Riak 2.9+/3.x endpoints like Riak 2.2 (no resource)
     malformed = 0  # 1: wrongly typed documents; 2: numbers out of range or with junk
+    nosearch = False  # no Riak Search (Riak 3.x): every /search path is unknown
     legacyloc = False  # link walker Locations in the old /riak/<b>/<k> form
     drop = 0           # requests to the newer endpoints closed without an answer
     newer_hits = 0     # requests that reached the newer endpoints

@@ -576,6 +576,12 @@ static void test_secondary_indexes(void) {
     CHECK(cont == NULL);
 }
 
+static void stub_flag(const char *name, int on) {
+    char path[32];
+    snprintf(path, sizeof path, "/_%s?set=%d", name, on);
+    free(stub_get(port, path));
+}
+
 static void test_search(void) {
     CHECK_EQ_INT(riak_search_index_create(rc, "users_idx", "_yz_default", 2), RIAK_OK);
     json_object *last = last_request();
@@ -646,9 +652,33 @@ static void test_search(void) {
     CHECK_EQ_INT(riak_search(rc, "users_idx", &empty, &res), RIAK_E_INVALID_ARG);
     CHECK_EQ_INT(riak_search(rc, "users_idx", NULL, &res), RIAK_E_INVALID_ARG);
     CHECK_EQ_INT(riak_search_index_delete(rc, "plain_idx"), RIAK_OK);
-    CHECK_EQ_INT(riak_search_index_delete(rc, "plain_idx"), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_search_index_delete(rc, "plain_idx"), RIAK_OK); /* as Riak answers */
     CHECK_EQ_INT(riak_search_index_delete(rc, ""), RIAK_E_INVALID_ARG);
     CHECK_EQ_INT(riak_search_schema_put(rc, "mine", NULL), RIAK_E_INVALID_ARG);
+
+    /* Riak 2.x answers a missing index query or schema with Webmachine's own
+     * 404 page: still "not found", with the original status and message */
+    CHECK_EQ_INT(riak_search(rc, "missing", &q, &res), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_client_http_status(rc), 404);
+    CHECK(strstr(riak_client_errmsg(rc), "404") != NULL);
+    CHECK_EQ_INT(riak_search_schema_get(rc, "no_such_schema", &json), RIAK_E_NOT_FOUND);
+    CHECK(json == NULL);
+
+    /* a node without Search (Riak 3.x) answers every path with that page */
+    stub_flag("nosearch", 1);
+    CHECK_EQ_INT(riak_search(rc, "users_idx", &q, &res), RIAK_E_UNSUPPORTED);
+    CHECK(strstr(riak_client_errmsg(rc), "Riak Search") != NULL);
+    CHECK_EQ_INT(riak_search_index_create(rc, "x_idx", NULL, 0), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_search_index_get(rc, "users_idx", &json), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_search_index_list(rc, &json), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_search_index_delete(rc, "users_idx"), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_search_schema_put(rc, "s", "<schema/>"), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_search_schema_get(rc, "mine", &json), RIAK_E_UNSUPPORTED);
+    CHECK(json == NULL);
+    stub_flag("nosearch", 0);
+    /* other "not found" answers are untouched by the check */
+    riak_object o2;
+    CHECK_EQ_INT(riak_get(rc, "nothing", "here", NULL, &o2), RIAK_E_NOT_FOUND);
 }
 
 static bool on_phase(unsigned phase, const char *data, void *ctx) {
@@ -1167,12 +1197,6 @@ static void test_read_flags_and_head(void) {
     riak_index_result r;
     CHECK_EQ_INT(riak_index_query_run(rc, "flags", &q, &r), RIAK_E_UNSUPPORTED);
     CHECK_EQ_INT(riak_delete(rc, "flags", "k", NULL), RIAK_OK);
-}
-
-static void stub_flag(const char *name, int on) {
-    char path[32];
-    snprintf(path, sizeof path, "/_%s?set=%d", name, on);
-    free(stub_get(port, path));
 }
 
 /* Requests that reached the newer endpoints since the last call. */

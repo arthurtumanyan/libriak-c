@@ -38,7 +38,10 @@ do {
 ## Riak Search
 
 Riak Search (Yokozuna) needs `search = on` in `riak.conf` and a Java runtime
-on the nodes.
+on the nodes. Riak 3.x no longer has it: there, and on a node with Search
+switched off, every Search call returns `RIAK_E_UNSUPPORTED`, on both
+transports. A query on an index that does not exist, or a missing schema,
+is `RIAK_E_NOT_FOUND`.
 
 ```c
 riak_search_index_create(c, "users_idx", NULL, 0);    /* _yz_default schema */

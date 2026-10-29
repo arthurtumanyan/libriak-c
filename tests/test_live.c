@@ -321,6 +321,14 @@ static void test_search(void) {
     CHECK_EQ_INT(riak_search_schema_get(rc, "_yz_default", &json), RIAK_OK);
     CHECK(json && strstr(json, "<schema"));
     riak_free(json);
+    json = NULL;
+    /* a node with Search: a missing schema or index stays "not found" */
+    CHECK_EQ_INT(riak_search_schema_get(rc, "libriak_no_such_schema", &json), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_search_index_get(rc, "libriak_no_such_idx", &json), RIAK_E_NOT_FOUND);
+    riak_search_query mq = {.q = "*:*"};
+    riak_search_result mr;
+    CHECK_EQ_INT(riak_search(rc, "libriak_no_such_idx", &mq, &mr), RIAK_E_NOT_FOUND);
+    riak_free(json);
 
     char props[160];
     snprintf(props, sizeof props, "{\"props\":{\"search_index\":\"%s\"}}", index);
@@ -639,8 +647,10 @@ static void test_server_info_preflist_coverage(void) {
     /* a coverage plan splits a $bucket query; together the parts find the key */
     riak_coverage_plan plan;
     riak_status st = riak_get_coverage(rc, NULL, bucket, 0, &plan);
-    if (st == RIAK_E_UNSUPPORTED) {
-        fprintf(stderr, "skip coverage: %s\n", riak_client_errmsg(rc));
+    if (!has_feature("coverage")) {
+        /* coverage plans are served by Riak TS only, by no Riak KV release */
+        CHECK_EQ_INT(st, RIAK_E_UNSUPPORTED);
+        CHECK(plan.entries == NULL && plan.count == 0);
         riak_delete(rc, bucket, "pl", NULL);
         return;
     }
@@ -1209,10 +1219,20 @@ static void test_missing_features_unsupported(void) {
         char *id = NULL;
         CHECK_EQ_INT(riak_get_cluster_id(rc, &id), RIAK_E_UNSUPPORTED);
     }
-    if (!has_feature("search") && is_pb()) {
+    if (!has_feature("search")) {
+        /* a node without Riak Search (Riak 3.x): every Search call, both
+         * transports */
         riak_search_query sq = {.q = "*:*"};
         riak_search_result sr;
+        char *json = NULL;
         CHECK_EQ_INT(riak_search(rc, "missing_index", &sq, &sr), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_index_create(rc, "libriak_idx", NULL, 0), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_index_get(rc, "libriak_idx", &json), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_index_list(rc, &json), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_index_delete(rc, "libriak_idx"), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_schema_put(rc, "libriak_schema", "<schema/>"), RIAK_E_UNSUPPORTED);
+        CHECK_EQ_INT(riak_search_schema_get(rc, "libriak_schema", &json), RIAK_E_UNSUPPORTED);
+        CHECK(json == NULL);
     }
 }
 

@@ -327,6 +327,8 @@ static int search_param(riak_buf *url, const char *name, const char *value) {
     return value ? riak_url_append_query(url, name, value) : 0;
 }
 
+static riak_status search_not_found(riak_client *c, riak_status st);
+
 riak_status riak_search(riak_client *client, const char *index, const riak_search_query *q,
                         riak_search_result *out) {
     if (client == NULL || out == NULL || q == NULL) {
@@ -365,7 +367,7 @@ riak_status riak_search(riak_client *client, const char *index, const riak_searc
     st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, &raw);
     riak_buf_free(&url);
     if (st != RIAK_OK) {
-        return st;
+        return search_not_found(client, st);
     }
     st = riak_parse_search(raw, strlen(raw), out);
     out->raw = raw;
@@ -381,6 +383,36 @@ static int search_admin_url(riak_buf *url, const riak_client *c, const char *wha
     return riak_buf_append_str(url, c->root) || riak_buf_append_str(url, "search/") ||
            riak_buf_append_str(url, what) ||
            (name && (riak_buf_append_str(url, "/") || riak_url_append_escaped(url, name)));
+}
+
+/* Riak 2.x answers a query on a missing index, or a missing schema, with
+ * Webmachine's own 404 page; a node without Search (Riak 3.x, or search = off)
+ * answers every Search path with it. The index list tells them apart: it
+ * exists whenever Search does. A "not found" from a node without Search
+ * becomes RIAK_E_UNSUPPORTED; otherwise it is kept with its message. */
+static riak_status search_not_found(riak_client *c, riak_status st) {
+    if (st != RIAK_E_NOT_FOUND || riak_is_pb(c)) {
+        return st;
+    }
+    char errmsg[sizeof c->errmsg];
+    memcpy(errmsg, c->errmsg, sizeof errmsg);
+    long http_status = c->http_status;
+    size_t node = c->last_node;
+    riak_buf url = {0};
+    riak_response resp = {0};
+    bool absent = false;
+    if (search_admin_url(&url, c, "index", NULL) == 0) {
+        /* the node that answered "not found" */
+        riak_request req = {.method = "GET", .url = url.data, .pin = node + 1};
+        absent = riak_perform(c, &req, &resp) == RIAK_OK && riak_http_no_resource(&resp);
+    }
+    riak_response_free(&resp);
+    riak_buf_free(&url);
+    memcpy(c->errmsg, errmsg, sizeof errmsg);
+    c->http_status = http_status;
+    c->last_node = node;
+    return absent ? riak_set_error(c, RIAK_E_UNSUPPORTED, "this node does not offer Riak Search")
+                  : st;
 }
 
 /* PUT/DELETE an admin resource and require 204 (or 200). */
@@ -409,7 +441,7 @@ static riak_status admin_write(riak_client *c, const char *method, const char *w
     riak_response_free(&resp);
     curl_slist_free_all(headers);
     riak_buf_free(&url);
-    return st;
+    return search_not_found(c, st);
 }
 
 riak_status riak_search_index_create(riak_client *client, const char *index, const char *schema,
@@ -466,7 +498,7 @@ static riak_status admin_get(riak_client *c, const char *what, const char *name,
     }
     riak_status st = riak_get_body(c, url.data, kind, out);
     riak_buf_free(&url);
-    return st;
+    return search_not_found(c, st);
 }
 
 riak_status riak_search_index_get(riak_client *client, const char *index, char **json) {

@@ -188,6 +188,8 @@ riak_status riak_http_target(riak_client *c, const char *what, size_t *pin);
  * status is mapped by riak_http_error(). */
 riak_status riak_http_error_or_unsupported(riak_client *c, const riak_response *resp,
                                            const char *what);
+/* The response is Webmachine's own 404 page: no resource matches the path. */
+bool riak_http_no_resource(const riak_response *resp);
 
 /* Whether an HTTP request may be repeated (GET, PUT, DELETE). */
 bool riak_request_idempotent(const riak_request *req);
