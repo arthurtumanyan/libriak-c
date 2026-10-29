@@ -27,7 +27,9 @@ def main():
     cmake = open(os.path.join(include, "..", "CMakeLists.txt"), encoding="utf-8").read()
     known |= set(re.findall(r"option\((RIAK_\w+)", cmake))
     known |= {"riak_static", "riak_kv", "riak_kv_mapreduce"}
-    known |= {"RIAK_TAG"}  # build argument of tests/docker/openriak
+    known |= {"RIAK_TAG", "RIAK_PATCHES"}  # build arguments of tests/docker/openriak
+    # Riak server applications and modules named in the operations guide
+    known |= {"riak_pb", "riak_pb_dt_codec", "riak_kv_query_server", "riak_kv_pb_object"}
     env_prefixes = ("RIAK_TEST_", "RIAK_DOCS_")
     failures = 0
     programs = 0

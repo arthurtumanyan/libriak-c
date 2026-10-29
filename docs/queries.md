@@ -117,8 +117,9 @@ if (riak_query_run(c, "people", &q, &r) == RIAK_OK) {
   read in pages with `riak_query_fetch()`, which removes them from the
   queue and is therefore never retried. `riak_query_result::complete` is
   set once the query has finished and every queued entry has been read.
-- Riak 3.4.1 fails internally when `max_results` is lower than the number
-  of matches (see [Operations](operations.md#known-server-issues)).
+- Riak 3.4.1 as released fails internally when `max_results` is lower than
+  the number of matches; the fix is described in
+  [Operations](operations.md#known-server-issues).
 
 ## Object folds
 

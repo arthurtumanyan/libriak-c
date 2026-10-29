@@ -609,11 +609,23 @@ static void test_server_info_preflist_coverage(void) {
     CHECK_EQ_INT(riak_put(rc, bucket, "pl", "x", 1, &o, NULL, NULL), RIAK_OK);
     riak_preflist pl;
     riak_status pst = riak_get_preflist(rc, NULL, bucket, "pl", &pl);
-    if (live_transport == RIAK_TRANSPORT_HTTP && has_feature("nohttppreflist")) {
-        CHECK_EQ_INT(pst, RIAK_E_UNSUPPORTED); /* Riak 3.x: Protocol Buffers only */
+    if (live_transport == RIAK_TRANSPORT_HTTP) {
+        CHECK_EQ_INT(pst, RIAK_E_UNSUPPORTED); /* Protocol Buffers only */
     } else {
+        /* n_val primaries, and a list that depends on the key */
         CHECK_EQ_INT(pst, RIAK_OK);
-        CHECK(pl.count >= 1);
+        CHECK_EQ_INT(pl.count, 3);
+        long long first = pl.count ? pl.items[0].partition : -1;
+        bool varies = false;
+        for (int i = 0; i < 16 && !varies && pst == RIAK_OK; i++) {
+            char k[16];
+            snprintf(k, sizeof k, "pl-%d", i);
+            riak_preflist other;
+            CHECK_EQ_INT(riak_get_preflist(rc, NULL, bucket, k, &other), RIAK_OK);
+            varies = other.count > 0 && other.items[0].partition != first;
+            riak_preflist_free(&other);
+        }
+        CHECK(varies);
     }
     riak_preflist_free(&pl);
     size_t keys = 0;
@@ -900,6 +912,40 @@ static void test_query_api(void) {
     CHECK_EQ_INT(riak_query_run(rc, qb, &qa, &r), RIAK_OK);
     CHECK_EQ_INT(r.total, 2); /* p2 and p3 */
     riak_query_result_free(&r);
+
+    /* pages of max_results, chained by the continuation: every match once */
+    const char *paged[] = {"terms", "raw_keys"};
+    for (int m = 0; m < 2; m++) {
+        riak_query pq = {
+            .parts = &part, .n_parts = 1, .accumulation_option = paged[m], .max_results = 3};
+        bool seen[5] = {false};
+        int pages = 0, total = 0;
+        char *cont = NULL;
+        for (; pages < 10; pages++) {
+            pq.continuation = cont;
+            riak_status pst = riak_query_run(rc, qb, &pq, &r);
+            CHECK_EQ_INT(pst, RIAK_OK);
+            free(cont);
+            cont = NULL;
+            if (pst != RIAK_OK) {
+                fprintf(stderr, "  %s page %d: %s\n", paged[m], pages, riak_client_errmsg(rc));
+                break;
+            }
+            CHECK(r.count <= 3);
+            for (size_t i = 0; i < r.count; i++) {
+                int n = r.keys[i][0] == 'p' ? atoi(r.keys[i] + 1) : 0;
+                CHECK(n >= 1 && n <= 4 && !seen[n]);
+                if (n >= 1 && n <= 4) seen[n] = true;
+                total++;
+            }
+            cont = r.continuation ? strdup(r.continuation) : NULL;
+            riak_query_result_free(&r);
+            if (cont == NULL) break;
+        }
+        free(cont);
+        CHECK_EQ_INT(total, 4);
+        CHECK_EQ_INT(pages, 1); /* 3 + 1 results: the second page is the last */
+    }
 
     /* queued results, fetched in batches */
     q.accumulation_option = "queue_raw_keys";

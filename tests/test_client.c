@@ -1099,15 +1099,18 @@ static void test_info_preflist_streams(void) {
     riak_server_info_free(&info);
     CHECK_EQ_INT(riak_get_server_info(rc, NULL), RIAK_E_INVALID_ARG);
 
+    /* Riak 2.x's HTTP resource answers the same list for every key, and
+     * Riak 3.x has none: preference lists are Protocol Buffers only, and no
+     * request is sent */
     riak_preflist pl;
-    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_OK);
-    CHECK_EQ_INT(pl.count, 2);
-    CHECK_EQ_STR(pl.items[1].node, "riak@b");
-    CHECK(pl.items[0].primary && !pl.items[1].primary);
-    riak_preflist_free(&pl);
-    json_object *last = last_request();
-    CHECK_EQ_STR(jstr(last, "path"), "/types/default/buckets/b/keys/k/preflist");
-    json_object_put(last);
+    json_object *before = last_request();
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_E_UNSUPPORTED);
+    CHECK(strstr(riak_client_errmsg(rc), "Protocol Buffers") != NULL);
+    CHECK(pl.items == NULL && pl.count == 0);
+    json_object *after = last_request();
+    CHECK_EQ_STR(jstr(after, "path"), jstr(before, "path"));
+    json_object_put(before);
+    json_object_put(after);
     CHECK_EQ_INT(riak_get_preflist(rc, NULL, "", "k", &pl), RIAK_E_INVALID_ARG);
 
     size_t n = 0;
@@ -1760,8 +1763,8 @@ static void test_repl_queue_http(void) {
 }
 
 /* Riak 2.2 has no resource for the newer endpoints: RIAK_E_UNSUPPORTED,
- * not "not found"; Riak 3.x answers preflists over HTTP via the link walker. */
-static void test_old_and_v3_nodes_http(void) {
+ * not "not found". */
+static void test_old_nodes_http(void) {
     stub_flag("old", 1);
     riak_aae_tree t;
     CHECK_EQ_INT(riak_aae_merge_root(rc, 3, &t), RIAK_E_UNSUPPORTED);
@@ -1778,13 +1781,6 @@ static void test_old_and_v3_nodes_http(void) {
     riak_object o;
     CHECK_EQ_INT(riak_get(rc, "nothing", "here", NULL, &o), RIAK_E_NOT_FOUND);
     stub_flag("old", 0);
-
-    stub_flag("v3", 1);
-    riak_preflist pl;
-    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_E_UNSUPPORTED);
-    stub_flag("v3", 0);
-    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_OK);
-    riak_preflist_free(&pl);
 }
 
 int main(void) {
@@ -1847,7 +1843,7 @@ int main(void) {
     RUN(test_query_api_http);
     RUN(test_aae_http);
     RUN(test_repl_queue_http);
-    RUN(test_old_and_v3_nodes_http);
+    RUN(test_old_nodes_http);
 
     riak_client_free(rc);
     riak_global_cleanup();

@@ -492,32 +492,10 @@ riak_status riak_get_preflist(riak_client *client, const char *type, const char 
     if (riak_is_pb(client)) {
         return riak_pb_preflist(client, type, bucket, key, out);
     }
-    riak_buf url = {0};
-    if (riak_url_bucket(&url, client, type ? type : "default", bucket, "keys", key) != 0 ||
-        riak_buf_append_str(&url, "/preflist") != 0) {
-        riak_buf_free(&url);
-        return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
-    }
-    char *body = NULL;
-    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, &body);
-    riak_buf_free(&url);
-    if (st == RIAK_E_HTTP && riak_client_http_status(client) == 400 &&
-        strstr(riak_client_errmsg(client), "link walk") != NULL) {
-        /* Riak 3.x serves preference lists over Protocol Buffers only; the
-         * path then reaches the link walker */
-        return riak_set_error(client, RIAK_E_UNSUPPORTED,
-                              "this node serves preference lists over Protocol Buffers only");
-    }
-    if (st != RIAK_OK) {
-        return st;
-    }
-    st = body ? riak_parse_preflist(body, strlen(body), out) : RIAK_E_PARSE;
-    free(body);
-    if (st != RIAK_OK) {
-        riak_preflist_free(out);
-        return riak_set_error(client, st, "cannot parse preference list");
-    }
-    return RIAK_OK;
+    /* Riak 2.x's HTTP resource ignores the key and answers the same list for
+     * every key; Riak 3.0 removed it */
+    return riak_set_error(client, RIAK_E_UNSUPPORTED,
+                          "preference lists are served over Protocol Buffers only");
 }
 
 void riak_coverage_free(riak_coverage_plan *plan) {

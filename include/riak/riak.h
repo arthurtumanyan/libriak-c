@@ -618,7 +618,9 @@ typedef struct {
 } riak_preflist;
 
 /**
- * Preference list (the vnodes that hold the replicas) of a key.
+ * Preference list (the vnodes that hold the replicas) of a key; Protocol
+ * Buffers only, ::RIAK_E_UNSUPPORTED over HTTP (Riak's HTTP resource answered
+ * the same list for every key and was removed in Riak 3.0).
  * @param client Client handle.
  * @param type Bucket type; NULL selects "default".
  * @param bucket Bucket name.

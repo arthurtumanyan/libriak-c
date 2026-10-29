@@ -84,18 +84,18 @@ cluster (Protocol Buffers; both need the `riak_repl` application).
 
 ## Known server issues
 
-The following Riak issues were found while testing the library. The library
-reports them as errors and does not hide them:
+Testing the library found three bugs in Riak KV 3.2.6 and 3.4.1 (and in the
+current OpenRiak branches). They have been fixed and offered upstream; the
+test images in `tests/docker/openriak` are built with these fixes (see
+[Testing](testing.md)). The library does not work around them: on a node
+without the fixes the affected calls fail as described.
 
-- Riak 3.4.1, Query API paging: with `max_results` lower than the number of
-  matches, the node fails internally and answers HTTP 503. The query
-  succeeds without `max_results`.
-- Riak 3.4.1, grow-only set update with `return_body` over Protocol
-  Buffers: the node crashes the request handler and closes the connection.
-  The library sends such an update without `return_body` and fetches the
-  value afterwards.
-- Riak 3.4.1, `RpbMembershipReq` with a body: the request handler crashes;
-  the library sends the request without one.
-- A crashed request handler makes Riak send "Error processing incoming
-  message" and close the connection; the library reports `RIAK_E_SERVER`
-  and opens a new connection for the next request.
+| Server bug | Affected | Effect on a node without the fix |
+|---|---|---|
+| Query API: a `terms` query with `max_results` crashes when a vnode sends an empty batch (riak_kv `riak_kv_query_server`) | 3.4 | `riak_query_run()` with `max_results` returns `RIAK_E_HTTP` (HTTP 503 "timeout") |
+| Grow-only set update with `return_body` cannot be encoded (riak_pb `riak_pb_dt_codec`) | 3.2, 3.4, Protocol Buffers | `riak_dt_update()` with `return_body` on a gset returns `RIAK_E_SERVER`; the node closes the connection |
+| `RpbMembershipReq` with its optional `queuename` crashes the handler (riak_kv `riak_kv_pb_object`) | 3.2, 3.4 | Not reached by the library, which sends the request without fields, as Riak's own client does |
+
+A crashed request handler makes Riak send "Error processing incoming
+message" and close the connection; the library reports `RIAK_E_SERVER` and
+opens a new connection for the next request.

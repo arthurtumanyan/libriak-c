@@ -235,24 +235,6 @@ static void test_server_info_json(void) {
     }
 }
 
-static void test_preflist_json(void) {
-    riak_preflist pl = {0};
-    const char *ok = "{\"preflist\":[{\"partition\":7,\"node\":\"riak@a\",\"primary\":true},"
-                     "{\"partition\":8,\"node\":\"riak@b\",\"primary\":false}]}";
-    CHECK_EQ_INT(riak_parse_preflist(ok, strlen(ok), &pl), RIAK_OK);
-    CHECK_EQ_INT(pl.count, 2);
-    CHECK_EQ_INT(pl.items[0].partition, 7);
-    CHECK_EQ_STR(pl.items[1].node, "riak@b");
-    CHECK(pl.items[0].primary && !pl.items[1].primary);
-    riak_preflist_free(&pl);
-    const char *bad[] = {"{}", "{\"preflist\":{}}", "{\"preflist\":[1]}",
-                         "{\"preflist\":[{\"partition\":1,\"primary\":true}]}", "nope"};
-    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
-        CHECK(riak_parse_preflist(bad[i], strlen(bad[i]), &pl) != RIAK_OK);
-        riak_preflist_free(&pl);
-    }
-}
-
 int main(void) {
     RUN(test_array);
     RUN(test_empty_array);
@@ -265,6 +247,5 @@ int main(void) {
     RUN(test_search_json);
     RUN(test_mapred_chunk);
     RUN(test_server_info_json);
-    RUN(test_preflist_json);
     return CHECK_DONE();
 }

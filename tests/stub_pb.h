@@ -629,11 +629,6 @@ static int stub_dt_update(stub_conn *c, const uint8_t *buf, size_t len) {
     const DtOp *op = q->op;
     ext.dt_node_confirms = q->has_node_confirms ? q->node_confirms : 0;
     ext.dt_return_body = q->has_return_body && q->return_body;
-    if (op->gset_op && ext.dt_return_body) {
-        /* Riak 3.4 cannot encode a gset in an update response */
-        dt_update_req__free_unpacked(q, NULL);
-        return stub_crash(c, "riak_pb_dt_codec,encode_update_response");
-    }
     stub.dt_kind = op->counter_op ? 1 : op->set_op ? 2 : op->map_op ? 3 : op->hll_op ? 4 : 5;
     stub.dt_increment = op->counter_op ? op->counter_op->increment : 0;
     stub.dt_adds = op->set_op    ? op->set_op->n_adds
@@ -655,7 +650,14 @@ static int stub_dt_update(stub_conn *c, const uint8_t *buf, size_t len) {
             r.has_key = 1;
             r.key = stub_bin("dtkey");
         }
-        if (q->has_return_body && q->return_body) {
+        if (q->has_return_body && q->return_body && op->gset_op) {
+            /* the set after the update: the added elements */
+            r.n_gset_value = op->gset_op->n_adds;
+            r.gset_value = op->gset_op->adds;
+            r.has_context = 1;
+            r.context.data = (uint8_t *)(uintptr_t)STUB_DT_CTX;
+            r.context.len = sizeof STUB_DT_CTX;
+        } else if (q->has_return_body && q->return_body) {
             r.has_counter_value = 1;
             r.counter_value = 7;
             r.has_context = 1;

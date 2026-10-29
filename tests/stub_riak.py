@@ -20,7 +20,6 @@ certificate signed by the test CA, node 2 requires neither.
   GET /_hits  -> number of requests this node received (resets it)
   GET /_old?set=1  -> answer the Riak 2.9+/3.x endpoints with Webmachine's
                       404 page, as Riak 2.2 does
-  GET /_v3?set=1   -> answer like Riak 3.x where it differs (preflists)
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
 vclock create siblings). Special buckets: "many" (1000 streamed keys),
@@ -447,9 +446,6 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["_old"]:
             self.server.old = query.get("set", ["0"])[0] == "1"
             return self._send(204)
-        if parts == ["_v3"]:
-            self.server.v3 = query.get("set", ["0"])[0] == "1"
-            return self._send(204)
         if parts == ["_malformed"]:
             self.server.malformed = int(query.get("set", ["0"])[0])
             return self._send(204)
@@ -500,17 +496,8 @@ class Handler(BaseHTTPRequestHandler):
                 value = "99999999999999999999"  # beyond int64
             return self._send(404, "not found\n") if value is None else \
                 self._send(200, str(value), {"Content-Type": "text/plain"})
-        if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "keys" and \
-                parts[4] != "preflist":
+        if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "keys":
             return self._link_walk(btype, parts[1], parts[3], parts[4:])
-        if len(parts) == 5 and parts[0] == "buckets" and parts[4] == "preflist" and \
-                self.server.v3:
-            return self._send(400, "Invalid link walk query submitted. Valid link walk query "
-                                   "format is: /riak/some_bucket/some_key/<bucket>,<riaktag>,0|1/...")
-        if len(parts) == 5 and parts[0] == "buckets" and parts[4] == "preflist":
-            return self._json(200, {"preflist": [
-                {"partition": 0, "node": "riak@a", "primary": True},
-                {"partition": 1, "node": "riak@b", "primary": False}]})
         if parts == ["buckets"] and query.get("buckets") == ["true"]:
             with LOCK:
                 names = {b for t, b, _ in STORE if t == btype}
@@ -872,7 +859,6 @@ class Server(ThreadingHTTPServer):
     hits = 0
     auth = None
     old = False  # answer the Riak 2.9+/3.x endpoints like Riak 2.2 (no resource)
-    v3 = False   # answer like Riak 3.x where it differs (no HTTP preflists)
     malformed = 0  # 1: wrongly typed documents; 2: numbers out of range or with junk
     legacyloc = False  # link walker Locations in the old /riak/<b>/<k> form
     drop = 0           # requests to the newer endpoints closed without an answer

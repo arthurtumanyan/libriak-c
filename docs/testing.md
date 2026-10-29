@@ -70,7 +70,12 @@ The live tests run when `RIAK_TEST_URL` is set. Three node images are used:
 
 The OpenRiak images use the leveled backend (secondary indexes), tictac AAE
 (AAE folds) and a nextgenrepl source queue `libriak_q`; building one takes
-about 15 minutes. `tests/docker/setup-node.sh` waits for the node and
+about 15 minutes. Before the release is built, the fixes in
+`tests/docker/openriak/patches/<tag>/<app>/` are applied to the
+dependencies at the commits Riak's `rebar.lock` names (the server bugs in
+[Operations](operations.md#known-server-issues)); a patch that does not
+apply fails the build. `--build-arg RIAK_PATCHES=none` builds the release
+as published, on which the affected live checks fail. `tests/docker/setup-node.sh` waits for the node and
 creates the bucket types the tests use; with `--security` it also installs
 the certificates of `tests/gen_certs.sh`, enables Riak security and adds the
 user `alice` (password `secret`). It works with `riak-admin` (2.x) and
@@ -82,7 +87,7 @@ docker run -d --name riak --ulimit nofile=65536:65536 \
     -p 8098:8098 -p 8087:8087 -p 8443:8443 libriak-riak:3.4.1
 sh tests/docker/setup-node.sh riak
 
-F=2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist,query
+F=2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,query
 RIAK_TEST_URL=http://127.0.0.1:8098 RIAK_TEST_TYPE=libriak_multi RIAK_TEST_FEATURES=$F \
     ctest --test-dir build -R live --output-on-failure
 RIAK_TEST_URL=pb://127.0.0.1:8087 RIAK_TEST_HTTP_PORT=8098 RIAK_TEST_TYPE=libriak_multi \
@@ -112,7 +117,6 @@ limit well above 1024 (`--ulimit nofile=65536:65536`).
 | `aae` | AAE folds | | yes | yes |
 | `nextgenrepl` | Replication queues, membership | | yes | yes |
 | `repl` | `riak_get_cluster_id()`, `riak_repl_get()` | | yes | yes |
-| `nohttppreflist` | Preference lists are PB only | | yes | yes |
 | `query` | Query API | | | yes |
 
 Features that are not enabled are checked to return `RIAK_E_UNSUPPORTED`

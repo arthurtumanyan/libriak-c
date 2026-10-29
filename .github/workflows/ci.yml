@@ -102,10 +102,10 @@ jobs:
           - { riak: "2.2.3", features: "2i,search,dt,counters,fold,linkwalk" }
           - riak: "3.2.6"
             otp: "24"
-            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist"
+            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl"
           - riak: "3.4.1"
             otp: "26"
-            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist,query"
+            features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,query"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

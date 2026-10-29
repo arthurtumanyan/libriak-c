@@ -62,7 +62,7 @@ roughly 2 times faster.
 | `riak_fold_objects()`, `riak_get_client_id()`, `riak_repl_push()` | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_get_cluster_id()`, `riak_repl_get()` | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_query_run()`, `riak_query_fetch()` | Through `http_port`, see below | Supported |
-| `riak_get_preflist()` on Riak 3.x | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_get_preflist()` | Supported | `RIAK_E_UNSUPPORTED` (Riak's HTTP resource ignores the key) |
 | `riak_stats()` | Through `http_port`, see below | Supported |
 | `riak_link_walk()` | MapReduce link phases, then gets | Riak's link walker |
 | `riak_set_bucket_props()` | Properties known to `RpbBucketProps`; others give `RIAK_E_INVALID_ARG` | Any property |

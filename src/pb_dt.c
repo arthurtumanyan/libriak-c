@@ -429,27 +429,6 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
                               const riak_dt_op *op, const char *context, const riak_dt_opts *opts,
                               riak_datatype *out, char **created_key) {
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
-    if (op != NULL && op->type == RIAK_DT_GSET && o->return_body) {
-        /* Riak 3.4 cannot encode a grow-only set in an update response (its
-         * handler crashes and drops the connection); adding is idempotent,
-         * so the update is sent without return_body and the value fetched */
-        riak_dt_opts plain = *o;
-        plain.return_body = false;
-        char *generated = NULL;
-        riak_status st = riak_pb_dt_update(c, type, bucket, key, op, context, &plain, NULL,
-                                           key ? NULL : &generated);
-        if (st == RIAK_OK && out) {
-            riak_dt_opts fo = {.node_confirms = o->node_confirms,
-                               .server_timeout_ms = o->server_timeout_ms};
-            st = riak_pb_dt_fetch(c, type, bucket, key ? key : generated, &fo, out);
-        }
-        if (st == RIAK_OK && created_key) {
-            *created_key = generated;
-            generated = NULL;
-        }
-        free(generated);
-        return st;
-    }
     arena a = {0};
     DtOp dop;
     riak_status st = build_op(&a, op, &dop);

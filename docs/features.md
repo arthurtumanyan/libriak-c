@@ -20,7 +20,7 @@ The table lists what was verified against Riak KV 2.2.3, 3.2.6 and 3.4.1
 | Bucket and bucket-type properties, `riak_set_type_props()` | yes | yes | yes | yes | yes |
 | `riak_get_client_id()` | yes | `RIAK_E_UNSUPPORTED` | yes | yes | yes |
 | Key and bucket listings, server information | yes | yes | yes | yes | yes |
-| `riak_get_preflist()` | yes | yes | yes | PB only | PB only |
+| `riak_get_preflist()` | yes | `RIAK_E_UNSUPPORTED` | yes | yes | yes |
 | Secondary indexes, `pagination_sort` | yes | yes | yes | yes | yes |
 | Coverage plans (`riak_get_coverage()`) | yes | `RIAK_E_UNSUPPORTED` | no | no | no |
 | Riak Search and its administration | yes | yes | yes | no | no |
@@ -44,8 +44,9 @@ Notes:
   `RIAK_E_UNSUPPORTED`. Riak 2.2 answers newer Protocol Buffers requests
   with "Unknown message code" and newer HTTP resources with an HTML 404;
   both are reported as unsupported, never as a missing object.
-- Riak 3.x serves preference lists only over Protocol Buffers; its HTTP
-  router sends `/preflist` to the link walker.
+- Preference lists are served over Protocol Buffers only. Riak 2.x's HTTP
+  resource ignores the key and answers the same list for every key, which
+  is why Riak 3.0 removed it.
 - Link walking is refused by Riak while Riak security is enabled, on both
   transports (`RIAK_E_UNSUPPORTED`).
 - The AAE folds need tictac AAE (`tictacaae_active = active`); the

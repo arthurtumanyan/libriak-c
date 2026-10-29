@@ -14,6 +14,13 @@
   non-reentrant `strerror()`.
 
 ### Changed
+- `riak_get_preflist()` over HTTP returns `RIAK_E_UNSUPPORTED`: Riak 2.x's
+  HTTP resource ignores the key and answers the same list for every key,
+  and Riak 3.0 removed it. Protocol Buffers serves preference lists.
+- A grow-only set update with `return_body` is sent as one request, the set
+  coming in the update response. Riak 3.2 and 3.4 as released fail such
+  requests over Protocol Buffers (a server bug, fixed and offered upstream;
+  see `docs/operations.md`).
 - zlib is required (AAE tree branches).
 - `RIAK_E_UNSUPPORTED` also covers calls the node does not implement:
   Riak 2.2 "Unknown message code" answers and its HTML 404 for newer HTTP

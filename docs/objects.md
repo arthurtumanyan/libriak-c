@@ -140,4 +140,6 @@ indexes are preferred in production.
   `riak_config::http_port`).
 - `riak_get_server_info()` returns the node name and Riak version.
 - `riak_get_preflist()` returns the vnodes that hold the replicas of a key,
-  each with its partition, node and whether it is a primary.
+  each with its partition, node and whether it is a primary (Protocol
+  Buffers; over HTTP it returns `RIAK_E_UNSUPPORTED`, since Riak's HTTP
+  resource ignored the key and was removed in Riak 3.0).

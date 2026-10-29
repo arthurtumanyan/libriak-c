@@ -598,19 +598,23 @@ static void test_new_options_pb(void) {
     CHECK_EQ_INT(ext.dt_node_confirms, 3);
     riak_dt_op_free(op);
 
-    /* gset + return_body: sent without return_body, then fetched (Riak 3.4
-     * would crash and drop the connection otherwise) */
+    /* gset + return_body: one request, the set comes in the update response */
     op = riak_dt_op_new(RIAK_DT_GSET);
     riak_dt_op_add(op, "x");
+    riak_dt_op_add(op, "y");
     riak_dt_opts rb = {.return_body = true};
     riak_datatype dt;
     unsigned fetches = ext.dt_fetches;
-    int dropped = atomic_load(&ext.dropped);
-    CHECK_EQ_INT(riak_dt_update(c, "counters", "b", "k", op, NULL, &rb, &dt, NULL), RIAK_OK);
-    CHECK_EQ_INT(ext.dt_return_body, 0);
-    CHECK_EQ_INT(ext.dt_fetches - fetches, 1);
-    CHECK_EQ_INT(atomic_load(&ext.dropped), dropped);
-    CHECK_EQ_INT(dt.value.type, RIAK_DT_COUNTER); /* whatever the fetch returned */
+    CHECK_EQ_INT(riak_dt_update(c, "gsets", "b", "k", op, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.dt_return_body, 1);
+    CHECK_EQ_INT(ext.dt_fetches, fetches); /* no second request */
+    CHECK_EQ_INT(dt.value.type, RIAK_DT_GSET);
+    CHECK_EQ_INT(dt.value.n_elements, 2);
+    if (dt.value.n_elements == 2) {
+        CHECK_EQ_STR(dt.value.elements[0], "x");
+        CHECK_EQ_STR(dt.value.elements[1], "y");
+    }
+    CHECK_EQ_STR(dt.context, DT_CTX_B64);
     riak_datatype_free(&dt);
     riak_dt_op_free(op);
     riak_client_free(c);

@@ -49,8 +49,4 @@ riak_status riak_parse_mapred_chunk(const char *json, size_t len, unsigned *phas
 /* "nodename" and "riak_kv_version" of a /stats document. */
 riak_status riak_parse_server_info(const char *json, size_t len, char **node, char **version);
 
-/* {"preflist":[{"partition":N,"node":"...","primary":true},...]}; on failure
- * out holds what was parsed and is freed by the caller. */
-riak_status riak_parse_preflist(const char *json, size_t len, riak_preflist *out);
-
 #endif /* RIAK_PARSE_H */
