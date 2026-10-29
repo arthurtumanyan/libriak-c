@@ -103,6 +103,12 @@ Buffers. Against a node set up with `--security`, `RIAK_TEST_USER`,
 `RIAK_TEST_LOG=1` prints the library's warnings. Nodes need a descriptor
 limit well above 1024 (`--ulimit nofile=65536:65536`).
 
+Riak checks the password of every authenticated HTTP request, at a cost of
+a fraction of a second of server CPU each, while Protocol Buffers
+authenticate once per connection. Over HTTPS with authentication the suite
+therefore runs for minutes (about 2.5 against Riak KV 3.4 on four cores),
+and the `live` test has a 15-minute limit.
+
 `RIAK_TEST_FEATURES` enables the parts that the node supports:
 
 | Flag | Meaning | 2.0.7 | 2.1.4 | 2.2.x | 3.2.6 | 3.4.1 |

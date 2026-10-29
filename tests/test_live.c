@@ -574,7 +574,7 @@ static void test_async(void) {
     live_config(&cfg);
     cfg.host = live_host;
     cfg.port = live_port;
-    cfg.timeout_ms = 30000;
+    cfg.timeout_ms = 120000;
     riak_async *a = NULL;
     CHECK_EQ_INT(riak_async_new(&cfg, &a), RIAK_OK);
     async_tally put = {0}, get = {0}, del = {0};
@@ -586,17 +586,17 @@ static void test_async(void) {
             riak_async_put(a, bucket, keys[i], keys[i], strlen(keys[i]), &o, async_count, &put),
             RIAK_OK);
     }
-    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(riak_async_run(a, 120000), 0);
     CHECK_EQ_INT(put.ok, 50);
     for (int i = 0; i < 50; i++) {
         CHECK_EQ_INT(riak_async_get(a, bucket, keys[i], NULL, async_count, &get), RIAK_OK);
     }
-    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(riak_async_run(a, 120000), 0);
     CHECK_EQ_INT(get.ok, 50);
     for (int i = 0; i < 50; i++) {
         CHECK_EQ_INT(riak_async_delete(a, bucket, keys[i], NULL, async_count, &del), RIAK_OK);
     }
-    CHECK_EQ_INT(riak_async_run(a, 30000), 0);
+    CHECK_EQ_INT(riak_async_run(a, 120000), 0);
     CHECK_EQ_INT(del.ok, 50);
     riak_async_free(a);
 }

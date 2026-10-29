@@ -105,7 +105,10 @@ endif()
 add_executable(test_live test_live.c)
 target_link_libraries(test_live PRIVATE riak riak_warnings)
 add_test(NAME live COMMAND test_live)
-set_tests_properties(live PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+# Riak checks the password of every authenticated HTTP request, which costs
+# it a fraction of a second of CPU per request; over HTTPS with
+# authentication the suite runs for minutes on a CI runner
+set_tests_properties(live PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
 if(RIAK_FUZZ)
   add_executable(fuzz_parse fuzz_parse.c)
