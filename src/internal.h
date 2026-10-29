@@ -37,9 +37,15 @@ struct riak_client {
     char *cert_file, *key_file, *key_password;
     riak_config cfg; /* string members point at the copies above */
     long http_status;
+    bool busy; /* a blocking request is running: callbacks cannot start another */
     char errmsg[512];
     struct riak_pb_state *pb; /* Protocol Buffers transport state */
 };
+
+/* A callback (a streamed name, key, object or MapReduce result) that calls
+ * back into the client running it would reuse the connection and buffers of
+ * the request in progress; such a call is refused instead. */
+#define RIAK_CLIENT_BUSY_MSG "the client is busy: a callback cannot use the client running it"
 
 static inline bool riak_is_pb(const riak_client *c) {
     return c->cfg.transport == RIAK_TRANSPORT_PB;

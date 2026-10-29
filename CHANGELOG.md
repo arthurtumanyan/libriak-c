@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+- A streaming callback (key or bucket listing, index query, MapReduce) that
+  issued a request on the client running it reused the connection and
+  buffers of the stream in progress: a use-after-free over Protocol Buffers
+  and a stack use-after-return over HTTP. Such requests now return
+  `RIAK_E_INVALID_ARG` without touching the connection, and
+  `riak_client_free()` called from such a callback is ignored and logged
+  instead of freeing the client in use.
+- Connection errors are formatted with `strerror_r()` instead of the
+  non-reentrant `strerror()`.
+
 ### Changed
 - libcurl 7.66 or newer is required (`curl_multi_poll`).
 - HTTP 426 (security enabled, request over plain HTTP) is reported as

@@ -58,6 +58,24 @@ jobs:
           # the stub's detached server threads leave reachable memory behind
           RIAK_TEST_CERTS=build/tests/certs valgrind -q --leak-check=full \
             --errors-for-leak-kinds=definite --error-exitcode=1 build/tests/test_pb
+          python3 tests/stub_riak.py valgrind -q --leak-check=full --errors-for-leak-kinds=definite \
+            --error-exitcode=1 build/tests/test_threads
+
+  tsan:
+    name: clang / thread sanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev
+      - name: Build
+        env:
+          CC: clang
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=thread -DRIAK_WERROR=ON
+          && cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
 
   oldest:
     name: oldest supported (ubuntu-22.04)

@@ -351,6 +351,56 @@ static void test_mapred(void) {
     riak_client_free(c);
 }
 
+/* A callback that calls back into the client running it is refused: it would
+ * otherwise reuse the connection of the stream in progress. */
+typedef struct {
+    riak_client *c;
+    int calls;
+    riak_status ping, get, nested;
+} reentry;
+
+static bool reenter_name(const char *name, size_t len, void *ctx) {
+    reentry *r = ctx;
+    (void)name;
+    (void)len;
+    if (r->calls++ == 0) {
+        riak_object o;
+        r->ping = riak_ping(r->c);
+        CHECK(strstr(riak_client_errmsg(r->c), "busy") != NULL);
+        r->get = riak_get(r->c, "b", "k", NULL, &o);
+        riak_client_free(r->c); /* ignored: the client is in use */
+    }
+    return true;
+}
+
+static bool reenter_phase(unsigned phase, const char *data, void *ctx) {
+    reentry *r = ctx;
+    (void)phase;
+    (void)data;
+    if (r->calls++ == 0) {
+        names n = {0};
+        r->nested = riak_list_keys_stream(r->c, NULL, "b", on_name, &n);
+        CHECK_EQ_INT(n.n, 0);
+    }
+    return true;
+}
+
+static void test_reentry_refused(void) {
+    riak_client *c = client();
+    reentry r = {.c = c, .ping = RIAK_OK, .get = RIAK_OK};
+    CHECK_EQ_INT(riak_list_keys_stream(c, NULL, "b", reenter_name, &r), RIAK_OK);
+    CHECK_EQ_INT(r.calls, 3); /* the outer stream is unharmed */
+    CHECK_EQ_INT(r.ping, RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(r.get, RIAK_E_INVALID_ARG);
+    reentry m = {.c = c, .nested = RIAK_OK};
+    CHECK_EQ_INT(riak_mapred_stream(c, "{\"inputs\":\"b\"}", reenter_phase, &m), RIAK_OK);
+    CHECK_EQ_INT(m.calls, 3);
+    CHECK_EQ_INT(m.nested, RIAK_E_INVALID_ARG);
+    /* the guard is released once the outer call returns */
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    riak_client_free(c);
+}
+
 static void test_datatypes(void) {
     riak_client *c = client();
     riak_datatype dt;
@@ -773,6 +823,7 @@ int main(void) {
     RUN(test_index);
     RUN(test_search);
     RUN(test_mapred);
+    RUN(test_reentry_refused);
     RUN(test_datatypes);
     RUN(test_idle_close);
     RUN(test_errors_retries);

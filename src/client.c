@@ -249,6 +249,11 @@ void riak_client_free(riak_client *client) {
     if (client == NULL) {
         return;
     }
+    if (client->busy) {
+        /* called from a callback: the request in progress still uses it */
+        riak_log(client, RIAK_LOG_ERROR, "riak_client_free() from a callback is ignored");
+        return;
+    }
     riak_pb_client_free(client);
     if (client->curl) {
         curl_easy_cleanup(client->curl);

@@ -56,6 +56,14 @@ Deleting a key that does not exist is reported as `RIAK_OK`.
 - A `riak_async` handle runs many concurrent requests on the thread that
   drives it.
 - Log and metrics callbacks run on the thread that issued the request.
+- A callback of a streaming call (`riak_list_keys_stream()`,
+  `riak_index_query_stream()`, `riak_mapred_stream()` and the like) does
+  not issue requests on the client running it, because that client's
+  connection is busy with the stream. Such a request returns
+  `RIAK_E_INVALID_ARG` ("the client is busy") without touching the
+  connection; a second client, or a `riak_async` handle, serves nested
+  requests. `riak_client_free()` called from a callback is ignored and
+  logged, since the client is still in use.
 
 ## Input validation
 

@@ -30,7 +30,9 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_docs.py
             ${CMAKE_C_COMPILER} ${PROJECT_SOURCE_DIR}/include $<TARGET_FILE:riak>
             ${PROJECT_SOURCE_DIR}/README.md ${RIAK_DOC_FILES})
-  if(RIAK_SANITIZE)
+  if(RIAK_SANITIZE STREQUAL "thread")
+    set_tests_properties(docs PROPERTIES ENVIRONMENT "CHECK_DOCS_FLAGS=-fsanitize=thread")
+  elseif(RIAK_SANITIZE)
     set_tests_properties(docs PROPERTIES
       ENVIRONMENT "CHECK_DOCS_FLAGS=-fsanitize=address,undefined")
   endif()
@@ -61,7 +63,24 @@ if(Python3_Interpreter_FOUND AND OPENSSL_EXECUTABLE)
   list(APPEND RIAK_PB_TEST_ENV RIAK_TEST_CERTS=${RIAK_TEST_CERTS})
   set_tests_properties(pb PROPERTIES FIXTURES_REQUIRED certs)
 endif()
+list(APPEND RIAK_PB_TEST_ENV TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp)
 set_tests_properties(pb PROPERTIES ENVIRONMENT "${RIAK_PB_TEST_ENV}")
+
+add_executable(test_threads test_threads.c)
+target_link_libraries(test_threads PRIVATE riak riak_pbgen OpenSSL::SSL Threads::Threads
+                      riak_warnings)
+target_compile_definitions(test_threads PRIVATE _POSIX_C_SOURCE=200809L)
+set(RIAK_THREADS_ENV LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp
+    TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp:halt_on_error=1)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME threads
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py
+            $<TARGET_FILE:test_threads>)
+  set_tests_properties(threads PROPERTIES SKIP_RETURN_CODE 77)
+else()
+  add_test(NAME threads COMMAND test_threads)
+endif()
+set_tests_properties(threads PROPERTIES TIMEOUT 120 ENVIRONMENT "${RIAK_THREADS_ENV}")
 
 add_executable(test_live test_live.c)
 target_link_libraries(test_live PRIVATE riak riak_warnings)

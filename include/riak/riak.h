@@ -34,7 +34,10 @@
  * riak_global_init() is called once before any other thread is started. A
  * ::riak_client is not shared between threads at the same time; one client
  * per thread is used instead. A ::riak_async handle runs many requests
- * concurrently on a single thread.
+ * concurrently on a single thread. A callback of a streaming call (names,
+ * keys, MapReduce results) does not use the client running it: such a call
+ * returns ::RIAK_E_INVALID_ARG, and riak_client_free() called from one is
+ * ignored (and logged) instead of freeing the client in use.
  */
 
 #ifndef RIAK_RIAK_H
@@ -354,7 +357,8 @@ RIAK_API void riak_config_init(riak_config *cfg);
 RIAK_API riak_status riak_client_new(const riak_config *cfg, riak_client **out);
 
 /**
- * Frees a client; NULL is accepted. Stored secrets are wiped.
+ * Frees a client; NULL is accepted. Stored secrets are wiped. A call from a
+ * callback of a request on this client is ignored, since the client is in use.
  * @param client Client to free; NULL is accepted.
  */
 RIAK_API void riak_client_free(riak_client *client);

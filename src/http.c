@@ -331,7 +331,7 @@ bool riak_request_idempotent(const riak_request *req) {
            strcmp(req->method, "PUT") == 0 || strcmp(req->method, "DELETE") == 0;
 }
 
-riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp) {
+static riak_status perform(riak_client *c, const riak_request *req, riak_response *resp) {
     size_t k = req->pin > 0 ? (req->pin - 1) % c->n_nodes : riak_pick_node(c, SIZE_MAX);
     for (unsigned attempt = 0;; attempt++) {
         riak_attempt a;
@@ -351,6 +351,16 @@ riak_status riak_perform(riak_client *c, const riak_request *req, riak_response 
         riak_sleep_ms(riak_backoff_ms(c, attempt));
         k = riak_pick_node(c, k);
     }
+}
+
+riak_status riak_perform(riak_client *c, const riak_request *req, riak_response *resp) {
+    if (c->busy) {
+        return riak_set_error(c, RIAK_E_INVALID_ARG, RIAK_CLIENT_BUSY_MSG);
+    }
+    c->busy = true;
+    riak_status st = perform(c, req, resp);
+    c->busy = false;
+    return st;
 }
 
 void riak_response_free(riak_response *resp) {

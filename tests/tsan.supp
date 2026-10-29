@@ -1,0 +1,9 @@
+# The protocol buffer stub records the latest request of each kind in one
+# unsynchronized struct for the single-threaded tests to inspect; its server
+# threads race on it when several clients run at once. Library code is not
+# suppressed.
+race:stub_
+# The system OpenSSL is not built with ThreadSanitizer, so the ordering its
+# own locks and run-once initialisation provide is invisible to it.
+called_from_lib:libcrypto.so
+called_from_lib:libssl.so

@@ -30,6 +30,20 @@
 /* libcurl's default connect timeout, used when none is configured */
 #define DEFAULT_CONNECT_TIMEOUT_MS 300000L
 
+/* strerror() may share a static buffer between threads; the XSI strerror_r()
+ * (selected by _POSIX_C_SOURCE without _GNU_SOURCE) writes into the caller's. */
+typedef struct {
+    char text[128];
+} errno_text;
+
+static errno_text sys_error(int err) {
+    errno_text t;
+    if (strerror_r(err, t.text, sizeof t.text) != 0) {
+        snprintf(t.text, sizeof t.text, "error %d", err);
+    }
+    return t;
+}
+
 static void fail(riak_pbconn *k, riak_status st, const char *fmt, ...) RIAK_PRINTF(3, 4);
 
 static void fail(riak_pbconn *k, riak_status st, const char *fmt, ...) {
@@ -131,7 +145,8 @@ static ssize_t ssl_result(riak_pbconn *k, int ret, const char *what) {
             fail(k, RIAK_E_TLS, "%s: connection closed by %s:%u%s", what, node_name(k),
                  node_port(k), k->c->cfg.tls_legacy ? "" : LEGACY_HINT);
         } else if (errno != 0 && ret < 0) {
-            fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k), strerror(errno));
+            fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k),
+                 sys_error(errno).text);
         } else {
             fail(k, RIAK_E_TRANSPORT, "connection closed by %s:%u", node_name(k), node_port(k));
         }
@@ -161,7 +176,7 @@ static ssize_t io_write(riak_pbconn *k, const uint8_t *p, size_t n) {
             k->want = RIAK_PBC_WANT_WRITE;
             return 0;
         }
-        fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k), strerror(errno));
+        fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k), sys_error(errno).text);
         return -1;
     }
 }
@@ -189,7 +204,7 @@ static ssize_t io_read(riak_pbconn *k, uint8_t *p, size_t n) {
             k->want = RIAK_PBC_WANT_READ;
             return 0;
         }
-        fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k), strerror(errno));
+        fail(k, RIAK_E_TRANSPORT, "%s:%u: %s", node_name(k), node_port(k), sys_error(errno).text);
         return -1;
     }
 }
@@ -287,7 +302,7 @@ static int connect_next(riak_pbconn *k) {
     }
     close_fd(k);
     fail(k, RIAK_E_TRANSPORT, "cannot connect to %s:%u: %s", node_name(k), node_port(k),
-         strerror(last_errno));
+         sys_error(last_errno).text);
     return -1;
 }
 

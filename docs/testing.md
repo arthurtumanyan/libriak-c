@@ -9,6 +9,7 @@
 | `async` | The asynchronous API, including an external `poll()` loop | Python 3 |
 | `tls` | Certificate verification, client certificates, Basic auth | Python 3, OpenSSL |
 | `pb` | The Protocol Buffers transport against the in-process stub of `tests/stub_pb.h`: every operation, retries, timeouts, connection reuse, async requests, STARTTLS and authentication | OpenSSL for the TLS part |
+| `threads` | Eight threads with one client each, on both transports, every result checked; with `-DRIAK_SANITIZE=thread` ThreadSanitizer checks the library for data races | Python 3 for the HTTP part |
 | `docs` | API names used in `README.md` and `docs/` exist; complete example programs build | Python 3 |
 | `live` | Everything against a real Riak node | `RIAK_TEST_URL` |
 
@@ -19,6 +20,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 Tests that lack their requirements are reported as skipped.
+`-DRIAK_SANITIZE=thread` builds everything with ThreadSanitizer instead of
+AddressSanitizer; `tests/tsan.supp` silences only the stub's own request
+recorder and the uninstrumented system OpenSSL.
 
 ## Stub server
 
@@ -106,7 +110,7 @@ CI fails when line coverage of `src/` drops below 85 %.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pushes to `master` and on pull requests:
-GCC and Clang in sanitizer and release builds, valgrind, the oldest supported
-distribution (Ubuntu 22.04), the live job, coverage, a fuzzing run, a Debian
-package dry run, and linting (clang-format, cppcheck, clang-tidy, actionlint,
+GCC and Clang in sanitizer and release builds, ThreadSanitizer, valgrind,
+the oldest supported distribution (Ubuntu 22.04), the live job, coverage, a
+fuzzing run, a Debian package dry run, and linting (clang-format, cppcheck, clang-tidy, actionlint,
 Doxygen). CodeQL runs in `.github/workflows/codeql.yml`.

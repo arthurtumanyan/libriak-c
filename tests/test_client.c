@@ -1073,6 +1073,18 @@ static bool count_name(const char *name, size_t len, void *ctx) {
     return len > 0 && name[len] == '\0' && *n < 5000;
 }
 
+static bool reenter_name(const char *name, size_t len, void *ctx) {
+    size_t *n = ctx;
+    (void)name;
+    (void)len;
+    if ((*n)++ == 0) {
+        /* refused: the request in progress owns the client's connection */
+        CHECK_EQ_INT(riak_ping(rc), RIAK_E_INVALID_ARG);
+        CHECK(strstr(riak_client_errmsg(rc), "busy") != NULL);
+    }
+    return true;
+}
+
 static bool stop_after_three(const char *name, size_t len, void *ctx) {
     (void)name;
     (void)len;
@@ -1104,6 +1116,10 @@ static void test_info_preflist_streams(void) {
     n = 0;
     CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "many", stop_after_three, &n), RIAK_OK);
     CHECK_EQ_INT(n, 3);
+    n = 0;
+    CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "many", reenter_name, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 1000);
+    CHECK_EQ_INT(riak_ping(rc), RIAK_OK);
     CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "truncated", count_name, &n), RIAK_E_PARSE);
     CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "unavailable", count_name, &n), RIAK_E_HTTP);
     CHECK_EQ_INT(riak_list_keys_stream(rc, NULL, "b", NULL, &n), RIAK_E_INVALID_ARG);
