@@ -18,7 +18,7 @@ protobuf-c, OpenSSL, libcurl and json-c.
 | [Operations](operations.md) | AAE folds, replication queues, riak_repl, known server issues |
 | [Data types](datatypes.md) | Counters, sets, maps, HyperLogLogs, grow-only sets |
 | [Clusters and retries](clusters.md) | Multiple nodes, balancing, retries, node ejection |
-| [Asynchronous requests](async.md) | Concurrent requests, built-in and external event loops |
+| [Asynchronous requests](async.md) | Concurrent requests and streams, built-in and external event loops |
 | [Security](security.md) | TLS, STARTTLS, certificate verification, authentication, client certificates |
 | [Logging and metrics](observability.md) | Log and metrics callbacks |
 | [Testing](testing.md) | Test suites, stub server, live tests, fuzzing, coverage |

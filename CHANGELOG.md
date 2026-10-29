@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-10-29
 
 ### Fixed
 - Programs built against 2.0.0 keep working without a rebuild: the shared

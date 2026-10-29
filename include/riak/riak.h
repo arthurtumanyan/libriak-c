@@ -69,7 +69,7 @@ extern "C" {
  *  @{ */
 
 #define RIAK_VERSION_MAJOR 2 /**< Major version; changes on incompatible API changes. */
-#define RIAK_VERSION_MINOR 0 /**< Minor version; changes when features are added. */
+#define RIAK_VERSION_MINOR 1 /**< Minor version; changes when features are added. */
 #define RIAK_VERSION_PATCH 0 /**< Patch version; changes on fixes only. */
 
 /** Result of every library call. */
