@@ -1252,36 +1252,66 @@ static void test_aae_folds(void) {
     CHECK(found);
     riak_aae_buckets_free(&buckets);
 
-    /* the cached n_val trees: root, its branches, and the clocks of a segment */
+    /* the cached n_val trees: root, branches and the clocks of segments. Other
+       tests write and reap keys meanwhile, so a segment of theirs may be empty
+       by the time it is folded; every key of this test, live throughout, has
+       to be found in the non-zero segments of the tree */
     CHECK_EQ_INT(riak_aae_merge_root(rc, 3, &tree), RIAK_OK);
     CHECK_EQ_INT(tree.size, RIAK_AAE_LARGE);
     CHECK_EQ_INT(tree.level1_len, 4096 * 4);
-    uint32_t branch = 0;
+    uint32_t branch_ids[4096];
+    size_t n_branch_ids = 0;
     for (size_t i = 0; i + 4 <= tree.level1_len; i += 4) {
         if (tree.level1[i] | tree.level1[i + 1] | tree.level1[i + 2] | tree.level1[i + 3]) {
-            branch = (uint32_t)(i / 4);
-            break;
+            branch_ids[n_branch_ids++] = (uint32_t)(i / 4);
         }
     }
     riak_aae_tree_free(&tree);
-    CHECK_EQ_INT(riak_aae_merge_branches(rc, 3, &branch, 1, &tree), RIAK_OK);
-    CHECK_EQ_INT(tree.n_branches, 1);
-    uint32_t segment = branch * 256;
-    if (tree.n_branches == 1) {
-        CHECK_EQ_INT(tree.branches[0].id, branch);
-        CHECK_EQ_INT(tree.branches[0].len, 256 * 4);
-        for (size_t i = 0; i + 4 <= tree.branches[0].len; i += 4) {
-            const uint8_t *h = tree.branches[0].data + i;
-            if (h[0] | h[1] | h[2] | h[3]) {
-                segment = branch * 256 + (uint32_t)(i / 4);
-                break;
+    CHECK(n_branch_ids >= 1);
+    uint32_t *segments = calloc(n_branch_ids * 256 + 1, sizeof *segments);
+    CHECK(segments != NULL);
+    size_t n_segments = 0;
+    for (size_t b = 0; segments && b < n_branch_ids; b += 32) {
+        size_t n = n_branch_ids - b < 32 ? n_branch_ids - b : 32;
+        CHECK_EQ_INT(riak_aae_merge_branches(rc, 3, branch_ids + b, n, &tree), RIAK_OK);
+        CHECK_EQ_INT(tree.n_branches, n);
+        for (size_t j = 0; j < tree.n_branches; j++) {
+            const riak_aae_branch *br = &tree.branches[j];
+            bool asked = false;
+            for (size_t i = b; i < b + n; i++)
+                asked = asked || branch_ids[i] == br->id;
+            CHECK(asked);
+            CHECK_EQ_INT(br->len, 256 * 4);
+            for (size_t i = 0; asked && i + 4 <= br->len && i < 256 * 4; i += 4) {
+                if (br->data[i] | br->data[i + 1] | br->data[i + 2] | br->data[i + 3]) {
+                    segments[n_segments++] = br->id * 256 + (uint32_t)(i / 4);
+                }
             }
         }
+        riak_aae_tree_free(&tree);
     }
-    riak_aae_tree_free(&tree);
-    CHECK_EQ_INT(riak_aae_fetch_clocks_nval(rc, 3, &segment, 1, &keys), RIAK_OK);
-    CHECK(keys.count >= 1);
-    riak_aae_keys_free(&keys);
+    CHECK(n_segments >= 10);
+    bool seen[10] = {false};
+    for (size_t s = 0; s < n_segments; s += 64) {
+        size_t n = n_segments - s < 64 ? n_segments - s : 64;
+        CHECK_EQ_INT(riak_aae_fetch_clocks_nval(rc, 3, segments + s, n, &keys), RIAK_OK);
+        for (size_t i = 0; i < keys.count; i++) {
+            const riak_aae_key_clock *clk = &keys.items[i];
+            unsigned d;
+            char rest;
+            if (clk->bucket && strcmp(clk->bucket, ab) == 0 &&
+                sscanf(clk->key, "a%u%c", &d, &rest) == 1 && d < 10) {
+                seen[d] = true;
+                CHECK(clk->vclock && *clk->vclock);
+            }
+        }
+        riak_aae_keys_free(&keys);
+    }
+    free(segments);
+    for (int i = 0; i < 10; i++) {
+        if (!seen[i]) fprintf(stderr, "  a%d not found in the cached tree\n", i);
+        CHECK(seen[i]);
+    }
 
     for (int i = 0; i < 10; i++) {
         char k[8];
