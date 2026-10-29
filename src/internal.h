@@ -65,6 +65,7 @@ typedef struct {
     void *sink_ctx;
     bool unbounded; /* sink does not accumulate: skip the max_body_bytes cap */
     size_t pin;     /* 0: choose a node and retry; i + 1: only node i, no retries */
+    bool no_retry;  /* not repeated after it may have reached a node, whatever the method */
 } riak_request;
 
 typedef struct {
@@ -76,7 +77,19 @@ typedef struct {
 /* Monotonic clock in milliseconds. */
 long long riak_now_ms(void);
 
-riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...) RIAK_PRINTF(3, 4);
+/* The client's error message is set; always 0. */
+int riak_format_error(riak_client *c, const char *fmt, ...) RIAK_PRINTF(2, 3);
+
+static inline riak_status riak_error_status(riak_status st, int recorded) {
+    (void)recorded;
+    return st;
+}
+
+/* The error message is recorded and `st` returned. A macro rather than a
+ * function, so the compiler and static analysis see which status an error
+ * path returns. `st` is evaluated twice: only constants and plain variables
+ * are passed. */
+#define riak_set_error(c, st, ...) riak_error_status((st), riak_format_error((c), __VA_ARGS__))
 void riak_clear_error(riak_client *c);
 
 /* "<base>[types/<type>/]buckets/<bucket>[/<suffix>[/<key>]]", escaped. */
@@ -163,6 +176,18 @@ riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *r
 /* The settings of riak_config::tls_legacy are applied to an OpenSSL SSL_CTX
  * (passed as void * so this header needs no OpenSSL include); 0 on success. */
 int riak_tls_legacy_ctx(void *ssl_ctx);
+
+/* HTTP-only requests (statistics, Query API): *pin is 0 over HTTP, or under
+ * Protocol Buffers the first node with an HTTP port (+1); RIAK_E_UNSUPPORTED
+ * when no node has one. */
+riak_status riak_http_target(riak_client *c, const char *what, size_t *pin);
+
+/* A request to an endpoint of newer Riak releases failed with Webmachine's
+ * own 404 page (no resource matches the path, as opposed to Riak's plain
+ * "not found"): RIAK_E_UNSUPPORTED is recorded, naming `what`. Otherwise the
+ * status is mapped by riak_http_error(). */
+riak_status riak_http_error_or_unsupported(riak_client *c, const riak_response *resp,
+                                           const char *what);
 
 /* Whether an HTTP request may be repeated (GET, PUT, DELETE). */
 bool riak_request_idempotent(const riak_request *req);

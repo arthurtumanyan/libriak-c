@@ -1166,6 +1166,627 @@ static void test_read_flags_and_head(void) {
     CHECK_EQ_INT(riak_delete(rc, "flags", "k", NULL), RIAK_OK);
 }
 
+static void stub_flag(const char *name, int on) {
+    char path[32];
+    snprintf(path, sizeof path, "/_%s?set=%d", name, on);
+    free(stub_get(port, path));
+}
+
+/* Requests that reached the newer endpoints since the last call. */
+static int newer_hits(void) {
+    char *body = stub_get(port, "/_newer_hits");
+    json_object *doc = body ? json_tokener_parse(body) : NULL, *h;
+    int n = doc && json_object_object_get_ex(doc, "hits", &h) ? json_object_get_int(h) : -1;
+    json_object_put(doc);
+    free(body);
+    return n;
+}
+
+static void stub_drop(int n) {
+    char path[32];
+    snprintf(path, sizeof path, "/_drop?set=%d", n);
+    free(stub_get(port, path));
+}
+
+static const char *last_path(json_object **holder) {
+    *holder = last_request();
+    return jstr(*holder, "path");
+}
+
+static void test_new_options_http(void) {
+    riak_opts put = {.content_type = "text/plain",
+                     .node_confirms = RIAK_Q_ALL,
+                     .sync_on_write = RIAK_SYNC_ONE,
+                     .asis = true};
+    CHECK_EQ_INT(riak_put(rc, "opts", "k", "v", 1, &put, NULL, NULL), RIAK_OK);
+    json_object *l;
+    const char *path = last_path(&l);
+    CHECK(path && strstr(path, "node_confirms=all") && strstr(path, "sync_on_write=one") &&
+          strstr(path, "asis=true"));
+    json_object_put(l);
+    const char *sync_names[] = {"backend", "one", "all"};
+    for (riak_sync s = RIAK_SYNC_BACKEND; s <= RIAK_SYNC_ALL; s++) {
+        riak_opts so = {.sync_on_write = s};
+        char want[32];
+        snprintf(want, sizeof want, "sync_on_write=%s", sync_names[s - RIAK_SYNC_BACKEND]);
+        CHECK_EQ_INT(riak_put(rc, "opts", "k", "v", 1, &so, NULL, NULL), RIAK_OK);
+        path = last_path(&l);
+        CHECK(path && strstr(path, want));
+        json_object_put(l);
+    }
+    riak_opts pb_only[] = {{.return_head = true}, {.deletedvclock = true}};
+    riak_object o;
+    CHECK_EQ_INT(riak_put(rc, "opts", "k", "v", 1, &pb_only[0], NULL, NULL), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_get(rc, "opts", "k", &pb_only[1], &o), RIAK_E_UNSUPPORTED);
+    riak_opts nc = {.node_confirms = 2};
+    CHECK_EQ_INT(riak_get(rc, "opts", "k", &nc, &o), RIAK_OK);
+    riak_object_free(&o);
+    path = last_path(&l);
+    CHECK(path && strstr(path, "node_confirms=2"));
+    json_object_put(l);
+    riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(op, 1);
+    riak_dt_opts dto = {.node_confirms = 1};
+    CHECK_EQ_INT(riak_dt_update(rc, "counters", "b", "k", op, NULL, &dto, NULL, NULL), RIAK_OK);
+    path = last_path(&l);
+    CHECK(path && strstr(path, "node_confirms=1"));
+    json_object_put(l);
+    riak_dt_op_free(op);
+    riak_index_query q = {.index = "field_bin", .value = "x", .pagination_sort = true};
+    riak_index_result r;
+    riak_index_query_run(rc, "opts", &q, &r);
+    riak_index_result_free(&r);
+    path = last_path(&l);
+    CHECK(path && strstr(path, "pagination_sort=true"));
+    json_object_put(l);
+    riak_delete(rc, "opts", "k", NULL);
+}
+
+static void test_counters_type_props_http(void) {
+    int64_t v = 0;
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_counter_update(rc, "cnt", "c", 5, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_counter_update(rc, "cnt", "c", -2, NULL, &v), RIAK_OK);
+    CHECK_EQ_INT(v, 3);
+    json_object *l;
+    const char *path = last_path(&l);
+    CHECK(path && strstr(path, "/buckets/cnt/counters/c") && strstr(path, "returnvalue=true"));
+    CHECK_EQ_STR(jstr(l, "method"), "POST");
+    json_object_put(l);
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_OK);
+    CHECK_EQ_INT(v, 3);
+    stub_flag("malformed", 2);
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_E_PARSE); /* beyond int64 */
+    CHECK_EQ_INT(v, 3);
+    stub_flag("malformed", 0);
+    riak_opts q = {.r = 2, .node_confirms = 1};
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", &q, &v), RIAK_OK);
+    path = last_path(&l);
+    CHECK(path && strstr(path, "r=2") && strstr(path, "node_confirms=1"));
+    json_object_put(l);
+    riak_opts w = {.w = 3, .node_confirms = 2};
+    CHECK_EQ_INT(riak_counter_update(rc, "cnt", "c", 1, &w, NULL), RIAK_OK);
+    path = last_path(&l);
+    CHECK(path && strstr(path, "w=3") && strstr(path, "node_confirms=2"));
+    json_object_put(l);
+    /* over HTTP the node validates the document, as for bucket props */
+    CHECK_EQ_INT(riak_set_type_props(rc, "multi", "{not json"), RIAK_E_HTTP);
+
+    CHECK_EQ_INT(riak_set_type_props(rc, "multi", "{\"props\":{\"notfound_ok\":false}}"), RIAK_OK);
+    l = last_request();
+    CHECK_EQ_STR(jstr(l, "method"), "PUT");
+    CHECK_EQ_STR(jstr(l, "path"), "/types/multi/props");
+    CHECK(jstr(l, "body") && strstr(jstr(l, "body"), "notfound_ok"));
+    json_object_put(l);
+
+    char *id = NULL;
+    CHECK_EQ_INT(riak_get_client_id(rc, &id), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_get_cluster_id(rc, &id), RIAK_E_UNSUPPORTED);
+    riak_object o;
+    CHECK_EQ_INT(riak_repl_get(rc, "c", "b", "k", NULL, &o), RIAK_E_UNSUPPORTED);
+    riak_fold_query fq = {.start_key = "a"};
+    CHECK_EQ_INT(riak_fold_objects(rc, "b", &fq, NULL, NULL, NULL), RIAK_E_INVALID_ARG);
+    riak_repl_key key = {.bucket = "b", .key = "k", .vclock = "a85hYGBg"};
+    CHECK_EQ_INT(riak_repl_push(rc, "q", &key, 1, NULL), RIAK_E_UNSUPPORTED);
+}
+
+static void test_link_walk_http(void) {
+    riak_link_step one[] = {{.tag = "friend"}};
+    riak_link_result res;
+    CHECK_EQ_INT(riak_link_walk(rc, "lb lb", "alice", one, 1, &res), RIAK_OK);
+    json_object *l;
+    const char *path = last_path(&l);
+    CHECK_EQ_STR(path, "/buckets/lb%20lb/keys/alice/_,friend,1");
+    json_object_put(l);
+    CHECK_EQ_INT(res.n_phases, 1);
+    if (res.n_phases == 1 && res.phases[0].count == 1) {
+        CHECK_EQ_STR(res.phases[0].items[0].bucket, "lb lb"); /* '+' decoded */
+        CHECK_EQ_STR(res.phases[0].items[0].key, "bob");
+        CHECK_EQ_STR(res.phases[0].items[0].object.data, "object-bob");
+        CHECK_EQ_STR(res.phases[0].items[0].object.vclock, "a85hYGBg");
+    } else {
+        CHECK(false);
+    }
+    riak_link_result_free(&res);
+    riak_link_step two[] = {{.keep = true}, {.bucket = "lb", .tag = "boss"}};
+    CHECK_EQ_INT(riak_link_walk(rc, "lb", "alice", two, 2, &res), RIAK_OK);
+    path = last_path(&l);
+    CHECK_EQ_STR(path, "/buckets/lb/keys/alice/_,_,1/lb,boss,1");
+    json_object_put(l);
+    CHECK_EQ_INT(res.n_phases, 2);
+    if (res.n_phases == 2) {
+        CHECK_EQ_INT(res.phases[0].count, 2);
+        CHECK_EQ_INT(res.phases[1].count, 1);
+    }
+    riak_link_result_free(&res);
+    CHECK_EQ_INT(riak_link_walk(rc, "lb", "nobody", one, 1, &res), RIAK_E_NOT_FOUND);
+
+    /* older nodes name objects /riak/<bucket>/<key> */
+    stub_flag("legacyloc", 1);
+    CHECK_EQ_INT(riak_link_walk(rc, "lb x", "kim", one, 1, &res), RIAK_OK);
+    CHECK(res.n_phases == 1 && res.phases[0].count == 1);
+    if (res.n_phases == 1 && res.phases[0].count == 1) {
+        CHECK_EQ_STR(res.phases[0].items[0].bucket, "lb x");
+        CHECK_EQ_STR(res.phases[0].items[0].key, "kate");
+    }
+    riak_link_result_free(&res);
+    stub_flag("legacyloc", 0);
+}
+
+static void test_query_api_http(void) {
+    riak_query_part part = {.index_name = "people_bin",
+                            .start_term = "a",
+                            .end_term = "z",
+                            .evaluation_expression = "delim($term, \"|\", ($a, $b))",
+                            .filter_expression = "$b = :n"};
+    riak_kv_pair subs[] = {{"n", "x"}};
+    riak_query q = {.parts = &part,
+                    .n_parts = 1,
+                    .substitutions = subs,
+                    .n_substitutions = 1,
+                    .timeout_s = 9,
+                    .bucket_type = "t1"};
+    riak_query_result r;
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 2);
+    CHECK_EQ_STR(r.keys[1], "p2");
+    CHECK(r.terms == NULL && r.total == -1 && r.continuation == NULL);
+    CHECK(r.raw && strstr(r.raw, "\"keys\""));
+    riak_query_result_free(&r);
+    json_object *l = last_request(), *body, *list, *subsj;
+    CHECK_EQ_STR(jstr(l, "path"), "/types/t1/buckets/qb/query");
+    CHECK(json_object_object_get_ex(l, "query", &body));
+    CHECK(json_object_object_get_ex(body, "query_list", &list) &&
+          json_object_array_length(list) == 1);
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "filter_expression"), "$b = :n");
+    CHECK(json_object_object_get_ex(body, "substitutions", &subsj));
+    CHECK_EQ_STR(jstr(subsj, "n"), "x");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "index_name"), "people_bin");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "start_term"), "a");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "end_term"), "z");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "evaluation_expression"),
+                 "delim($term, \"|\", ($a, $b))");
+    CHECK_EQ_STR(jstr(body, "timeout"), "9");
+    json_object *absent;
+    CHECK(!json_object_object_get_ex(body, "max_results", &absent));
+    CHECK(!json_object_object_get_ex(body, "aggregation_expression", &absent));
+    CHECK(
+        !json_object_object_get_ex(json_object_array_get_idx(list, 0), "aggregation_tag", &absent));
+    json_object_put(l);
+
+    /* every optional member, two tagged parts and an aggregation */
+    riak_query_part parts2[] = {
+        {.index_name = "a_bin",
+         .start_term = "0",
+         .end_term = "9",
+         .regular_expression = "^1",
+         .aggregation_tag = 1},
+        {.index_name = "b_bin", .start_term = "x", .end_term = "y", .aggregation_tag = 2}};
+    riak_query full = {.parts = parts2,
+                       .n_parts = 2,
+                       .aggregation_expression = "$1 UNION $2",
+                       .accumulation_option = "keys",
+                       .accumulation_term = "t",
+                       .continuation = "c1",
+                       .max_results = 2,
+                       .timeout_s = 5,
+                       .inactivity_timeout_s = 7};
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &full, &r), RIAK_OK);
+    riak_query_result_free(&r);
+    l = last_request();
+    CHECK(json_object_object_get_ex(l, "query", &body));
+    CHECK_EQ_STR(jstr(body, "aggregation_expression"), "$1 UNION $2");
+    CHECK_EQ_STR(jstr(body, "accumulation_option"), "keys");
+    CHECK_EQ_STR(jstr(body, "accumulation_term"), "t");
+    CHECK_EQ_STR(jstr(body, "continuation"), "c1");
+    CHECK_EQ_STR(jstr(body, "max_results"), "2");
+    CHECK_EQ_STR(jstr(body, "timeout"), "5");
+    CHECK_EQ_STR(jstr(body, "inactivity_timeout"), "7");
+    CHECK(json_object_object_get_ex(body, "query_list", &list) &&
+          json_object_array_length(list) == 2);
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "regular_expression"), "^1");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 0), "aggregation_tag"), "1");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 1), "aggregation_tag"), "2");
+    CHECK_EQ_STR(jstr(json_object_array_get_idx(list, 1), "index_name"), "b_bin");
+    json_object_put(l);
+
+    q.accumulation_option = "terms";
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK(r.terms && strcmp(r.terms[1], "t2") == 0 && strcmp(r.keys[1], "p2") == 0);
+    riak_query_result_free(&r);
+    q.accumulation_option = "raw_count";
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK_EQ_INT(r.total, 2);
+    riak_query_result_free(&r);
+    q.accumulation_option = "term_with_count";
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK(r.terms && strcmp(r.terms[0], "t1") == 0 && strcmp(r.keys[0], "3") == 0);
+    riak_query_result_free(&r);
+    q.accumulation_option = "raw_keys";
+    q.max_results = 2;
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK_EQ_STR(r.continuation, "c2");
+    riak_query_result_free(&r);
+    q.max_results = 0;
+    q.accumulation_option = "queue_raw_keys";
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_OK);
+    CHECK_EQ_STR(r.result_queue, "g2gD");
+    riak_query_result_free(&r);
+    CHECK_EQ_INT(riak_query_fetch(rc, "t1", "qb", "g2gD", 10, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 3);
+    CHECK(r.complete);
+    riak_query_result_free(&r);
+    json_object *fl;
+    const char *path = last_path(&fl);
+    CHECK(path && strstr(path, "result_queue=g2gD") && strstr(path, "max_results=10"));
+    json_object_put(fl);
+    riak_query empty = {.parts = NULL, .n_parts = 0};
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &empty, &r), RIAK_E_INVALID_ARG);
+    q.accumulation_option = "bogus";
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_E_HTTP);
+    q.accumulation_option = NULL;
+
+    /* plain keys mixed with {term: key} entries: no consistent result */
+    stub_flag("malformed", 1);
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_E_PARSE);
+    CHECK(r.keys == NULL && r.terms == NULL && r.count == 0);
+    stub_flag("malformed", 0);
+
+    /* a queue fetch takes entries off the queue: it is never repeated */
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
+    cfg.port = port;
+    cfg.max_retries = 3;
+    cfg.retry_base_ms = 1;
+    riak_client *rt = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &rt), RIAK_OK);
+    newer_hits();
+    stub_drop(1);
+    CHECK_EQ_INT(riak_query_fetch(rt, "t1", "qb", "g2gD", 10, &r), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(newer_hits(), 1);
+    stub_drop(0);
+    riak_client_free(rt);
+
+    /* over Protocol Buffers the Query API goes to http_port, and is
+     * unsupported without one */
+    riak_config pbc;
+    riak_config_init(&pbc);
+    pbc.transport = RIAK_TRANSPORT_PB;
+    pbc.port = 1; /* nothing listens: only HTTP is used */
+    riak_client *pb = NULL;
+    CHECK_EQ_INT(riak_client_new(&pbc, &pb), RIAK_OK);
+    CHECK_EQ_INT(riak_query_run(pb, "qb", &q, &r), RIAK_E_UNSUPPORTED);
+    CHECK(strstr(riak_client_errmsg(pb), "http_port") != NULL);
+    riak_client_free(pb);
+    pbc.http_port = port;
+    CHECK_EQ_INT(riak_client_new(&pbc, &pb), RIAK_OK);
+    CHECK_EQ_INT(riak_query_run(pb, "qb", &q, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 2);
+    riak_query_result_free(&r);
+    CHECK_EQ_INT(riak_query_fetch(pb, "t1", "qb", "g2gD", 10, &r), RIAK_OK);
+    CHECK_EQ_INT(r.count, 3);
+    riak_query_result_free(&r);
+    riak_client_free(pb);
+}
+
+static void test_aae_http(void) {
+    riak_aae_tree t;
+    CHECK_EQ_INT(riak_aae_merge_root(rc, 3, &t), RIAK_OK);
+    CHECK_EQ_INT(t.size, RIAK_AAE_LARGE);
+    CHECK_EQ_INT(t.level1_len, 16384);
+    CHECK(t.level1 && t.level1[0] == 0xAB);
+    riak_aae_tree_free(&t);
+    uint32_t ids[] = {4, 6};
+    CHECK_EQ_INT(riak_aae_merge_branches(rc, 3, ids, 2, &t), RIAK_OK);
+    json_object *l = last_request(), *flt;
+    CHECK(json_object_object_get_ex(l, "filter", &flt) &&
+          json_object_is_type(flt, json_type_array) && json_object_array_length(flt) == 2);
+    CHECK_EQ_INT(json_object_get_int(json_object_array_get_idx(flt, 0)), 4);
+    CHECK_EQ_INT(json_object_get_int(json_object_array_get_idx(flt, 1)), 6);
+    json_object_put(l);
+    CHECK_EQ_INT(t.n_branches, 2);
+    if (t.n_branches == 2) {
+        CHECK_EQ_INT(t.branches[1].id, 6);
+        CHECK_EQ_INT(t.branches[1].len, 1024); /* raw base64 over HTTP */
+        CHECK(t.branches[1].data[0] == 0x21);
+    }
+    riak_aae_tree_free(&t);
+    riak_aae_keys k;
+    CHECK_EQ_INT(riak_aae_fetch_clocks_nval(rc, 3, ids, 2, &k), RIAK_OK);
+    CHECK_EQ_INT(k.count, 2);
+    if (k.count == 2) CHECK_EQ_STR(k.items[0].vclock, "a84AYWAB"); /* from character codes */
+    riak_aae_keys_free(&k);
+
+    uint32_t segs[] = {1, 2};
+    riak_aae_filter f = {.bucket_type = "maps",
+                         .bucket = "aae b",
+                         .start_key = "a",
+                         .end_key = "z",
+                         .segments = segs,
+                         .n_segments = 2,
+                         .segment_tree_size = RIAK_AAE_MEDIUM,
+                         .modified_start = 10,
+                         .modified_end = 20,
+                         .use_hash_iv = true,
+                         .hash_iv = 5};
+    CHECK_EQ_INT(riak_aae_merge_range(rc, &f, RIAK_AAE_XSMALL, &t), RIAK_OK);
+    l = last_request();
+    const char *want = "/rangetrees/types/maps/buckets/aae%20b/trees/xsmall?filter=";
+    CHECK(strncmp(jstr(l, "path"), want, strlen(want)) == 0);
+    json_object *kr, *sf, *dr, *iv;
+    CHECK(json_object_object_get_ex(l, "filter", &flt));
+    CHECK(json_object_object_get_ex(flt, "key_range", &kr));
+    CHECK_EQ_STR(jstr(kr, "start"), "a");
+    CHECK_EQ_STR(jstr(kr, "end"), "z");
+    CHECK(json_object_object_get_ex(flt, "segment_filter", &sf));
+    CHECK_EQ_STR(jstr(sf, "tree_size"), "medium");
+    json_object *segl;
+    CHECK(json_object_object_get_ex(sf, "segments", &segl) && json_object_array_length(segl) == 2 &&
+          json_object_get_int(json_object_array_get_idx(segl, 0)) == 1 &&
+          json_object_get_int(json_object_array_get_idx(segl, 1)) == 2);
+    CHECK(json_object_object_get_ex(flt, "date_range", &dr));
+    CHECK_EQ_STR(jstr(dr, "start"), "10");
+    CHECK_EQ_STR(jstr(dr, "end"), "20");
+    CHECK(json_object_object_get_ex(flt, "hash_iv", &iv) && json_object_get_int(iv) == 5);
+    json_object_put(l);
+    CHECK_EQ_INT(t.size, RIAK_AAE_XSMALL);
+    CHECK_EQ_INT(t.level1_len, 256);
+    CHECK_EQ_INT(t.n_branches, 2);
+    if (t.n_branches == 2) {
+        CHECK_EQ_INT(t.branches[0].id, 0);
+        CHECK(t.branches[0].data[0] == 0x30);
+        CHECK_EQ_INT(t.branches[1].id, 1);
+        CHECK_EQ_INT(t.branches[1].len, 1024); /* inflated from zlib */
+        CHECK(t.branches[1].data[0] == 0x31);
+    }
+    riak_aae_tree_free(&t);
+
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(rc, &f, &k), RIAK_OK);
+    CHECK_EQ_INT(k.count, 2);
+    if (k.count == 2) {
+        CHECK_EQ_STR(k.items[1].bucket_type, "maps");
+        CHECK_EQ_STR(k.items[0].bucket, "aaeb");
+        CHECK_EQ_STR(k.items[0].key, "k1");
+        CHECK_EQ_STR(k.items[1].key, "k2");
+    }
+    riak_aae_keys_free(&k);
+    CHECK_EQ_INT(riak_aae_find_tombs(rc, &f, &k), RIAK_OK);
+    riak_aae_keys_free(&k);
+    riak_aae_key_counts kc;
+    CHECK_EQ_INT(riak_aae_find_keys(rc, &f, RIAK_AAE_SIBLING_COUNT, 3, &kc), RIAK_OK);
+    CHECK(
+        strstr(jstr(l = last_request(), "path"), "/siblings/types/maps/buckets/aae%20b/counts/3"));
+    json_object_put(l);
+    CHECK_EQ_INT(kc.count, 1);
+    if (kc.count == 1) {
+        CHECK_EQ_STR(kc.items[0].key, "big-key");
+        CHECK_EQ_INT(kc.items[0].value, 4096);
+    }
+    riak_aae_key_counts_free(&kc);
+    CHECK_EQ_INT(riak_aae_find_keys(rc, &f, RIAK_AAE_OBJECT_SIZE, 500, &kc), RIAK_OK);
+    CHECK(strstr(jstr(l = last_request(), "path"),
+                 "/objectsizes/types/maps/buckets/aae%20b/sizes/500"));
+    json_object_put(l);
+    riak_aae_key_counts_free(&kc);
+    riak_aae_stats st;
+    CHECK_EQ_INT(riak_aae_object_stats(rc, &f, &st), RIAK_OK);
+    CHECK_EQ_INT(st.total_count, 12);
+    CHECK_EQ_INT(st.total_size, 3400);
+    CHECK_EQ_INT(st.n_sizes, 2);
+    CHECK_EQ_INT(st.n_siblings, 1);
+    if (st.n_siblings == 1) {
+        CHECK_EQ_INT(st.siblings[0].order, 1);
+        CHECK_EQ_INT(st.siblings[0].count, 12);
+    }
+    riak_aae_stats_free(&st);
+    uint64_t n;
+    CHECK_EQ_INT(riak_aae_reap_tombs(rc, &f, RIAK_AAE_JOB, 3, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 7);
+    l = last_request();
+    json_object *cm;
+    CHECK(json_object_object_get_ex(l, "filter", &flt) &&
+          json_object_object_get_ex(flt, "change_method", &cm) &&
+          strcmp(jstr(cm, "job_id") ? jstr(cm, "job_id") : "", "3") == 0);
+    json_object_put(l);
+    CHECK_EQ_INT(riak_aae_erase_keys(rc, &f, RIAK_AAE_COUNT, 0, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 8);
+    l = last_request();
+    CHECK(json_object_object_get_ex(l, "filter", &flt));
+    CHECK_EQ_STR(jstr(flt, "change_method"), "count");
+    CHECK(strstr(jstr(l, "path"), "/erase/types/maps/buckets/aae%20b") != NULL);
+    json_object_put(l);
+    CHECK_EQ_INT(riak_aae_reap_tombs(rc, &f, RIAK_AAE_LOCAL, 0, &n), RIAK_OK);
+    l = last_request();
+    CHECK(json_object_object_get_ex(l, "filter", &flt));
+    CHECK_EQ_STR(jstr(flt, "change_method"), "local");
+    CHECK(strstr(jstr(l, "path"), "/reap/types/maps/buckets/aae%20b") != NULL);
+    json_object_put(l);
+    CHECK_EQ_INT(riak_aae_repair_keys(rc, &f, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 6);
+    CHECK_EQ_INT(riak_aae_repl_keys(rc, &f, "q 1", &n), RIAK_OK);
+    CHECK(strstr(jstr(l = last_request(), "path"),
+                 "/rangerepl/types/maps/buckets/aae%20b/queuename/q%201"));
+    json_object_put(l);
+    CHECK_EQ_INT(n, 5);
+    riak_aae_buckets b;
+    CHECK_EQ_INT(riak_aae_list_buckets(rc, 3, &b), RIAK_OK);
+    CHECK(strstr(jstr(l = last_request(), "path"), "/aaebucketlist?nval=3") != NULL);
+    json_object_put(l);
+    CHECK_EQ_INT(b.count, 2);
+    if (b.count == 2) {
+        CHECK(b.items[0].bucket_type == NULL);
+        CHECK_EQ_STR(b.items[0].bucket, "plain");
+        CHECK_EQ_STR(b.items[1].bucket_type, "maps");
+        CHECK_EQ_STR(b.items[1].bucket, "typed");
+    }
+    riak_aae_buckets_free(&b);
+
+    /* changes are made once: a lost answer is reported, not repeated;
+     * counting is read-only and retried */
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
+    cfg.port = port;
+    cfg.max_retries = 3;
+    cfg.retry_base_ms = 1;
+    riak_client *rt = NULL;
+    CHECK_EQ_INT(riak_client_new(&cfg, &rt), RIAK_OK);
+    newer_hits();
+    stub_drop(1);
+    CHECK_EQ_INT(riak_aae_reap_tombs(rt, &f, RIAK_AAE_JOB, 3, &n), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(newer_hits(), 1);
+    stub_drop(1);
+    CHECK_EQ_INT(riak_aae_repair_keys(rt, &f, &n), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(newer_hits(), 1);
+    stub_drop(1);
+    CHECK_EQ_INT(riak_aae_repl_keys(rt, &f, "q", &n), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(newer_hits(), 1);
+    stub_drop(1);
+    CHECK_EQ_INT(riak_repl_fetch(rt, "q", &(riak_repl_fetch_result){0}), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(newer_hits(), 1);
+    stub_drop(1);
+    CHECK_EQ_INT(riak_aae_erase_keys(rt, &f, RIAK_AAE_COUNT, 0, &n), RIAK_OK);
+    CHECK_EQ_INT(newer_hits(), 2);
+    stub_drop(1);
+    CHECK_EQ_INT(riak_aae_merge_root(rt, 3, &t), RIAK_OK);
+    CHECK_EQ_INT(newer_hits(), 2);
+    riak_aae_tree_free(&t);
+    stub_drop(0);
+    riak_client_free(rt);
+
+    /* wrongly typed documents are parse errors, never crashes */
+    stub_flag("malformed", 1);
+    CHECK_EQ_INT(riak_aae_merge_range(rc, &f, RIAK_AAE_XSMALL, &t), RIAK_E_PARSE);
+    CHECK(t.branches == NULL && t.level1 == NULL);
+    CHECK_EQ_INT(riak_aae_merge_root(rc, 3, &t), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_merge_branches(rc, 3, ids, 2, &t), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_fetch_clocks_nval(rc, 3, ids, 2, &k), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(rc, &f, &k), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_find_keys(rc, &f, RIAK_AAE_SIBLING_COUNT, 3, &kc), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_object_stats(rc, &f, &st), RIAK_E_PARSE);
+    CHECK(st.sizes == NULL && st.siblings == NULL);
+    CHECK_EQ_INT(riak_aae_repair_keys(rc, &f, &n), RIAK_E_PARSE);
+    CHECK_EQ_INT(riak_aae_list_buckets(rc, 3, &b), RIAK_E_PARSE);
+    stub_flag("malformed", 0);
+
+    /* numbers with junk or out of range */
+    stub_flag("malformed", 2);
+    CHECK_EQ_INT(riak_aae_merge_range(rc, &f, RIAK_AAE_XXSMALL, &t), RIAK_E_PARSE); /* id "1x" */
+    CHECK_EQ_INT(riak_aae_object_stats(rc, &f, &st), RIAK_E_PARSE);                 /* "2x" */
+    CHECK_EQ_INT(riak_aae_repair_keys(rc, &f, &n), RIAK_E_PARSE);                   /* -1 */
+    stub_flag("malformed", 0);
+
+    /* an HTTP range tree branch inflating past max_body_bytes is refused */
+    riak_config lim;
+    riak_config_init(&lim);
+    lim.transport = RIAK_TRANSPORT_HTTP;
+    lim.port = port;
+    lim.max_body_bytes = 1023;
+    riak_client *lc = NULL;
+    CHECK_EQ_INT(riak_client_new(&lim, &lc), RIAK_OK);
+    CHECK_EQ_INT(riak_aae_merge_range(lc, &f, RIAK_AAE_XXSMALL, &t), RIAK_E_PARSE);
+    CHECK(strstr(riak_client_errmsg(lc), "branch") != NULL); /* not the body limit */
+    riak_client_free(lc);
+    lim.max_body_bytes = 1024;
+    CHECK_EQ_INT(riak_client_new(&lim, &lc), RIAK_OK);
+    CHECK_EQ_INT(riak_aae_merge_range(lc, &f, RIAK_AAE_XXSMALL, &t), RIAK_OK);
+    CHECK_EQ_INT(t.n_branches, 2);
+    riak_aae_tree_free(&t);
+    riak_client_free(lc);
+
+    riak_aae_filter bad = f;
+    bad.segment_tree_size = (riak_aae_tree_size)9;
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(rc, &bad, &k), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_find_keys(rc, &f, (riak_aae_find)5, 3, &kc), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_erase_keys(rc, &f, (riak_aae_change)5, 0, &n), RIAK_E_INVALID_ARG);
+}
+
+static void test_repl_queue_http(void) {
+    riak_repl_fetch_result fr;
+    CHECK_EQ_INT(riak_repl_fetch(rc, "q", &fr), RIAK_OK);
+    CHECK(!fr.queue_empty && !fr.deleted && fr.has_crc && fr.crc == 0xDEADBEEFu);
+    CHECK_EQ_INT(fr.segment_id, 77);
+    CHECK_EQ_INT(fr.segment_hash, 88);
+    CHECK_EQ_INT(fr.object_len, 6);
+    CHECK(fr.object && fr.object[0] == 0x83 && fr.object[5] == 0x03);
+    CHECK(fr.deleted_vclock == NULL);
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(rc, "tomb", &fr), RIAK_OK);
+    CHECK(fr.deleted);
+    /* term_to_binary([]) becomes term_to_binary({encode_raw, []}) */
+    CHECK_EQ_STR(fr.deleted_vclock, "g2gCdwplbmNvZGVfcmF3ag==");
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(rc, "empty", &fr), RIAK_OK);
+    CHECK(fr.queue_empty);
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(rc, "gone", &fr), RIAK_E_NOT_FOUND);
+    riak_members m;
+    CHECK_EQ_INT(riak_cluster_membership(rc, &m), RIAK_OK);
+    CHECK_EQ_INT(m.count, 1);
+    if (m.count == 1) {
+        CHECK_EQ_INT(m.items[0].port, 8087); /* sent as a string */
+        CHECK_EQ_STR(m.items[0].ip, "10.0.0.7");
+    }
+    riak_members_free(&m);
+    stub_flag("malformed", 1);
+    CHECK_EQ_INT(riak_cluster_membership(rc, &m), RIAK_E_PARSE); /* port 99999 */
+    CHECK(m.items == NULL && m.count == 0);
+    CHECK_EQ_INT(riak_repl_fetch(rc, "q", &fr), RIAK_E_PARSE); /* truncated */
+    CHECK(fr.object == NULL);
+    stub_flag("malformed", 0);
+    riak_repl_key nullclock = {.bucket = "b", .key = "k"};
+    CHECK_EQ_INT(riak_repl_push(rc, "q", &nullclock, 1, NULL), RIAK_E_INVALID_ARG);
+}
+
+/* Riak 2.2 has no resource for the newer endpoints: RIAK_E_UNSUPPORTED,
+ * not "not found"; Riak 3.x answers preflists over HTTP via the link walker. */
+static void test_old_and_v3_nodes_http(void) {
+    stub_flag("old", 1);
+    riak_aae_tree t;
+    CHECK_EQ_INT(riak_aae_merge_root(rc, 3, &t), RIAK_E_UNSUPPORTED);
+    CHECK(strstr(riak_client_errmsg(rc), "AAE folds") != NULL);
+    riak_repl_fetch_result fr;
+    CHECK_EQ_INT(riak_repl_fetch(rc, "q", &fr), RIAK_E_UNSUPPORTED);
+    riak_members m;
+    CHECK_EQ_INT(riak_cluster_membership(rc, &m), RIAK_E_UNSUPPORTED);
+    riak_query_part p = {.index_name = "x_bin", .start_term = "a", .end_term = "b"};
+    riak_query q = {.parts = &p, .n_parts = 1};
+    riak_query_result r;
+    CHECK_EQ_INT(riak_query_run(rc, "qb", &q, &r), RIAK_E_UNSUPPORTED);
+    /* a genuine "not found" stays RIAK_E_NOT_FOUND */
+    riak_object o;
+    CHECK_EQ_INT(riak_get(rc, "nothing", "here", NULL, &o), RIAK_E_NOT_FOUND);
+    stub_flag("old", 0);
+
+    stub_flag("v3", 1);
+    riak_preflist pl;
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_E_UNSUPPORTED);
+    stub_flag("v3", 0);
+    CHECK_EQ_INT(riak_get_preflist(rc, NULL, "b", "k", &pl), RIAK_OK);
+    riak_preflist_free(&pl);
+}
+
 int main(void) {
     const char *p = getenv("RIAK_TEST_PORT");
     if (p == NULL) {
@@ -1220,6 +1841,13 @@ int main(void) {
     RUN(test_client_id_header);
     RUN(test_info_preflist_streams);
     RUN(test_read_flags_and_head);
+    RUN(test_new_options_http);
+    RUN(test_counters_type_props_http);
+    RUN(test_link_walk_http);
+    RUN(test_query_api_http);
+    RUN(test_aae_http);
+    RUN(test_repl_queue_http);
+    RUN(test_old_and_v3_nodes_http);
 
     riak_client_free(rc);
     riak_global_cleanup();

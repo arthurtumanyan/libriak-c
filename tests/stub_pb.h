@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -25,10 +26,12 @@
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <zlib.h>
 
 #include "riak.pb-c.h"
 #include "riak_dt.pb-c.h"
 #include "riak_kv.pb-c.h"
+#include "riak_repl.pb-c.h"
 #include "riak_search.pb-c.h"
 #include "riak_yokozuna.pb-c.h"
 
@@ -72,10 +75,53 @@ static struct {
     size_t dt_context_len;
 } stub;
 
+/* What the client sent with the newer requests. */
+static struct {
+    atomic_int old_node; /* answer newer codes like Riak 2.2: "Unknown message code" */
+    atomic_int dropped;  /* connections closed after a handler crash */
+    unsigned node_confirms, put_sync, put_asis, put_return_head, get_deletedvclock;
+    int index_pagination_sort;
+    unsigned dt_node_confirms, dt_return_body, dt_fetches;
+    char type_props_type[32];
+    int type_notfound_ok;
+    int64_t counter_amount;
+    int counter_returnvalue;
+    char fold_start[32], fold_end[32];
+    int fold_start_incl, fold_end_incl;
+    char repl_cluster[32];
+    size_t push_keys, push_vclock_len;
+    unsigned aae_n_val, aae_ids, aae_tree_size, aae_change, aae_job, aae_finder, aae_limit;
+    int aae_key_range, aae_seg_filter, aae_mod_range, aae_prehash;
+    unsigned aae_iv, aae_mod_start, aae_mod_end;
+    char aae_queue[32];
+    /* range requests: what selects the objects */
+    char aae_type[32], aae_bucket[32], aae_start[32], aae_end[32];
+    unsigned aae_segs[4], aae_filter_size; /* filter_tree_size + 1, 0 when absent */
+    /* object folds */
+    unsigned fold_max;
+    char fold_cont[32], fold_type[32], fold_bucket[32];
+    /* counter reads */
+    unsigned counter_r;
+    int counter_basic_quorum, counter_notfound_ok;
+    /* queue fetches and pushes */
+    char fetch_queue[32], fetch_encoding[32];
+    char push_type[2][16], push_bucket[2][16], push_key[2][16];
+    /* bucket props sent with RpbSetBucketReq */
+    unsigned props_sync, props_node_confirms; /* + 1, 0 when absent */
+    int props_aae_exclude;
+    /* the next request with this code is read and its connection closed
+     * without an answer; received counts every request per code */
+    atomic_int drop_code;
+    unsigned received[256];
+    atomic_int bad_tree_size; /* trees report a size Riak does not have */
+} ext;
+
 typedef struct {
     int fd;
     SSL *ssl;
 } stub_conn;
+
+static int stub_crash(stub_conn *c, const char *what);
 
 static SSL_CTX *stub_tls_ctx;
 
@@ -186,6 +232,8 @@ static int stub_get(stub_conn *c, const uint8_t *buf, size_t len) {
     stub.get_head = q->has_head && q->head;
     stub.get_sloppy = q->has_sloppy_quorum && q->sloppy_quorum;
     stub.get_n_val = q->has_n_val ? q->n_val : 0;
+    ext.node_confirms = q->has_node_confirms ? q->node_confirms : 0;
+    ext.get_deletedvclock = q->has_deletedvclock && q->deletedvclock;
     int rc = 0;
     RpbGetResp r = RPB_GET_RESP__INIT;
     RpbContent ct[2];
@@ -211,6 +259,17 @@ static int stub_get(stub_conn *c, const uint8_t *buf, size_t len) {
         RpbGetResp empty = RPB_GET_RESP__INIT;
         (void)stub_send(c, 10, &empty.base);
         rc = -1;
+    } else if (stub_is(q->key, "crash")) {
+        rc = stub_crash(c, "riak_kv_pb_object,process");
+    } else if (stub_is(q->key, "tombdv")) {
+        /* a tombstone: with deletedvclock only its clock comes back */
+        RpbGetResp tomb = RPB_GET_RESP__INIT;
+        if (q->has_deletedvclock && q->deletedvclock) {
+            tomb.has_vclock = 1;
+            tomb.vclock.data = (uint8_t *)(uintptr_t)STUB_VCLOCK;
+            tomb.vclock.len = sizeof STUB_VCLOCK;
+        }
+        rc = stub_send(c, 10, &tomb.base);
     } else if (stub_is(q->key, "missing")) {
         RpbGetResp empty = RPB_GET_RESP__INIT;
         rc = stub_send(c, 10, &empty.base);
@@ -275,6 +334,10 @@ static int stub_put(stub_conn *c, const uint8_t *buf, size_t len) {
     stub.put_if_not_modified = q->has_if_not_modified && q->if_not_modified;
     stub.put_return_body = q->has_return_body && q->return_body;
     stub.put_w = q->has_w ? q->w : 0;
+    ext.node_confirms = q->has_node_confirms ? q->node_confirms : 0;
+    ext.put_sync = q->has_sync_on_write ? (unsigned)q->sync_on_write + 1 : 0;
+    ext.put_asis = q->has_asis && q->asis;
+    ext.put_return_head = q->has_return_head && q->return_head;
     int rc;
     if (q->has_key && stub_is(q->key, "exists") && stub.put_if_none_match) {
         rc = stub_error(c, "match_found");
@@ -289,7 +352,11 @@ static int stub_put(stub_conn *c, const uint8_t *buf, size_t len) {
             r.key = stub_bin("genkey");
         }
         RpbContent *cts[1] = {q->content};
-        if (stub.put_return_body) {
+        ProtobufCBinaryData value = q->content->value;
+        if (ext.put_return_head) {
+            q->content->value.len = 0; /* metadata only */
+        }
+        if (stub.put_return_body || ext.put_return_head) {
             r.n_content = 1;
             r.content = cts;
             r.has_vclock = 1;
@@ -297,6 +364,7 @@ static int stub_put(stub_conn *c, const uint8_t *buf, size_t len) {
             r.vclock.len = sizeof STUB_VCLOCK;
         }
         rc = stub_send(c, 12, &r.base);
+        q->content->value = value;
     }
     rpb_put_req__free_unpacked(q, NULL);
     return rc;
@@ -340,6 +408,12 @@ static int stub_props(stub_conn *c) {
     p.r = 4294967293u; /* quorum */
     p.has_datatype = 1;
     p.datatype = stub_bin("map");
+    p.has_node_confirms = 1;
+    p.node_confirms = 2;
+    p.has_sync_on_write = 1;
+    p.sync_on_write = RPB_BUCKET_PROPS__SYNC_ON_WRITE__sync_one;
+    p.has_aae_tree_exclude = 1;
+    p.aae_tree_exclude = 1;
     RpbCommitHook hook = RPB_COMMIT_HOOK__INIT;
     hook.has_name = 1;
     hook.name = stub_bin("validate");
@@ -362,6 +436,7 @@ static int stub_index(stub_conn *c, const uint8_t *buf, size_t len) {
     if (q->has_cover_context && q->cover_context.len <= sizeof stub.cover)
         memcpy(stub.cover, q->cover_context.data, q->cover_context.len);
     int terms = q->has_return_terms && q->return_terms;
+    ext.index_pagination_sort = q->has_pagination_sort && q->pagination_sort;
     int rc = 0;
     for (int i = 0; rc == 0 && i < 2; i++) {
         RpbIndexResp r = RPB_INDEX_RESP__INIT;
@@ -437,9 +512,54 @@ static int stub_mapred(stub_conn *c) {
     return 0;
 }
 
+/* MapReduce link phases: alice links to bob (friend) and carol (boss);
+ * the reply lists [bucket, key, tag] per kept phase. */
+static int stub_links(stub_conn *c, const char *job) {
+    const char *b = strstr(job, "\"inputs\":[[\"");
+    char bucket[64] = "lb";
+    if (b) {
+        b += 12;
+        size_t n = strcspn(b, "\"");
+        snprintf(bucket, sizeof bucket, "%.*s", (int)(n < 63 ? n : 63), b);
+    }
+    char p0[256], p1[256];
+    int two = strstr(job, "\"boss\"") != NULL;
+    if (strcmp(bucket, "oddlinks") == 0) {
+        /* entries that are not [bucket, key, tag] lists */
+        snprintf(p0, sizeof p0, "[\"x\",[\"oddlinks\"]]");
+    } else if (strcmp(bucket, "numlinks") == 0) {
+        snprintf(p0, sizeof p0, "[[1,\"bob\",\"friend\"]]");
+    } else if (strcmp(bucket, "numkeys") == 0) {
+        snprintf(p0, sizeof p0, "[[\"numkeys\",2,\"friend\"]]");
+    } else if (two) {
+        snprintf(p0, sizeof p0, "[[\"%s\",\"bob\",\"friend\"],[\"%s\",\"carol\",\"boss\"]]", bucket,
+                 bucket);
+        snprintf(p1, sizeof p1, "[[\"%s\",\"carol\",\"boss\"],[\"%s\",\"carol\",\"boss\"]]", bucket,
+                 bucket);
+    } else {
+        snprintf(p0, sizeof p0, "[[\"%s\",\"bob\",\"friend\"],[\"%s\",\"missing\",\"friend\"]]",
+                 bucket, bucket);
+    }
+    for (int i = 0; i < (two ? 3 : 2); i++) {
+        RpbMapRedResp r = RPB_MAP_RED_RESP__INIT;
+        if ((two && i < 2) || (!two && i < 1)) {
+            r.has_phase = 1;
+            r.phase = (uint32_t)i;
+            r.has_response = 1;
+            r.response = stub_bin(i == 0 ? p0 : p1);
+        } else {
+            r.has_done = r.done = 1;
+        }
+        if (stub_send(c, 24, &r.base) != 0) return -1;
+    }
+    return 0;
+}
+
 static int stub_dt_fetch(stub_conn *c, const uint8_t *buf, size_t len) {
     DtFetchReq *q = dt_fetch_req__unpack(NULL, len, buf);
     if (q == NULL) return -1;
+    ext.dt_fetches++;
+    ext.dt_node_confirms = q->has_node_confirms ? q->node_confirms : 0;
     DtFetchResp r = DT_FETCH_RESP__INIT;
     DtValue v = DT_VALUE__INIT;
     int rc;
@@ -507,6 +627,13 @@ static int stub_dt_update(stub_conn *c, const uint8_t *buf, size_t len) {
     DtUpdateReq *q = dt_update_req__unpack(NULL, len, buf);
     if (q == NULL) return -1;
     const DtOp *op = q->op;
+    ext.dt_node_confirms = q->has_node_confirms ? q->node_confirms : 0;
+    ext.dt_return_body = q->has_return_body && q->return_body;
+    if (op->gset_op && ext.dt_return_body) {
+        /* Riak 3.4 cannot encode a gset in an update response */
+        dt_update_req__free_unpacked(q, NULL);
+        return stub_crash(c, "riak_pb_dt_codec,encode_update_response");
+    }
     stub.dt_kind = op->counter_op ? 1 : op->set_op ? 2 : op->map_op ? 3 : op->hll_op ? 4 : 5;
     stub.dt_increment = op->counter_op ? op->counter_op->increment : 0;
     stub.dt_adds = op->set_op    ? op->set_op->n_adds
@@ -541,9 +668,485 @@ static int stub_dt_update(stub_conn *c, const uint8_t *buf, size_t len) {
     return rc;
 }
 
+/* ---- Riak 2.9+/3.x requests --------------------------------------------- */
+
+static const uint8_t STUB_CLIENT_ID[] = {0x01, 0x02, 0x03};
+
+/* A crash of the server's handler: Riak sends the error, then closes. */
+static int stub_crash(stub_conn *c, const char *what) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "Error processing incoming message: error:function_clause:[{%s}]",
+             what);
+    stub_error(c, msg);
+    atomic_fetch_add(&ext.dropped, 1);
+    /* the close follows the error with a delay, so a client that reused the
+     * connection would send its next request into it */
+    stub_sleep_ms(200);
+    return -1;
+}
+
+/* <<Id:32/big, zlib(Seg)>> as Riak sends tree branches. */
+static ProtobufCBinaryData stub_branch(uint32_t id, uint8_t fill, size_t seg_len) {
+    uint8_t *seg = malloc(seg_len);
+    memset(seg, fill, seg_len);
+    uLongf zlen = compressBound(seg_len);
+    uint8_t *out = malloc(4 + zlen);
+    out[0] = (uint8_t)(id >> 24U);
+    out[1] = (uint8_t)(id >> 16U);
+    out[2] = (uint8_t)(id >> 8U);
+    out[3] = (uint8_t)id;
+    compress(out + 4, &zlen, seg, seg_len);
+    free(seg);
+    ProtobufCBinaryData b = {4 + zlen, out};
+    return b;
+}
+
+static int stub_tree(stub_conn *c, int size, size_t level1_len, const uint32_t *ids, size_t n) {
+    RpbAaeFoldTreeResp r = RPB_AAE_FOLD_TREE_RESP__INIT;
+    if (atomic_load(&ext.bad_tree_size)) size = 9;
+    r.size = (RpbAaeFoldTreeResp__RpbTreeSize)size;
+    uint8_t *l1 = calloc(level1_len ? level1_len : 1, 1);
+    if (level1_len) {
+        l1[0] = 0xAB; /* a non-empty first hash */
+        r.has_level_one = 1;
+        r.level_one.data = l1;
+        r.level_one.len = level1_len;
+    }
+    ProtobufCBinaryData l2[4];
+    for (size_t i = 0; i < n; i++)
+        l2[i] = stub_branch(ids[i], (uint8_t)(0x10 + i), 256 * 4);
+    r.n_level_two = n;
+    r.level_two = l2;
+    int rc = stub_send(c, 220, &r.base);
+    for (size_t i = 0; i < n; i++)
+        free(l2[i].data);
+    free(l1);
+    return rc;
+}
+
+static int stub_keys_clocks(stub_conn *c, int typed) {
+    RpbKeysValue kv[2];
+    RpbKeysValue *p[2] = {&kv[0], &kv[1]};
+    const char *keys[2] = {"k1", "k2"};
+    for (int i = 0; i < 2; i++) {
+        rpb_keys_value__init(&kv[i]);
+        if (typed) {
+            kv[i].has_type = 1;
+            kv[i].type = stub_bin("maps");
+        }
+        kv[i].bucket = stub_bin("aaeb");
+        kv[i].key = stub_bin(keys[i]);
+        kv[i].value.data = (uint8_t *)(uintptr_t)STUB_VCLOCK;
+        kv[i].value.len = sizeof STUB_VCLOCK;
+    }
+    RpbAaeFoldKeyValueResp r = RPB_AAE_FOLD_KEY_VALUE_RESP__INIT;
+    r.response_type = stub_bin("clock");
+    r.n_keys_value = 2;
+    r.keys_value = p;
+    return stub_send(c, 221, &r.base);
+}
+
+/* The count comes second, after an entry the client must skip. */
+static int stub_count(stub_conn *c, const char *type, uint32_t n) {
+    RpbKeysCount other = RPB_KEYS_COUNT__INIT, kc = RPB_KEYS_COUNT__INIT;
+    RpbKeysCount *p[2] = {&other, &kc};
+    other.tag = stub_bin("other_count");
+    other.count = 999;
+    kc.tag = stub_bin("dispatched_count");
+    kc.count = n;
+    RpbAaeFoldKeyCountResp r = RPB_AAE_FOLD_KEY_COUNT_RESP__INIT;
+    r.response_type = stub_bin(type);
+    r.n_keys_count = 2;
+    r.keys_count = p;
+    return stub_send(c, 222, &r.base);
+}
+
+/* Fields every range request carries; the macro reads them from any. */
+#define STUB_RANGE(q)                                                                              \
+    do {                                                                                           \
+        ext.aae_type[0] = '\0';                                                                    \
+        if ((q)->has_type) stub_copy(ext.aae_type, sizeof ext.aae_type, (q)->type);                \
+        stub_copy(ext.aae_bucket, sizeof ext.aae_bucket, (q)->bucket);                             \
+        ext.aae_start[0] = ext.aae_end[0] = '\0';                                                  \
+        if ((q)->has_start_key) stub_copy(ext.aae_start, sizeof ext.aae_start, (q)->start_key);    \
+        if ((q)->has_end_key) stub_copy(ext.aae_end, sizeof ext.aae_end, (q)->end_key);            \
+        ext.aae_key_range = (q)->key_range;                                                        \
+        ext.aae_mod_range = (q)->modified_range;                                                   \
+        ext.aae_mod_start = (q)->last_mod_start;                                                   \
+        ext.aae_mod_end = (q)->last_mod_end;                                                       \
+    } while (0)
+
+/* Segment filter fields of the two requests that carry them. */
+#define STUB_SEGS(q)                                                                               \
+    do {                                                                                           \
+        memset(ext.aae_segs, 0, sizeof ext.aae_segs);                                              \
+        for (size_t s_ = 0; s_ < (q)->n_id_filter && s_ < 4; s_++)                                 \
+            ext.aae_segs[s_] = (q)->id_filter[s_];                                                 \
+        ext.aae_filter_size = (q)->has_filter_tree_size ? (unsigned)(q)->filter_tree_size + 1 : 0; \
+    } while (0)
+
+/* -1 closes the connection, 0 served, 1 not an extended request. */
+static int stub_handle_ext(stub_conn *c, uint8_t code, const uint8_t *buf, size_t len) {
+    ext.received[code]++;
+    int drop = code;
+    if (atomic_compare_exchange_strong(&ext.drop_code, &drop, 0)) {
+        return -1; /* read, maybe applied, never answered */
+    }
+    if (atomic_load(&ext.old_node) && (code == 3 || code == 40 || code == 50 || code == 52 ||
+                                       code == 128 || code == 129 || code >= 202)) {
+        char msg[48];
+        snprintf(msg, sizeof msg, "Unknown message code: %u", code);
+        return stub_error(c, msg);
+    }
+    switch (code) {
+    case 3: {
+        RpbGetClientIdResp r = RPB_GET_CLIENT_ID_RESP__INIT;
+        r.client_id.data = (uint8_t *)(uintptr_t)STUB_CLIENT_ID;
+        r.client_id.len = sizeof STUB_CLIENT_ID;
+        return stub_send(c, 4, &r.base);
+    }
+    case 32: {
+        RpbSetBucketTypeReq *q = rpb_set_bucket_type_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        stub_copy(ext.type_props_type, sizeof ext.type_props_type, q->type);
+        ext.type_notfound_ok = q->props->has_notfound_ok ? (int)q->props->notfound_ok : -1;
+        rpb_set_bucket_type_req__free_unpacked(q, NULL);
+        return stub_send(c, 22, NULL);
+    }
+    case 40: {
+        RpbCSBucketReq *q = rpb_csbucket_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        int fail = stub_is(q->bucket, "foldfail");
+        stub_copy(ext.fold_start, sizeof ext.fold_start, q->start_key);
+        stub_copy(ext.fold_bucket, sizeof ext.fold_bucket, q->bucket);
+        ext.fold_max = q->has_max_results ? q->max_results : 0;
+        ext.fold_cont[0] = ext.fold_type[0] = '\0';
+        if (q->has_continuation) stub_copy(ext.fold_cont, sizeof ext.fold_cont, q->continuation);
+        if (q->has_type) stub_copy(ext.fold_type, sizeof ext.fold_type, q->type);
+        ext.fold_end[0] = '\0';
+        if (q->has_end_key) stub_copy(ext.fold_end, sizeof ext.fold_end, q->end_key);
+        ext.fold_start_incl = q->start_incl;
+        ext.fold_end_incl = q->end_incl;
+        rpb_csbucket_req__free_unpacked(q, NULL);
+        int rc = 0;
+        for (int batch = 0; rc == 0 && batch < 2; batch++) {
+            RpbCSBucketResp r = RPB_CSBUCKET_RESP__INIT;
+            RpbContent ct;
+            RpbPair meta, idx;
+            RpbLink link;
+            RpbPair *metap, *idxp;
+            RpbLink *linkp;
+            stub_content(&ct, batch ? "fold-2" : "fold-1", &meta, &idx, &link, &metap, &idxp,
+                         &linkp);
+            RpbContent *cts[1] = {&ct};
+            RpbGetResp g = RPB_GET_RESP__INIT;
+            g.n_content = 1;
+            g.content = cts;
+            g.has_vclock = 1;
+            g.vclock.data = (uint8_t *)(uintptr_t)STUB_VCLOCK;
+            g.vclock.len = sizeof STUB_VCLOCK;
+            RpbIndexObject io = RPB_INDEX_OBJECT__INIT;
+            io.key = stub_bin(batch ? "f2" : "f1");
+            io.object = &g;
+            RpbIndexObject *ios[1] = {&io};
+            r.n_objects = 1;
+            r.objects = ios;
+            if (batch == 1 || fail) {
+                r.has_continuation = 1;
+                r.continuation = stub_bin("next-page");
+                r.has_done = r.done = !fail;
+            }
+            rc = stub_send(c, 41, &r.base);
+            if (rc == 0 && fail) return stub_error(c, "fold failed"); /* after the continuation */
+        }
+        return rc;
+    }
+    case 50: {
+        RpbCounterUpdateReq *q = rpb_counter_update_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.counter_amount = q->amount;
+        ext.counter_returnvalue = q->has_returnvalue && q->returnvalue;
+        ext.node_confirms = q->has_node_confirms ? q->node_confirms : 0;
+        RpbCounterUpdateResp r = RPB_COUNTER_UPDATE_RESP__INIT;
+        if (ext.counter_returnvalue) {
+            r.has_value = 1;
+            r.value = 40 + q->amount;
+        }
+        rpb_counter_update_req__free_unpacked(q, NULL);
+        return stub_send(c, 51, &r.base);
+    }
+    case 52: {
+        RpbCounterGetReq *q = rpb_counter_get_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.counter_r = q->has_r ? q->r : 0;
+        ext.counter_basic_quorum = q->has_basic_quorum ? (int)q->basic_quorum : -1;
+        ext.counter_notfound_ok = q->has_notfound_ok ? (int)q->notfound_ok : -1;
+        RpbCounterGetResp r = RPB_COUNTER_GET_RESP__INIT;
+        if (!stub_is(q->key, "missing")) {
+            r.has_value = 1;
+            r.value = 42;
+        }
+        rpb_counter_get_req__free_unpacked(q, NULL);
+        return stub_send(c, 53, &r.base);
+    }
+    case 128: {
+        /* riak_repl: the payload repeats the code ("tunnelled") */
+        if (len < 1 || buf[0] != 128) return stub_crash(c, "riak_repl_pb_get,process");
+        RpbReplGetReq *q = rpb_repl_get_req__unpack(NULL, len - 1, buf + 1);
+        if (q == NULL) return -1;
+        stub_copy(ext.repl_cluster, sizeof ext.repl_cluster, q->cluster_id);
+        int missing = stub_is(q->key, "missing");
+        rpb_repl_get_req__free_unpacked(q, NULL);
+        RpbGetResp r = RPB_GET_RESP__INIT;
+        RpbContent ct;
+        RpbPair meta, idx;
+        RpbLink link;
+        RpbPair *metap, *idxp;
+        RpbLink *linkp;
+        stub_content(&ct, "proxied", &meta, &idx, &link, &metap, &idxp, &linkp);
+        RpbContent *cts[1] = {&ct};
+        if (!missing) {
+            r.n_content = 1;
+            r.content = cts;
+        }
+        return stub_send(c, 10, &r.base);
+    }
+    case 129: {
+        if (len != 1 || buf[0] != 129) return stub_crash(c, "riak_repl_pb_get,process");
+        RpbReplGetClusterIdResp r = RPB_REPL_GET_CLUSTER_ID_RESP__INIT;
+        r.cluster_id = stub_bin("{'riak@stub',{1,2,3}}");
+        return stub_send(c, 130, &r.base);
+    }
+    case 202: {
+        RpbFetchReq *q = rpb_fetch_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        stub_copy(ext.fetch_queue, sizeof ext.fetch_queue, q->queuename);
+        ext.fetch_encoding[0] = '\0';
+        if (q->has_encoding) stub_copy(ext.fetch_encoding, sizeof ext.fetch_encoding, q->encoding);
+        RpbFetchResp r = RPB_FETCH_RESP__INIT;
+        static const uint8_t obj[] = {0x83, 0x68, 0x02, 0x01, 0x02, 0x03};
+        int rc;
+        if (stub_is(q->queuename, "gone")) {
+            rc = stub_error(c, "notfound");
+        } else if (stub_is(q->queuename, "empty")) {
+            r.queue_empty = 1;
+            rc = stub_send(c, 203, &r.base);
+        } else {
+            r.queue_empty = 0;
+            r.has_replencoded_object = 1;
+            r.replencoded_object.data = (uint8_t *)(uintptr_t)obj;
+            r.replencoded_object.len = sizeof obj;
+            r.has_crc_check = 1;
+            r.crc_check = 0xDEADBEEF;
+            r.has_segment_id = r.has_segment_hash = 1;
+            r.segment_id = 77;
+            r.segment_hash = 88;
+            if (stub_is(q->queuename, "tomb")) {
+                r.has_deleted = r.deleted = 1;
+                r.has_deleted_vclock = 1;
+                r.deleted_vclock.data = (uint8_t *)(uintptr_t)STUB_VCLOCK;
+                r.deleted_vclock.len = sizeof STUB_VCLOCK;
+            }
+            rc = stub_send(c, 203, &r.base);
+        }
+        rpb_fetch_req__free_unpacked(q, NULL);
+        return rc;
+    }
+    case 204: {
+        RpbPushReq *q = rpb_push_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.push_keys = q->n_keys_value;
+        ext.push_vclock_len = q->n_keys_value ? q->keys_value[0]->value.len : 0;
+        for (size_t i = 0; i < 2; i++) {
+            ext.push_type[i][0] = ext.push_bucket[i][0] = ext.push_key[i][0] = '\0';
+            if (i >= q->n_keys_value) continue;
+            const RpbKeysValue *kv = q->keys_value[i];
+            if (kv->has_type) stub_copy(ext.push_type[i], sizeof ext.push_type[i], kv->type);
+            stub_copy(ext.push_bucket[i], sizeof ext.push_bucket[i], kv->bucket);
+            stub_copy(ext.push_key[i], sizeof ext.push_key[i], kv->key);
+        }
+        rpb_push_req__free_unpacked(q, NULL);
+        RpbPushResp r = RPB_PUSH_RESP__INIT;
+        r.queue_exists = 1;
+        r.has_foldq_length = r.has_fsync_length = r.has_realt_length = 1;
+        r.foldq_length = 1;
+        r.fsync_length = 2;
+        r.realt_length = 3;
+        return stub_send(c, 205, &r.base);
+    }
+    case 206: {
+        /* Riak 3.4 only accepts the request without a body */
+        if (len > 0) return stub_crash(c, "riak_kv_pb_object,process");
+        RpbClusterMemberEntry e = RPB_CLUSTER_MEMBER_ENTRY__INIT;
+        e.ip = stub_bin("10.0.0.7");
+        e.port = 8087;
+        RpbClusterMemberEntry *all[1] = {&e};
+        RpbMembershipResp r = RPB_MEMBERSHIP_RESP__INIT;
+        r.n_up_nodes = 1;
+        r.up_nodes = all;
+        return stub_send(c, 207, &r.base);
+    }
+    case 210: {
+        RpbAaeFoldMergeRootNValReq *q = rpb_aae_fold_merge_root_nval_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.aae_n_val = q->n_val;
+        rpb_aae_fold_merge_root_nval_req__free_unpacked(q, NULL);
+        return stub_tree(c, 4, 4096 * 4, NULL, 0);
+    }
+    case 211: {
+        RpbAaeFoldMergeBranchNValReq *q =
+            rpb_aae_fold_merge_branch_nval_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.aae_n_val = q->n_val;
+        ext.aae_ids = (unsigned)q->n_id_filter;
+        uint32_t ids[2] = {q->n_id_filter ? q->id_filter[0] : 0, 9};
+        rpb_aae_fold_merge_branch_nval_req__free_unpacked(q, NULL);
+        return stub_tree(c, 4, 0, ids, 2);
+    }
+    case 212: {
+        RpbAaeFoldFetchClocksNValReq *q =
+            rpb_aae_fold_fetch_clocks_nval_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.aae_n_val = q->n_val;
+        ext.aae_ids = (unsigned)q->n_id_filter;
+        rpb_aae_fold_fetch_clocks_nval_req__free_unpacked(q, NULL);
+        return stub_keys_clocks(c, 0);
+    }
+    case 213: {
+        RpbAaeFoldMergeTreesRangeReq *q =
+            rpb_aae_fold_merge_trees_range_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        STUB_SEGS(q);
+        ext.aae_tree_size = q->tree_size;
+        ext.aae_seg_filter = q->segment_filter;
+        ext.aae_ids = (unsigned)q->n_id_filter;
+        ext.aae_prehash = q->use_prehash;
+        ext.aae_iv = q->init_vector;
+        int size = q->tree_size;
+        rpb_aae_fold_merge_trees_range_req__free_unpacked(q, NULL);
+        uint32_t ids[2] = {0, 1};
+        return stub_tree(c, size, 16 * 4, ids, 2);
+    }
+    case 214: {
+        RpbAaeFoldFetchClocksRangeReq *q =
+            rpb_aae_fold_fetch_clocks_range_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        STUB_SEGS(q);
+        ext.aae_seg_filter = q->segment_filter;
+        int typed = q->has_type;
+        rpb_aae_fold_fetch_clocks_range_req__free_unpacked(q, NULL);
+        return stub_keys_clocks(c, typed);
+    }
+    case 215: {
+        RpbAaeFoldFindKeysReq *q = rpb_aae_fold_find_keys_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        ext.aae_finder = q->finder;
+        ext.aae_limit = q->find_limit;
+        rpb_aae_fold_find_keys_req__free_unpacked(q, NULL);
+        RpbKeysCount kc = RPB_KEYS_COUNT__INIT;
+        RpbKeysCount *p[1] = {&kc};
+        kc.tag = stub_bin("big-key");
+        kc.count = 4096;
+        RpbAaeFoldKeyCountResp r = RPB_AAE_FOLD_KEY_COUNT_RESP__INIT;
+        r.response_type = stub_bin("find_keys");
+        r.n_keys_count = 1;
+        r.keys_count = p;
+        return stub_send(c, 222, &r.base);
+    }
+    case 216: {
+        RpbAaeFoldObjectStatsReq *q = rpb_aae_fold_object_stats_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        rpb_aae_fold_object_stats_req__free_unpacked(q, NULL);
+        RpbKeysCount kc[5];
+        RpbKeysCount *p[5];
+        const char *tags[5] = {"total_count", "total_size", "sizes", "sizes", "siblings"};
+        unsigned orders[5] = {0, 0, 2, 3, 1}, counts[5] = {12, 3400, 10, 2, 12};
+        for (int i = 0; i < 5; i++) {
+            rpb_keys_count__init(&kc[i]);
+            kc[i].tag = stub_bin(tags[i]);
+            kc[i].has_order = i >= 2;
+            kc[i].order = orders[i];
+            kc[i].count = counts[i];
+            p[i] = &kc[i];
+        }
+        RpbAaeFoldKeyCountResp r = RPB_AAE_FOLD_KEY_COUNT_RESP__INIT;
+        r.response_type = stub_bin("stats");
+        r.n_keys_count = 5;
+        r.keys_count = p;
+        return stub_send(c, 222, &r.base);
+    }
+    case 217: {
+        RpbAaeFoldReplKeysReq *q = rpb_aae_fold_repl_keys_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        stub_copy(ext.aae_queue, sizeof ext.aae_queue, q->queuename);
+        rpb_aae_fold_repl_keys_req__free_unpacked(q, NULL);
+        return stub_count(c, "repl_keys", 5);
+    }
+    case 218: {
+        RpbAaeFoldFindTombsReq *q = rpb_aae_fold_find_tombs_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        rpb_aae_fold_find_tombs_req__free_unpacked(q, NULL);
+        return stub_keys_clocks(c, 0);
+    }
+    case 219: {
+        RpbAaeFoldRepairKeysReq *q = rpb_aae_fold_repair_keys_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        rpb_aae_fold_repair_keys_req__free_unpacked(q, NULL);
+        return stub_count(c, "repair_keys", 6);
+    }
+    case 223: {
+        RpbAaeFoldListBucketsReq *q = rpb_aae_fold_list_buckets_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        ext.aae_n_val = q->n_val;
+        rpb_aae_fold_list_buckets_req__free_unpacked(q, NULL);
+        RpbAaeFoldBucket a = RPB_AAE_FOLD_BUCKET__INIT, b = RPB_AAE_FOLD_BUCKET__INIT;
+        a.bucket = stub_bin("plain");
+        b.has_type = 1;
+        b.type = stub_bin("maps");
+        b.bucket = stub_bin("typed");
+        RpbAaeFoldBucket *all[2] = {&a, &b};
+        RpbAaeFoldListBucketsResp r = RPB_AAE_FOLD_LIST_BUCKETS_RESP__INIT;
+        r.n_bucket_list = 2;
+        r.bucket_list = all;
+        return stub_send(c, 224, &r.base);
+    }
+    case 230: {
+        RpbAaeFoldReapTombsReq *q = rpb_aae_fold_reap_tombs_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        ext.aae_change = q->change_method;
+        ext.aae_job = q->job_id;
+        rpb_aae_fold_reap_tombs_req__free_unpacked(q, NULL);
+        return stub_count(c, "reap_tombs", 7);
+    }
+    case 231: {
+        RpbAaeFoldEraseKeysReq *q = rpb_aae_fold_erase_keys_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        STUB_RANGE(q);
+        ext.aae_change = q->change_method;
+        ext.aae_job = q->job_id;
+        rpb_aae_fold_erase_keys_req__free_unpacked(q, NULL);
+        return stub_count(c, "erase_keys", 8);
+    }
+    default:
+        return 1;
+    }
+}
+
 /* One request message; -1 closes the connection. */
 static int stub_handle(stub_conn *c, uint8_t code, const uint8_t *buf, size_t len) {
     atomic_fetch_add(&stub.requests, 1);
+    int ext_rc = stub_handle_ext(c, code, buf, len);
+    if (ext_rc <= 0) {
+        return ext_rc;
+    }
     switch (code) {
     case 1:
         return stub_send(c, 2, NULL);
@@ -580,11 +1183,21 @@ static int stub_handle(stub_conn *c, uint8_t code, const uint8_t *buf, size_t le
         stub.set_n_val = q->props->has_n_val ? q->props->n_val : 0;
         stub.set_allow_mult = q->props->has_allow_mult && q->props->allow_mult;
         stub.set_precommit = q->props->n_precommit;
+        ext.props_sync = q->props->has_sync_on_write ? (unsigned)q->props->sync_on_write + 1 : 0;
+        ext.props_node_confirms = q->props->has_node_confirms ? q->props->node_confirms + 1 : 0;
+        ext.props_aae_exclude =
+            q->props->has_aae_tree_exclude ? (int)q->props->aae_tree_exclude : -1;
         rpb_set_bucket_req__free_unpacked(q, NULL);
         return stub_send(c, 22, NULL);
     }
-    case 23:
-        return stub_mapred(c);
+    case 23: {
+        RpbMapRedReq *q = rpb_map_red_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        char job[512];
+        stub_copy(job, sizeof job, q->request);
+        rpb_map_red_req__free_unpacked(q, NULL);
+        return strstr(job, "\"link\"") ? stub_links(c, job) : stub_mapred(c);
+    }
     case 25:
         return stub_index(c, buf, len);
     case 27:

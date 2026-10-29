@@ -39,7 +39,20 @@ static int add_quorums(riak_buf *url, const riak_opts *o, bool r, bool w, bool r
     if (rw && riak_url_append_quorum(url, "rw", o->rw) != 0) {
         return -1;
     }
-    return 0;
+    return riak_url_append_quorum(url, "node_confirms", o->node_confirms);
+}
+
+/* Put-only query parameters. */
+static int add_write_flags(riak_buf *url, const riak_opts *o) {
+    static const char *const sync[] = {NULL, "backend", "one", "all"};
+    if ((unsigned)o->sync_on_write > RIAK_SYNC_ALL) {
+        return -1;
+    }
+    if (sync[o->sync_on_write] &&
+        riak_url_append_query(url, "sync_on_write", sync[o->sync_on_write]) != 0) {
+        return -1;
+    }
+    return o->asis ? riak_url_append_query(url, "asis", "true") : 0;
 }
 
 enum op { OP_GET, OP_GET_SIBLINGS, OP_PUT, OP_DELETE };
@@ -50,6 +63,8 @@ static riak_status http_unsupported(riak_client *c, const riak_opts *o) {
                        : o->n_val           ? "n_val"
                        : o->if_modified     ? "if_modified"
                        : o->if_not_modified ? "if_not_modified"
+                       : o->return_head     ? "return_head"
+                       : o->deletedvclock   ? "deletedvclock"
                                             : NULL;
     if (what) {
         return riak_set_error(c, RIAK_E_UNSUPPORTED, "%s needs the Protocol Buffers transport",
@@ -312,7 +327,8 @@ riak_status riak_kv_prepare_put(riak_client *c, const char *bucket, const char *
     }
     if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
         add_quorums(&p->url, o, false, true, false) != 0 || add_timeout(&p->url, o) != 0 ||
-        (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0)) {
+        (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0) ||
+        add_write_flags(&p->url, o) != 0) {
         st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
     } else if ((st = object_headers(c, o, OP_PUT, &p->headers)) == RIAK_OK && copy_body) {
         p->body = malloc(len ? len : 1);

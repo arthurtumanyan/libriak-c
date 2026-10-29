@@ -327,8 +327,9 @@ riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *r
 }
 
 bool riak_request_idempotent(const riak_request *req) {
-    return strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0 ||
-           strcmp(req->method, "PUT") == 0 || strcmp(req->method, "DELETE") == 0;
+    return !req->no_retry &&
+           (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0 ||
+            strcmp(req->method, "PUT") == 0 || strcmp(req->method, "DELETE") == 0);
 }
 
 static riak_status perform(riak_client *c, const riak_request *req, riak_response *resp) {
@@ -369,6 +370,16 @@ void riak_response_free(riak_response *resp) {
     long status = resp->status;
     memset(resp, 0, sizeof *resp);
     resp->status = status;
+}
+
+riak_status riak_http_error_or_unsupported(riak_client *c, const riak_response *resp,
+                                           const char *what) {
+    static const char page[] = "<HTML><HEAD><TITLE>404 Not Found</TITLE>";
+    if (resp->status == 404 && resp->body.len >= sizeof page - 1 &&
+        memcmp(resp->body.data, page, sizeof page - 1) == 0) {
+        return riak_set_error(c, RIAK_E_UNSUPPORTED, "this node does not offer %s", what);
+    }
+    return riak_http_error(c, resp);
 }
 
 riak_status riak_http_error(riak_client *c, const riak_response *resp) {

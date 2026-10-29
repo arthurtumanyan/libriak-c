@@ -171,7 +171,8 @@ riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucke
     m.bucket = riak_pb_bin(bucket);
     m.key = riak_pb_bin(key);
     m.type = riak_pb_bin(type);
-    if (!riak_pb_quorum(o->r, &m.has_r, &m.r) || !riak_pb_quorum(o->pr, &m.has_pr, &m.pr)) {
+    if (!riak_pb_quorum(o->r, &m.has_r, &m.r) || !riak_pb_quorum(o->pr, &m.has_pr, &m.pr) ||
+        !riak_pb_quorum(o->node_confirms, &m.has_node_confirms, &m.node_confirms)) {
         return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
     }
     m.has_timeout = o->server_timeout_ms > 0;
@@ -428,6 +429,27 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
                               const riak_dt_op *op, const char *context, const riak_dt_opts *opts,
                               riak_datatype *out, char **created_key) {
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
+    if (op != NULL && op->type == RIAK_DT_GSET && o->return_body) {
+        /* Riak 3.4 cannot encode a grow-only set in an update response (its
+         * handler crashes and drops the connection); adding is idempotent,
+         * so the update is sent without return_body and the value fetched */
+        riak_dt_opts plain = *o;
+        plain.return_body = false;
+        char *generated = NULL;
+        riak_status st = riak_pb_dt_update(c, type, bucket, key, op, context, &plain, NULL,
+                                           key ? NULL : &generated);
+        if (st == RIAK_OK && out) {
+            riak_dt_opts fo = {.node_confirms = o->node_confirms,
+                               .server_timeout_ms = o->server_timeout_ms};
+            st = riak_pb_dt_fetch(c, type, bucket, key ? key : generated, &fo, out);
+        }
+        if (st == RIAK_OK && created_key) {
+            *created_key = generated;
+            generated = NULL;
+        }
+        free(generated);
+        return st;
+    }
     arena a = {0};
     DtOp dop;
     riak_status st = build_op(&a, op, &dop);
@@ -453,7 +475,8 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
         m.context = ctx;
     }
     if (!riak_pb_quorum(o->w, &m.has_w, &m.w) || !riak_pb_quorum(o->dw, &m.has_dw, &m.dw) ||
-        !riak_pb_quorum(o->pw, &m.has_pw, &m.pw)) {
+        !riak_pb_quorum(o->pw, &m.has_pw, &m.pw) ||
+        !riak_pb_quorum(o->node_confirms, &m.has_node_confirms, &m.node_confirms)) {
         free(ctx.data);
         arena_free(&a);
         return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");

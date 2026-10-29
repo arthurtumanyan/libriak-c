@@ -445,7 +445,10 @@ static void handle_response(riak_pbconn *k) {
         k->st = riak_pb_server_error(data, len, k->errmsg, sizeof k->errmsg, &retry);
         k->retry = retry;
         k->finished = true;
-        k->state = RIAK_PBC_READY;
+        /* a request the server's handler crashed on: Riak closes the
+         * connection right after this error, so it is not reused */
+        k->state = strstr(k->errmsg, "Error processing incoming message") ? RIAK_PBC_BROKEN
+                                                                          : RIAK_PBC_READY;
         return;
     }
     if (code != k->req->resp_code) {

@@ -132,6 +132,9 @@ static riak_status index_url(riak_client *c, const char *bucket, const riak_inde
     if (q->term_regex) {
         rc = rc || riak_url_append_query(url, "term_regex", q->term_regex);
     }
+    if (q->pagination_sort) {
+        rc = rc || riak_url_append_query(url, "pagination_sort", "true");
+    }
     if (q->server_timeout_ms) {
         snprintf(num, sizeof num, "%u", q->server_timeout_ms);
         rc = rc || riak_url_append_query(url, "timeout", num);

@@ -54,7 +54,8 @@ endif()
 
 find_package(Threads REQUIRED)
 add_executable(test_pb test_pb.c)
-target_link_libraries(test_pb PRIVATE riak riak_pbgen OpenSSL::SSL Threads::Threads riak_warnings)
+target_link_libraries(test_pb PRIVATE riak riak_pbgen OpenSSL::SSL ZLIB::ZLIB Threads::Threads
+                      riak_warnings)
 target_compile_definitions(test_pb PRIVATE _POSIX_C_SOURCE=200809L)
 add_test(NAME pb COMMAND test_pb)
 set_tests_properties(pb PROPERTIES TIMEOUT 60)
@@ -67,7 +68,7 @@ list(APPEND RIAK_PB_TEST_ENV TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DI
 set_tests_properties(pb PROPERTIES ENVIRONMENT "${RIAK_PB_TEST_ENV}")
 
 add_executable(test_threads test_threads.c)
-target_link_libraries(test_threads PRIVATE riak riak_pbgen OpenSSL::SSL Threads::Threads
+target_link_libraries(test_threads PRIVATE riak riak_pbgen OpenSSL::SSL ZLIB::ZLIB Threads::Threads
                       riak_warnings)
 target_compile_definitions(test_threads PRIVATE _POSIX_C_SOURCE=200809L)
 set(RIAK_THREADS_ENV LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp

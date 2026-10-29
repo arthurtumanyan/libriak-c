@@ -161,6 +161,18 @@ message RpbBucketProps {
 
     // Hyperlolog DT Precision
     optional uint32 hll_precision = 29;
+
+    enum SyncOnWrite{
+        // renamed for protoc (upstream: backend, one, all); "backend" is also
+        // a field of RpbBucketProps and enum values share its scope
+        sync_backend = 0;
+        sync_one = 1;
+        sync_all = 2;
+    }
+    // Post 2.2 bucket properties
+    optional uint32 node_confirms = 30;
+    optional SyncOnWrite sync_on_write = 31;
+    optional bool aae_tree_exclude = 32; 
 }
 
 // Authentication request

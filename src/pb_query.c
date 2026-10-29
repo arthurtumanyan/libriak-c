@@ -106,6 +106,8 @@ riak_status riak_pb_index(riak_client *c, const char *bucket, const riak_index_q
     }
     m.has_return_terms = q->return_terms;
     m.return_terms = q->return_terms;
+    m.has_pagination_sort = q->pagination_sort;
+    m.pagination_sort = q->pagination_sort;
     m.has_stream = 1;
     m.stream = 1;
     m.has_max_results = q->max_results > 0;

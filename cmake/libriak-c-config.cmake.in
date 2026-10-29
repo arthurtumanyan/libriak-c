@@ -4,6 +4,7 @@ include(CMakeFindDependencyMacro)
 find_dependency(CURL)
 find_dependency(json-c CONFIG)
 find_dependency(OpenSSL)
+find_dependency(ZLIB)
 find_dependency(PkgConfig)
 pkg_check_modules(PROTOBUFC REQUIRED IMPORTED_TARGET libprotobuf-c)
 

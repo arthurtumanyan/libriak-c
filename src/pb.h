@@ -19,6 +19,7 @@
 #include "riak.pb-c.h"
 #include "riak_dt.pb-c.h"
 #include "riak_kv.pb-c.h"
+#include "riak_repl.pb-c.h"
 #include "riak_search.pb-c.h"
 #include "riak_yokozuna.pb-c.h"
 
@@ -27,6 +28,8 @@ enum {
     RIAK_PB_ERROR_RESP = 0,
     RIAK_PB_PING_REQ = 1,
     RIAK_PB_PING_RESP = 2,
+    RIAK_PB_GET_CLIENT_ID_REQ = 3,
+    RIAK_PB_GET_CLIENT_ID_RESP = 4,
     RIAK_PB_SET_CLIENT_ID_REQ = 5,
     RIAK_PB_SET_CLIENT_ID_RESP = 6,
     RIAK_PB_GET_SERVER_INFO_REQ = 7,
@@ -57,6 +60,12 @@ enum {
     RIAK_PB_SET_BUCKET_TYPE_REQ = 32,
     RIAK_PB_GET_PREFLIST_REQ = 33,
     RIAK_PB_GET_PREFLIST_RESP = 34,
+    RIAK_PB_CS_BUCKET_REQ = 40,
+    RIAK_PB_CS_BUCKET_RESP = 41,
+    RIAK_PB_COUNTER_UPDATE_REQ = 50,
+    RIAK_PB_COUNTER_UPDATE_RESP = 51,
+    RIAK_PB_COUNTER_GET_REQ = 52,
+    RIAK_PB_COUNTER_GET_RESP = 53,
     RIAK_PB_YZ_INDEX_GET_REQ = 54,
     RIAK_PB_YZ_INDEX_GET_RESP = 55,
     RIAK_PB_YZ_INDEX_PUT_REQ = 56,
@@ -70,6 +79,32 @@ enum {
     RIAK_PB_DT_FETCH_RESP = 81,
     RIAK_PB_DT_UPDATE_REQ = 82,
     RIAK_PB_DT_UPDATE_RESP = 83,
+    RIAK_PB_REPL_GET_REQ = 128,
+    RIAK_PB_REPL_GET_CLUSTER_ID_REQ = 129,
+    RIAK_PB_REPL_GET_CLUSTER_ID_RESP = 130,
+    RIAK_PB_FETCH_REQ = 202,
+    RIAK_PB_FETCH_RESP = 203,
+    RIAK_PB_PUSH_REQ = 204,
+    RIAK_PB_PUSH_RESP = 205,
+    RIAK_PB_MEMBERSHIP_REQ = 206,
+    RIAK_PB_MEMBERSHIP_RESP = 207,
+    RIAK_PB_AAE_MERGE_ROOT_NVAL_REQ = 210,
+    RIAK_PB_AAE_MERGE_BRANCH_NVAL_REQ = 211,
+    RIAK_PB_AAE_FETCH_CLOCKS_NVAL_REQ = 212,
+    RIAK_PB_AAE_MERGE_TREES_RANGE_REQ = 213,
+    RIAK_PB_AAE_FETCH_CLOCKS_RANGE_REQ = 214,
+    RIAK_PB_AAE_FIND_KEYS_REQ = 215,
+    RIAK_PB_AAE_OBJECT_STATS_REQ = 216,
+    RIAK_PB_AAE_REPL_KEYS_REQ = 217,
+    RIAK_PB_AAE_FIND_TOMBS_REQ = 218,
+    RIAK_PB_AAE_REPAIR_KEYS_REQ = 219,
+    RIAK_PB_AAE_TREE_RESP = 220,
+    RIAK_PB_AAE_KEY_VALUE_RESP = 221,
+    RIAK_PB_AAE_KEY_COUNT_RESP = 222,
+    RIAK_PB_AAE_LIST_BUCKETS_REQ = 223,
+    RIAK_PB_AAE_LIST_BUCKETS_RESP = 224,
+    RIAK_PB_AAE_REAP_TOMBS_REQ = 230,
+    RIAK_PB_AAE_ERASE_KEYS_REQ = 231,
     RIAK_PB_AUTH_REQ = 253,
     RIAK_PB_AUTH_RESP = 254,
     RIAK_PB_START_TLS = 255
@@ -276,6 +311,22 @@ riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucke
 riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *bucket, const char *key,
                               const riak_dt_op *op, const char *context, const riak_dt_opts *o,
                               riak_datatype *out, char **created_key);
+
+/* ---- Riak 2.9+/3.x operations (pb_kv.c, pb_ext.c) -------------------- */
+
+riak_status riak_pb_set_type_props(riak_client *c, const char *type, const char *json);
+riak_status riak_pb_client_id(riak_client *c, char **id);
+riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key, bool update,
+                            int64_t amount, const riak_opts *o, int64_t *value);
+riak_status riak_pb_fold_objects(riak_client *c, const char *bucket, const riak_fold_query *q,
+                                 riak_object_cb cb, void *ctx, char **continuation);
+riak_status riak_pb_cluster_id(riak_client *c, char **id);
+riak_status riak_pb_repl_get(riak_client *c, const char *cluster_id, const char *bucket,
+                             const char *key, const riak_opts *o, riak_object *out);
+riak_status riak_pb_repl_fetch(riak_client *c, const char *queue, riak_repl_fetch_result *out);
+riak_status riak_pb_repl_push(riak_client *c, const char *queue, const riak_repl_key *keys,
+                              size_t n, riak_repl_push_result *out);
+riak_status riak_pb_membership(riak_client *c, riak_members *out);
 
 /* ---- encoding helpers shared with the async API (pb_kv.c) ------------ */
 

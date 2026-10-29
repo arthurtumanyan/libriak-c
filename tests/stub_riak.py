@@ -18,6 +18,9 @@ With --tls (certificates from tests/gen_certs.sh) every node speaks HTTPS:
 node 0 requires Basic auth "riak:s3cret", node 1 requires a client
 certificate signed by the test CA, node 2 requires neither.
   GET /_hits  -> number of requests this node received (resets it)
+  GET /_old?set=1  -> answer the Riak 2.9+/3.x endpoints with Webmachine's
+                      404 page, as Riak 2.2 does
+  GET /_v3?set=1   -> answer like Riak 3.x where it differs (preflists)
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
 vclock create siblings). Special buckets: "many" (1000 streamed keys),
@@ -27,6 +30,7 @@ vclock create siblings). Special buckets: "many" (1000 streamed keys),
 """
 
 import base64
+import zlib
 import itertools
 import json
 import os
@@ -46,6 +50,8 @@ DATATYPES = {}      # (type, bucket, key) -> python value
 DT_FIELD_TYPES = ("counter", "set", "map", "register", "flag")
 STORE = {}          # (type, bucket, key) -> {"vclock": str, "siblings": [obj]}
 PROPS = {}          # (type, bucket) -> dict
+TYPE_PROPS = {}     # type -> props set with PUT /types/<t>/props
+COUNTERS = {}       # (bucket, key) -> Riak 1.4 counter value
 LAST = {}
 LOCK = threading.Lock()
 COUNTER = itertools.count(1)
@@ -217,6 +223,212 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    # ---- Riak 2.9+/3.x endpoints ------------------------------------------
+    # Formats follow what Riak 3.4 sends: base64 values as JSON arrays of
+    # character codes (Erlang strings), filters as base64 of JSON.
+    WEBMACHINE_404 = ("<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD><BODY><H1>Not Found</H1>"
+                      "The requested document was not found on this server.</BODY></HTML>")
+
+    @staticmethod
+    def _chars(data):
+        return list(base64.b64encode(data))
+
+    @staticmethod
+    def _filter(query):
+        raw = query.get("filter", [None])[0]
+        decoded = json.loads(base64.b64decode(raw)) if raw else None
+        with LOCK:
+            LAST["filter"] = decoded  # for assertions
+        return decoded
+
+    def _keys_clocks(self, typed):
+        entries = []
+        for key in ("k1", "k2"):
+            e = {"bucket": "aaeb", "key": key, "clock": self._chars(b"\x6b\xce\x00\x61\x60\x01")}
+            if typed:
+                e["bucket-type"] = "maps"
+            entries.append(e)
+        return {"keys-clocks": entries}
+
+    def _malformed(self, parts):
+        """Documents of the right name but the wrong shape."""
+        if self.server.malformed == 2:
+            if parts[0] == "rangetrees" and "trees" in parts:
+                branch = self._chars(zlib.compress(b"\x01" * 1024))
+                self._json(200, {"tree": {"level1": self._chars(b"\x01" * 64),
+                                          "level2": {"1x": branch}}})
+            elif parts[0] == "objectstats":
+                self._json(200, {"total_count": 1, "sizes": {"2x": 1}})
+            else:
+                self._json(200, {"dispatched_count": -1})
+            return True
+        if parts[0] == "rangetrees" and "trees" in parts:
+            self._json(200, {"tree": {"level1": self._chars(b"\x01" * 64), "level2": "AAAA"}})
+        elif parts[0] == "membership_request":
+            self._json(200, {"up_nodes": [{"ip": "10.0.0.7", "port": "99999"}]})
+        elif parts[0] == "objectstats":
+            self._json(200, {"total_count": 1, "sizes": {"two": 3}})
+        elif parts[0] == "queuename":
+            self._send(200, b"\x01\x00\x00", {"Content-Type": "application/octet-stream"})
+        elif parts[0] == "cachedtrees":
+            self._json(200, {"branches": {"not": "a list"}, "keys-clocks": 7, "root": 5})
+        else:
+            self._json(200, {"results": "nope", "keys-clocks": {}, "dispatched_count": "x"})
+        return True
+
+    def _ext_get(self, parts, query):
+        """Newer read endpoints; True when handled."""
+        newer = ("cachedtrees", "rangetrees", "siblings", "objectsizes", "objectstats", "tombs",
+                 "reap", "erase", "rangerepair", "rangerepl", "aaebucketlist", "queuename",
+                 "membership_request")
+        if parts[0] in newer and self.server.old:
+            self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
+            return True
+        if parts[0] in newer:
+            self.server.newer_hits += 1
+            if self.server.drop > 0:
+                self.server.drop -= 1
+                self.close_connection = True  # read, maybe applied, never answered
+                return True
+        if parts[0] in newer and self.server.malformed:
+            return self._malformed(parts)
+        if parts[0] == "cachedtrees":
+            what = parts[3]
+            if what == "root":
+                self._json(200, {"root": self._chars(b"\xab" + b"\x00" * 16383)})
+            elif what == "branch":
+                ids = self._filter(query) or []
+                self._json(200, {"branches": [
+                    {"branch-id": i, "branch": base64.b64encode(bytes([0x20 + n]) * 1024).decode()}
+                    for n, i in enumerate(ids)]})
+            else:
+                self._json(200, self._keys_clocks(False))
+            return True
+        if parts[0] in ("rangetrees", "siblings", "objectsizes", "objectstats", "tombs", "reap",
+                        "erase", "rangerepair", "rangerepl"):
+            typed = len(parts) > 2 and parts[1] == "types"
+            rest = parts[3:] if typed else parts[1:]  # buckets, B, ...
+            self._filter(query)
+            if parts[0] == "rangetrees" and rest[2] == "trees":
+                width = {"xxsmall": 16, "xsmall": 64, "small": 256, "medium": 1024,
+                         "large": 4096, "xlarge": 16384}[rest[3]]
+                level2 = {str(i): self._chars(zlib.compress(bytes([0x30 + i]) * 1024))
+                          for i in range(2)}
+                self._json(200, {"tree": {"level1": self._chars(b"\x01" * (width * 4)),
+                                          "level2": level2}})
+            elif parts[0] in ("rangetrees", "tombs"):
+                self._json(200, self._keys_clocks(typed))
+            elif parts[0] in ("siblings", "objectsizes"):
+                self._json(200, {"results": [{"key": "big-key", "value": 4096}]})
+            elif parts[0] == "objectstats":
+                self._json(200, {"total_count": 12, "total_size": 3400,
+                                 "sizes": {"2": 10, "3": 2}, "siblings": {"1": 12}})
+            else:
+                counts = {"reap": 7, "erase": 8, "rangerepair": 6, "rangerepl": 5}
+                self._json(200, {"dispatched_count": counts[parts[0]]})
+            return True
+        if parts[0] == "aaebucketlist":
+            self._json(200, {"results": [{"bucket": "plain"},
+                                         {"bucket-type": "maps", "bucket": "typed"}]})
+            return True
+        if parts[0] == "membership_request":
+            self._json(200, {"up_nodes": [{"ip": "10.0.0.7", "port": "8087"}]})
+            return True
+        if parts[0] == "queuename":
+            queue = parts[1]
+            obj = b"\x83\x68\x02\x01\x02\x03"
+            head = b"\x01"
+            seg = (77).to_bytes(4, "big") + (88).to_bytes(4, "big")
+            crc = (0xDEADBEEF).to_bytes(4, "big")
+            if queue == "empty":
+                body = b"\x00"
+            elif queue == "gone":
+                self._send(500, "<html><head><title>500 Internal Server Error</title></head>"
+                                "<body>{error,notfound}</body></html>")
+                return True
+            elif queue == "tomb":
+                clock = b"\x83\x6a"  # term_to_binary([]): an empty clock
+                body = head + b"\x01" + seg + len(clock).to_bytes(4, "big") + clock + crc + obj
+            else:
+                body = head + b"\x00" + seg + crc + obj
+            self._send(200, body, {"Content-Type": "application/octet-stream"})
+            return True
+        return False
+
+    def _query_api(self, btype, bucket, query):
+        if self.server.old:
+            self._body()  # a request body left unread would break keep-alive
+            self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
+            return
+        if self.server.drop > 0:
+            self.server.drop -= 1
+            self.server.newer_hits += 1
+            self.close_connection = True
+            return
+        if self.server.malformed:
+            self._body()
+            self._json(200, {"keys": ["a", "b", "c"], "terms": [{"t": "k"}]})
+            return
+        if "result_queue" in query:
+            self._json(200, {"query_complete": True, "queued_count": 3, "returned_count": 3,
+                             "raw_keys": ["q1", "q2", "q3"]})
+            return
+        req = json.loads(self._body() or b"{}")
+        with LOCK:
+            LAST["query"] = req
+        opt = req.get("accumulation_option", "keys")
+        if not req.get("query_list"):
+            self._json(400, {"error": "No valid query provided"})
+        elif opt in ("keys", "raw_keys"):
+            headers = {"X-Riak-Continuation": "c2"} if req.get("max_results") else {}
+            self._send(200, json.dumps({opt: ["p1", "p2"]}),
+                       dict({"Content-Type": "application/json"}, **headers))
+        elif opt in ("terms", "raw_terms"):
+            self._json(200, {opt: [{"t1": "p1"}, {"t2": "p2"}]})
+        elif opt in ("count", "raw_count"):
+            self._json(200, {opt: 2})
+        elif opt in ("term_with_count", "term_with_rawcount"):
+            self._json(200, {opt: {"t1": 3}})
+        elif opt.startswith("queue_"):
+            self._json(200, {"result_queue": "g2gD"})
+        else:
+            self._json(400, {"error": "bad accumulation_option"})
+
+    def _link_walk(self, btype, bucket, key, steps):
+        """/buckets/b/keys/k/<b,t,keep>/...: alice -> bob (friend), carol (boss)."""
+        graph = {"alice": [("bob", "friend"), ("carol", "boss")], "bob": [("carol", "boss")],
+                 "carol": [], "kim": [("kate", "friend")], "kate": []}
+        if key not in graph:
+            self._send(404, self.WEBMACHINE_404, {"Content-Type": "text/html"})
+            return
+        current, phases = [key], []
+        for n, step in enumerate(steps):
+            want_b, want_t, keep = step.split(",")
+            nxt = []
+            for k in current:
+                for target, tag in graph.get(k, []):
+                    if want_t in ("_", tag) and want_b in ("_", bucket) and target not in nxt:
+                        nxt.append(target)
+            current = nxt
+            if keep == "1" or (keep == "_" and n == len(steps) - 1):
+                phases.append(list(current))
+        outer = "OUTER"
+        body = b""
+        for p, keys in enumerate(phases):
+            inner = f"INNER{p}"
+            part = b""
+            for k in keys:
+                quoted = quote(bucket).replace('%20', '+')
+                loc = (f"/riak/{quoted}/{k}" if self.server.legacyloc
+                       else f"/buckets/{quoted}/keys/{k}")
+                part += (f"\r\n--{inner}\r\nX-Riak-Vclock: a85hYGBg\r\nLocation: {loc}\r\n"
+                         f"Content-Type: text/plain\r\n\r\nobject-{k}").encode()
+            part += f"\r\n--{inner}--\r\n".encode()
+            body += (f"\r\n--{outer}\r\nContent-Type: multipart/mixed; boundary={inner}\r\n\r\n"
+                     .encode() + part)
+        body += f"\r\n--{outer}--\r\n".encode()
+        self._send(200, body, {"Content-Type": f"multipart/mixed; boundary={outer}"})
+
     # ---- GET ----------------------------------------------------------
     def do_HEAD(self):
         self.do_GET()
@@ -232,7 +444,27 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["_hits"]:
             hits, self.server.hits = self.server.hits, 0
             return self._json(200, {"hits": hits})
+        if parts == ["_old"]:
+            self.server.old = query.get("set", ["0"])[0] == "1"
+            return self._send(204)
+        if parts == ["_v3"]:
+            self.server.v3 = query.get("set", ["0"])[0] == "1"
+            return self._send(204)
+        if parts == ["_malformed"]:
+            self.server.malformed = int(query.get("set", ["0"])[0])
+            return self._send(204)
+        if parts == ["_legacyloc"]:
+            self.server.legacyloc = query.get("set", ["0"])[0] == "1"
+            return self._send(204)
+        if parts == ["_drop"]:
+            self.server.drop = int(query.get("set", ["0"])[0])
+            return self._send(204)
+        if parts == ["_newer_hits"]:
+            hits, self.server.newer_hits = self.server.newer_hits, 0
+            return self._json(200, {"hits": hits})
         if self._failing():
+            return None
+        if self._ext_get(parts, query):
             return None
         if len(parts) == 4 and parts[1] == "needs-https":
             return self._send(426, "Security is enabled and Riak does not accept credentials "
@@ -259,6 +491,22 @@ class Handler(BaseHTTPRequestHandler):
                 names = sorted({b for t, b, _ in STORE if t == btype} | {STREAM_BUCKET})
             body = "".join(json.dumps({"buckets": names[i:i + 2]}) for i in range(0, len(names), 2))
             return self._send(200, '{"buckets":[]}' + body, {"Content-Type": "application/json"})
+        if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "query":
+            return self._query_api(btype, parts[1], query)
+        if len(parts) == 4 and parts[0] == "buckets" and parts[2] == "counters":
+            with LOCK:
+                value = COUNTERS.get((parts[1], parts[3]))
+            if self.server.malformed == 2:
+                value = "99999999999999999999"  # beyond int64
+            return self._send(404, "not found\n") if value is None else \
+                self._send(200, str(value), {"Content-Type": "text/plain"})
+        if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "keys" and \
+                parts[4] != "preflist":
+            return self._link_walk(btype, parts[1], parts[3], parts[4:])
+        if len(parts) == 5 and parts[0] == "buckets" and parts[4] == "preflist" and \
+                self.server.v3:
+            return self._send(400, "Invalid link walk query submitted. Valid link walk query "
+                                   "format is: /riak/some_bucket/some_key/<bucket>,<riaktag>,0|1/...")
         if len(parts) == 5 and parts[0] == "buckets" and parts[4] == "preflist":
             return self._json(200, {"preflist": [
                 {"partition": 0, "node": "riak@a", "primary": True},
@@ -543,6 +791,14 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[:2] == ["search", "schema"]:
             SCHEMAS[parts[2]] = self._body().decode()
             return self._send(204)
+        if len(parts) == 3 and parts[0] == "types" and parts[2] == "props":
+            try:
+                props = json.loads(self._body() or b"{}").get("props", {})  # _body() locks
+            except ValueError:
+                return self._send(400, "Malformed JSON\n")
+            with LOCK:
+                TYPE_PROPS[parts[1]] = props
+            return self._send(204)
         if btype not in TYPES:
             self._body()
             return self._send(404, "no such bucket type\n")
@@ -565,6 +821,16 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if parts == ["mapred"]:
             return self._mapred(query)
+        if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "query":
+            return self._query_api(btype, parts[1], query)
+        if len(parts) == 4 and parts[0] == "buckets" and parts[2] == "counters":
+            amount = int(self._body() or b"0")
+            with LOCK:
+                COUNTERS[(parts[1], parts[3])] = COUNTERS.get((parts[1], parts[3]), 0) + amount
+                value = COUNTERS[(parts[1], parts[3])]
+            if query.get("returnvalue") == ["true"]:
+                return self._send(200, str(value), {"Content-Type": "text/plain"})
+            return self._send(204)
         if len(parts) in (3, 4) and parts[0] == "buckets" and parts[2] == "datatypes":
             return self._dt_update(btype, parts[1], parts[3] if len(parts) == 4 else None, query)
         if len(parts) == 3 and parts[0] == "buckets" and parts[2] == "keys":
@@ -605,6 +871,12 @@ class Server(ThreadingHTTPServer):
     mode = "ok"
     hits = 0
     auth = None
+    old = False  # answer the Riak 2.9+/3.x endpoints like Riak 2.2 (no resource)
+    v3 = False   # answer like Riak 3.x where it differs (no HTTP preflists)
+    malformed = 0  # 1: wrongly typed documents; 2: numbers out of range or with junk
+    legacyloc = False  # link walker Locations in the old /riak/<b>/<k> form
+    drop = 0           # requests to the newer endpoints closed without an answer
+    newer_hits = 0     # requests that reached the newer endpoints
 
     def handle_error(self, request, client_address):
         # clients aborting a transfer (e.g. the body size limit) are expected

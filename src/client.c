@@ -58,21 +58,21 @@ const char *riak_strerror(riak_status status) {
     case RIAK_E_CANCELLED:
         return "cancelled";
     case RIAK_E_UNSUPPORTED:
-        return "not supported by the transport";
+        return "not supported by the transport or node";
     case RIAK_E_SERVER:
         return "server error";
     }
     return "unknown error";
 }
 
-riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...) {
+int riak_format_error(riak_client *c, const char *fmt, ...) {
     if (c != NULL) {
         va_list ap;
         va_start(ap, fmt);
         (void)vsnprintf(c->errmsg, sizeof c->errmsg, fmt, ap);
         va_end(ap);
     }
-    return st;
+    return 0;
 }
 
 void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) {

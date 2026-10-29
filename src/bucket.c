@@ -318,23 +318,31 @@ riak_status riak_get_type_props(riak_client *client, const char *type, char **js
     return st;
 }
 
+riak_status riak_http_target(riak_client *c, const char *what, size_t *pin) {
+    *pin = 0;
+    if (!riak_is_pb(c)) {
+        return RIAK_OK;
+    }
+    /* Protocol Buffers lacks the request: the node's HTTP port serves it */
+    for (size_t i = 0; i < c->n_nodes; i++) {
+        if (c->nodes[i].base != NULL) {
+            *pin = i + 1;
+            return RIAK_OK;
+        }
+    }
+    return riak_set_error(c, RIAK_E_UNSUPPORTED, "%s need an HTTP port (riak_config.http_port)",
+                          what);
+}
+
 riak_status riak_stats(riak_client *client, char **json) {
     if (client == NULL || json == NULL) {
         return RIAK_E_INVALID_ARG;
     }
     *json = NULL;
-    size_t pin = 0;
-    if (riak_is_pb(client)) {
-        /* Protocol Buffers has no statistics: the node's HTTP port serves them */
-        for (size_t i = 0; pin == 0 && i < client->n_nodes; i++) {
-            if (client->nodes[i].base != NULL) {
-                pin = i + 1;
-            }
-        }
-        if (pin == 0) {
-            return riak_set_error(client, RIAK_E_UNSUPPORTED,
-                                  "statistics need an HTTP port (riak_config.http_port)");
-        }
+    size_t pin;
+    riak_status target = riak_http_target(client, "statistics", &pin);
+    if (target != RIAK_OK) {
+        return target;
     }
     riak_request req = {.method = "GET", .url = "/stats", .pin = pin};
     riak_response resp = {0};
@@ -493,6 +501,13 @@ riak_status riak_get_preflist(riak_client *client, const char *type, const char 
     char *body = NULL;
     st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, &body);
     riak_buf_free(&url);
+    if (st == RIAK_E_HTTP && riak_client_http_status(client) == 400 &&
+        strstr(riak_client_errmsg(client), "link walk") != NULL) {
+        /* Riak 3.x serves preference lists over Protocol Buffers only; the
+         * path then reaches the link walker */
+        return riak_set_error(client, RIAK_E_UNSUPPORTED,
+                              "this node serves preference lists over Protocol Buffers only");
+    }
     if (st != RIAK_OK) {
         return st;
     }

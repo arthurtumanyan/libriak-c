@@ -351,56 +351,6 @@ static void test_mapred(void) {
     riak_client_free(c);
 }
 
-/* A callback that calls back into the client running it is refused: it would
- * otherwise reuse the connection of the stream in progress. */
-typedef struct {
-    riak_client *c;
-    int calls;
-    riak_status ping, get, nested;
-} reentry;
-
-static bool reenter_name(const char *name, size_t len, void *ctx) {
-    reentry *r = ctx;
-    (void)name;
-    (void)len;
-    if (r->calls++ == 0) {
-        riak_object o;
-        r->ping = riak_ping(r->c);
-        CHECK(strstr(riak_client_errmsg(r->c), "busy") != NULL);
-        r->get = riak_get(r->c, "b", "k", NULL, &o);
-        riak_client_free(r->c); /* ignored: the client is in use */
-    }
-    return true;
-}
-
-static bool reenter_phase(unsigned phase, const char *data, void *ctx) {
-    reentry *r = ctx;
-    (void)phase;
-    (void)data;
-    if (r->calls++ == 0) {
-        names n = {0};
-        r->nested = riak_list_keys_stream(r->c, NULL, "b", on_name, &n);
-        CHECK_EQ_INT(n.n, 0);
-    }
-    return true;
-}
-
-static void test_reentry_refused(void) {
-    riak_client *c = client();
-    reentry r = {.c = c, .ping = RIAK_OK, .get = RIAK_OK};
-    CHECK_EQ_INT(riak_list_keys_stream(c, NULL, "b", reenter_name, &r), RIAK_OK);
-    CHECK_EQ_INT(r.calls, 3); /* the outer stream is unharmed */
-    CHECK_EQ_INT(r.ping, RIAK_E_INVALID_ARG);
-    CHECK_EQ_INT(r.get, RIAK_E_INVALID_ARG);
-    reentry m = {.c = c, .nested = RIAK_OK};
-    CHECK_EQ_INT(riak_mapred_stream(c, "{\"inputs\":\"b\"}", reenter_phase, &m), RIAK_OK);
-    CHECK_EQ_INT(m.calls, 3);
-    CHECK_EQ_INT(m.nested, RIAK_E_INVALID_ARG);
-    /* the guard is released once the outer call returns */
-    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
-    riak_client_free(c);
-}
-
 static void test_datatypes(void) {
     riak_client *c = client();
     riak_datatype dt;
@@ -506,6 +456,16 @@ static void test_idle_close(void) {
 }
 
 static void test_errors_retries(void) {
+    /* the system's text for the connect error (strerror_r) reaches the message */
+    riak_config closed;
+    riak_config_init(&closed);
+    closed.port = 1;
+    closed.max_retries = 0;
+    riak_client *cc = client_cfg(&closed);
+    CHECK_EQ_INT(riak_ping(cc), RIAK_E_TRANSPORT);
+    CHECK(strstr(riak_client_errmsg(cc), "127.0.0.1:1") != NULL);
+    CHECK(strstr(riak_client_errmsg(cc), "Connection refused") != NULL);
+    riak_client_free(cc);
     riak_node nodes[2] = {{"127.0.0.1", port, 0}, {"127.0.0.1", port, 0}};
     riak_config cfg;
     riak_config_init(&cfg);
@@ -575,6 +535,719 @@ static void test_errors_retries(void) {
     CHECK_EQ_INT(riak_get_coverage(c, NULL, "b", 0, &plan), RIAK_E_UNSUPPORTED);
     riak_opts sloppy = {.sloppy_quorum = true};
     CHECK_EQ_INT(riak_get(c, "b", "k", &sloppy, &o), RIAK_E_UNSUPPORTED);
+    riak_client_free(c);
+}
+
+/* ---- Riak 2.9+/3.x calls ------------------------------------------------- */
+
+static void test_new_options_pb(void) {
+    riak_client *c = client();
+    riak_opts put = {.content_type = "text/plain",
+                     .node_confirms = RIAK_Q_QUORUM,
+                     .sync_on_write = RIAK_SYNC_ALL,
+                     .asis = true};
+    CHECK_EQ_INT(riak_put(c, "b", "k", "v", 1, &put, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.node_confirms, 4294967293u);
+    CHECK_EQ_INT(ext.put_sync, 3); /* all = 2, recorded +1 */
+    CHECK_EQ_INT(ext.put_asis, 1);
+    for (riak_sync s = RIAK_SYNC_BACKEND; s <= RIAK_SYNC_ALL; s++) {
+        riak_opts so = {.sync_on_write = s};
+        CHECK_EQ_INT(riak_put(c, "b", "k", "v", 1, &so, NULL, NULL), RIAK_OK);
+        CHECK_EQ_INT(ext.put_sync, (unsigned)s); /* backend 0, one 1, all 2; recorded + 1 */
+    }
+    riak_opts no_sync = {0};
+    CHECK_EQ_INT(riak_put(c, "b", "k", "v", 1, &no_sync, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.put_sync, 0);
+    riak_opts bad_sync = {.sync_on_write = (riak_sync)9};
+    CHECK_EQ_INT(riak_put(c, "b", "k", "v", 1, &bad_sync, NULL, NULL), RIAK_E_INVALID_ARG);
+
+    riak_object o;
+    riak_opts head = {.return_head = true};
+    CHECK_EQ_INT(riak_put(c, "b", "k", "value", 5, &head, &o, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.put_return_head, 1);
+    CHECK_EQ_INT(o.len, 0);
+    CHECK_EQ_STR(o.vclock, VCLOCK_B64);
+    riak_object_free(&o);
+
+    riak_opts nc = {.node_confirms = 2};
+    CHECK_EQ_INT(riak_get(c, "b", "k", &nc, &o), RIAK_OK);
+    CHECK_EQ_INT(ext.node_confirms, 2);
+    riak_object_free(&o);
+    CHECK_EQ_INT(riak_delete(c, "b", "k", &nc), RIAK_E_UNSUPPORTED);
+
+    riak_opts dv = {.deletedvclock = true};
+    CHECK_EQ_INT(riak_get(c, "b", "tombdv", &dv, &o), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(ext.get_deletedvclock, 1);
+    CHECK(o.deleted);
+    CHECK_EQ_STR(o.vclock, VCLOCK_B64);
+    riak_object_free(&o);
+    CHECK_EQ_INT(riak_get(c, "b", "tombdv", NULL, &o), RIAK_E_NOT_FOUND);
+    CHECK(o.vclock == NULL && !o.deleted);
+
+    riak_index_query q = {
+        .index = "age_int", .range_min = "1", .range_max = "9", .pagination_sort = true};
+    riak_index_result r;
+    CHECK_EQ_INT(riak_index_query_run(c, "b", &q, &r), RIAK_OK);
+    CHECK_EQ_INT(ext.index_pagination_sort, 1);
+    riak_index_result_free(&r);
+
+    riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(op, 1);
+    riak_dt_opts dto = {.node_confirms = 3};
+    CHECK_EQ_INT(riak_dt_update(c, "counters", "b", "k", op, NULL, &dto, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.dt_node_confirms, 3);
+    riak_dt_op_free(op);
+
+    /* gset + return_body: sent without return_body, then fetched (Riak 3.4
+     * would crash and drop the connection otherwise) */
+    op = riak_dt_op_new(RIAK_DT_GSET);
+    riak_dt_op_add(op, "x");
+    riak_dt_opts rb = {.return_body = true};
+    riak_datatype dt;
+    unsigned fetches = ext.dt_fetches;
+    int dropped = atomic_load(&ext.dropped);
+    CHECK_EQ_INT(riak_dt_update(c, "counters", "b", "k", op, NULL, &rb, &dt, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.dt_return_body, 0);
+    CHECK_EQ_INT(ext.dt_fetches - fetches, 1);
+    CHECK_EQ_INT(atomic_load(&ext.dropped), dropped);
+    CHECK_EQ_INT(dt.value.type, RIAK_DT_COUNTER); /* whatever the fetch returned */
+    riak_datatype_free(&dt);
+    riak_dt_op_free(op);
+    riak_client_free(c);
+}
+
+static void test_props_counters_ids(void) {
+    riak_client *c = client();
+    CHECK_EQ_INT(riak_set_type_props(c, "maps", "{\"props\":{\"notfound_ok\":false}}"), RIAK_OK);
+    CHECK_EQ_STR(ext.type_props_type, "maps");
+    CHECK_EQ_INT(ext.type_notfound_ok, 0);
+    CHECK_EQ_INT(riak_set_type_props(c, "maps", "{\"props\":{\"bogus\":1}}"), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_set_type_props(c, "", "{}"), RIAK_E_INVALID_ARG);
+
+    /* new bucket props round-trip through the JSON mapping */
+    CHECK_EQ_INT(
+        riak_set_bucket_props(c, "b",
+                              "{\"props\":{\"node_confirms\":\"quorum\",\"sync_on_write\":\"one\","
+                              "\"aae_tree_exclude\":true}}"),
+        RIAK_OK);
+    CHECK_EQ_INT(ext.props_sync, 1 + 1);                    /* one */
+    CHECK_EQ_INT(ext.props_node_confirms, 4294967293u + 1); /* quorum */
+    CHECK_EQ_INT(ext.props_aae_exclude, 1);
+    const char *syncs[] = {"backend", "one", "all"};
+    for (unsigned i = 0; i < 3; i++) {
+        char props[96];
+        snprintf(props, sizeof props, "{\"props\":{\"sync_on_write\":\"%s\",\"node_confirms\":%u}}",
+                 syncs[i], i + 1);
+        CHECK_EQ_INT(riak_set_bucket_props(c, "b", props), RIAK_OK);
+        CHECK_EQ_INT(ext.props_sync, i + 1);
+        CHECK_EQ_INT(ext.props_node_confirms, i + 2);
+        CHECK_EQ_INT(ext.props_aae_exclude, -1);
+    }
+    CHECK_EQ_INT(riak_set_bucket_props(c, "b", "{\"props\":{\"sync_on_write\":\"never\"}}"),
+                 RIAK_E_INVALID_ARG);
+    char *props = NULL;
+    CHECK_EQ_INT(riak_get_bucket_props(c, "b", &props), RIAK_OK);
+    CHECK(props && strstr(props, "\"sync_on_write\":\"one\"") &&
+          strstr(props, "\"node_confirms\":2") && strstr(props, "\"aae_tree_exclude\":true"));
+    riak_free(props);
+
+    char *id = NULL;
+    CHECK_EQ_INT(riak_get_client_id(c, &id), RIAK_OK);
+    CHECK_EQ_STR(id, "AQID"); /* base64 of 01 02 03 */
+    riak_free(id);
+    CHECK_EQ_INT(riak_get_cluster_id(c, &id), RIAK_OK);
+    CHECK_EQ_STR(id, "{'riak@stub',{1,2,3}}");
+    riak_free(id);
+
+    int64_t v = 0;
+    CHECK_EQ_INT(riak_counter_get(c, "b", "c", NULL, &v), RIAK_OK);
+    CHECK_EQ_INT(v, 42);
+    CHECK_EQ_INT(ext.counter_r, 0);
+    CHECK_EQ_INT(ext.counter_basic_quorum, -1);
+    riak_opts rq = {.r = 2, .basic_quorum = true, .notfound_ok = true};
+    CHECK_EQ_INT(riak_counter_get(c, "b", "c", &rq, &v), RIAK_OK);
+    CHECK_EQ_INT(ext.counter_r, 2);
+    CHECK_EQ_INT(ext.counter_basic_quorum, 1);
+    CHECK_EQ_INT(ext.counter_notfound_ok, 1);
+    CHECK_EQ_INT(riak_counter_get(c, "b", "missing", NULL, &v), RIAK_E_NOT_FOUND);
+    riak_opts nc = {.node_confirms = 1};
+    CHECK_EQ_INT(riak_counter_update(c, "b", "c", -5, &nc, &v), RIAK_OK);
+    CHECK_EQ_INT(ext.counter_amount, -5);
+    CHECK_EQ_INT(ext.counter_returnvalue, 1);
+    CHECK_EQ_INT(ext.node_confirms, 1);
+    CHECK_EQ_INT(v, 35);
+    CHECK_EQ_INT(riak_counter_update(c, "b", "c", 3, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(ext.counter_returnvalue, 0);
+    riak_opts typed = {.bucket_type = "maps"};
+    CHECK_EQ_INT(riak_counter_get(c, "b", "c", &typed, &v), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_counter_get(c, "b", "c", NULL, NULL), RIAK_E_INVALID_ARG);
+
+    riak_object o;
+    CHECK_EQ_INT(riak_repl_get(c, "cluster-a", "b", "k", NULL, &o), RIAK_OK);
+    CHECK_EQ_STR(ext.repl_cluster, "cluster-a");
+    CHECK_EQ_STR(o.data, "proxied");
+    riak_object_free(&o);
+    CHECK_EQ_INT(riak_repl_get(c, "cluster-a", "b", "missing", NULL, &o), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_repl_get(c, "cluster-a", "b", "k", &typed, &o), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_repl_get(c, "", "b", "k", NULL, &o), RIAK_E_INVALID_ARG);
+    riak_client_free(c);
+}
+
+typedef struct {
+    int n;
+    char last[16];
+    int stop_at;
+} fold_count;
+
+static bool on_fold(const char *key, riak_object *obj, void *ctx) {
+    fold_count *f = ctx;
+    f->n++;
+    snprintf(f->last, sizeof f->last, "%s", key);
+    CHECK(obj->data && strncmp(obj->data, "fold-", 5) == 0);
+    CHECK_EQ_STR(obj->vclock, VCLOCK_B64);
+    return f->stop_at == 0 || f->n < f->stop_at;
+}
+
+static void test_fold_and_links(void) {
+    riak_client *c = client();
+    fold_count f = {0};
+    char *next = NULL;
+    riak_fold_query q = {.start_key = "f1",
+                         .end_key = "f9",
+                         .start_exclusive = true,
+                         .end_inclusive = true,
+                         .max_results = 2};
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &q, on_fold, &f, &next), RIAK_OK);
+    CHECK_EQ_INT(f.n, 2);
+    CHECK_EQ_STR(f.last, "f2");
+    CHECK_EQ_STR(next, "next-page");
+    CHECK_EQ_STR(ext.fold_start, "f1");
+    CHECK_EQ_STR(ext.fold_end, "f9");
+    CHECK_EQ_INT(ext.fold_start_incl, 0);
+    CHECK_EQ_INT(ext.fold_end_incl, 1);
+    CHECK_EQ_STR(ext.fold_bucket, "b");
+    CHECK_EQ_INT(ext.fold_max, 2);
+    CHECK_EQ_STR(ext.fold_cont, "");
+    CHECK_EQ_STR(ext.fold_type, "");
+    /* the next page carries the continuation and the bucket type */
+    riak_fold_query page = q;
+    page.continuation = next;
+    page.bucket_type = "maps";
+    fold_count f2 = {0};
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &page, on_fold, &f2, NULL), RIAK_OK);
+    CHECK_EQ_STR(ext.fold_cont, "next-page");
+    CHECK_EQ_STR(ext.fold_type, "maps");
+    riak_free(next);
+    fold_count stop = {.stop_at = 1};
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &q, on_fold, &stop, NULL), RIAK_OK);
+    CHECK_EQ_INT(stop.n, 1);
+    /* an error after a page's continuation: no continuation is returned */
+    char *after = NULL;
+    fold_count f3 = {0};
+    CHECK_EQ_INT(riak_fold_objects(c, "foldfail", &q, on_fold, &f3, &after), RIAK_E_SERVER);
+    CHECK(after == NULL);
+    riak_fold_query nostart = {0};
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &nostart, on_fold, &f, NULL), RIAK_E_INVALID_ARG);
+
+    /* PB link walking runs MapReduce link phases and fetches the objects;
+     * keys that are gone are dropped and duplicates collapse */
+    riak_link_step one[] = {{.tag = "friend"}};
+    riak_link_result res;
+    CHECK_EQ_INT(riak_link_walk(c, "lb", "alice", one, 1, &res), RIAK_OK);
+    CHECK_EQ_INT(res.n_phases, 1);
+    if (res.n_phases == 1) {
+        CHECK_EQ_INT(res.phases[0].count, 1); /* "missing" was dropped */
+        if (res.phases[0].count == 1) {
+            CHECK_EQ_STR(res.phases[0].items[0].bucket, "lb");
+            CHECK_EQ_STR(res.phases[0].items[0].key, "bob");
+            CHECK_EQ_STR(res.phases[0].items[0].object.data, "hello");
+        }
+    }
+    riak_link_result_free(&res);
+    riak_link_step two[] = {{.keep = true}, {.tag = "boss"}};
+    CHECK_EQ_INT(riak_link_walk(c, "lb", "alice", two, 2, &res), RIAK_OK);
+    CHECK_EQ_INT(res.n_phases, 2);
+    if (res.n_phases == 2) {
+        CHECK_EQ_INT(res.phases[0].count, 2);
+        CHECK_EQ_INT(res.phases[1].count, 1); /* the duplicate carol collapsed */
+    }
+    riak_link_result_free(&res);
+    CHECK_EQ_INT(riak_link_walk(c, "lb", "alice", one, 0, &res), RIAK_E_INVALID_ARG);
+    /* phase entries that are not [bucket, key, tag] lists */
+    CHECK_EQ_INT(riak_link_walk(c, "oddlinks", "alice", one, 1, &res), RIAK_E_PARSE);
+    CHECK(res.phases == NULL && res.n_phases == 0);
+    CHECK_EQ_INT(riak_link_walk(c, "numlinks", "alice", one, 1, &res), RIAK_E_PARSE);
+    CHECK(res.phases == NULL && res.n_phases == 0);
+    CHECK_EQ_INT(riak_link_walk(c, "numkeys", "alice", one, 1, &res), RIAK_E_PARSE);
+    CHECK(res.phases == NULL && res.n_phases == 0);
+    riak_client_free(c);
+}
+
+/* A callback that calls back into the client running it is refused: it would
+ * otherwise reuse the connection of the stream in progress. */
+typedef struct {
+    riak_client *c;
+    int calls;
+    riak_status ping, get, fold;
+} reentry;
+
+static bool reenter_name(const char *name, size_t len, void *ctx) {
+    reentry *r = ctx;
+    (void)name;
+    (void)len;
+    if (r->calls++ == 0) {
+        riak_object o;
+        r->ping = riak_ping(r->c);
+        CHECK(strstr(riak_client_errmsg(r->c), "busy") != NULL);
+        r->get = riak_get(r->c, "b", "k", NULL, &o);
+        riak_client_free(r->c); /* ignored: the client is in use */
+    }
+    return true;
+}
+
+static bool reenter_object(const char *key, riak_object *obj, void *ctx) {
+    reentry *r = ctx;
+    (void)key;
+    (void)obj;
+    if (r->calls++ == 0) {
+        names n = {0};
+        r->fold = riak_list_keys_stream(r->c, NULL, "b", on_name, &n);
+        CHECK_EQ_INT(n.n, 0);
+    }
+    return true;
+}
+
+static void test_reentry_refused(void) {
+    riak_client *c = client();
+    reentry r = {.c = c, .ping = RIAK_OK, .get = RIAK_OK};
+    CHECK_EQ_INT(riak_list_keys_stream(c, NULL, "b", reenter_name, &r), RIAK_OK);
+    CHECK_EQ_INT(r.calls, 3); /* the outer stream is unharmed */
+    CHECK_EQ_INT(r.ping, RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(r.get, RIAK_E_INVALID_ARG);
+    reentry f = {.c = c, .fold = RIAK_OK};
+    riak_fold_query q = {.start_key = "f1", .end_key = "f9", .max_results = 2};
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &q, reenter_object, &f, NULL), RIAK_OK);
+    CHECK_EQ_INT(f.calls, 2);
+    CHECK_EQ_INT(f.fold, RIAK_E_INVALID_ARG);
+    /* the guard is released once the outer call returns */
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    riak_client_free(c);
+}
+
+static void test_repl_queue(void) {
+    riak_client *c = client();
+    riak_repl_fetch_result fr;
+    CHECK_EQ_INT(riak_repl_fetch(c, "q", &fr), RIAK_OK);
+    CHECK_EQ_STR(ext.fetch_queue, "q");
+    CHECK_EQ_STR(ext.fetch_encoding, "internal_aaehash");
+    CHECK(!fr.queue_empty && !fr.deleted);
+    CHECK_EQ_INT(fr.object_len, 6);
+    CHECK(fr.object && fr.object[0] == 0x83);
+    CHECK(fr.has_crc && fr.crc == 0xDEADBEEFu);
+    CHECK_EQ_INT(fr.segment_id, 77);
+    CHECK_EQ_INT(fr.segment_hash, 88);
+    CHECK(fr.deleted_vclock == NULL);
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(c, "tomb", &fr), RIAK_OK);
+    CHECK(fr.deleted);
+    CHECK_EQ_STR(fr.deleted_vclock, VCLOCK_B64);
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(c, "empty", &fr), RIAK_OK);
+    CHECK(fr.queue_empty && fr.object == NULL);
+    riak_repl_fetch_result_free(&fr);
+    CHECK_EQ_INT(riak_repl_fetch(c, "gone", &fr), RIAK_E_NOT_FOUND);
+
+    riak_repl_key keys[] = {
+        {.bucket = "b", .key = "k1", .vclock = VCLOCK_B64},
+        {.bucket_type = "maps", .bucket = "b", .key = "k2", .vclock = VCLOCK_B64}};
+    riak_repl_push_result pr;
+    CHECK_EQ_INT(riak_repl_push(c, "q", keys, 2, &pr), RIAK_OK);
+    CHECK_EQ_INT(ext.push_keys, 2);
+    CHECK_EQ_INT(ext.push_vclock_len, sizeof STUB_VCLOCK);
+    CHECK_EQ_STR(ext.push_type[0], "");
+    CHECK_EQ_STR(ext.push_bucket[0], "b");
+    CHECK_EQ_STR(ext.push_key[0], "k1");
+    CHECK_EQ_STR(ext.push_type[1], "maps");
+    CHECK_EQ_STR(ext.push_bucket[1], "b");
+    CHECK_EQ_STR(ext.push_key[1], "k2");
+    riak_repl_key nullclock = {.bucket = "b", .key = "k"};
+    CHECK_EQ_INT(riak_repl_push(c, "q", &nullclock, 1, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_repl_push(c, "q", NULL, 1, NULL), RIAK_E_INVALID_ARG);
+    CHECK(pr.queue_exists);
+    CHECK_EQ_INT(pr.fold_length, 1);
+    CHECK_EQ_INT(pr.fsync_length, 2);
+    CHECK_EQ_INT(pr.realtime_length, 3);
+    riak_repl_key bad = {.bucket = "b", .key = "k", .vclock = "not base64!"};
+    CHECK_EQ_INT(riak_repl_push(c, "q", &bad, 1, NULL), RIAK_E_INVALID_ARG);
+
+    riak_members m;
+    int dropped = atomic_load(&ext.dropped);
+    CHECK_EQ_INT(riak_cluster_membership(c, &m), RIAK_OK);
+    CHECK_EQ_INT(atomic_load(&ext.dropped), dropped); /* an empty request: no crash */
+    CHECK_EQ_INT(m.count, 1);
+    if (m.count == 1) {
+        CHECK_EQ_STR(m.items[0].ip, "10.0.0.7");
+        CHECK_EQ_INT(m.items[0].port, 8087);
+    }
+    riak_members_free(&m);
+    riak_client_free(c);
+}
+
+static void test_aae_pb(void) {
+    riak_client *c = client();
+    riak_aae_tree t;
+    CHECK_EQ_INT(riak_aae_merge_root(c, 3, &t), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_n_val, 3);
+    CHECK_EQ_INT(t.size, RIAK_AAE_LARGE);
+    CHECK_EQ_INT(t.level1_len, 4096 * 4);
+    CHECK(t.level1[0] == 0xAB);
+    CHECK_EQ_INT(t.n_branches, 0);
+    riak_aae_tree_free(&t);
+    CHECK_EQ_INT(riak_aae_merge_root(c, 0, &t), RIAK_E_INVALID_ARG);
+
+    uint32_t ids[] = {5};
+    CHECK_EQ_INT(riak_aae_merge_branches(c, 3, ids, 1, &t), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_ids, 1);
+    CHECK_EQ_INT(t.n_branches, 2);
+    if (t.n_branches == 2) {
+        CHECK_EQ_INT(t.branches[0].id, 5);
+        CHECK_EQ_INT(t.branches[0].len, 1024); /* inflated */
+        CHECK(t.branches[0].data[0] == 0x10 && t.branches[0].data[1023] == 0x10);
+        CHECK_EQ_INT(t.branches[1].id, 9);
+        CHECK(t.branches[1].data[0] == 0x11);
+    }
+    riak_aae_tree_free(&t);
+
+    /* a branch inflating past max_body_bytes is refused: the 1024-byte
+     * branches arrive in a response far below that limit */
+    riak_config small;
+    riak_config_init(&small);
+    small.port = port;
+    small.max_body_bytes = 1023; /* one byte short of a branch */
+    riak_client *sc = client_cfg(&small);
+    CHECK_EQ_INT(riak_aae_merge_branches(sc, 3, ids, 1, &t), RIAK_E_PARSE);
+    CHECK(strstr(riak_client_errmsg(sc), "branch") != NULL);
+    CHECK_EQ_INT(t.n_branches, 0);
+    CHECK(t.branches == NULL);
+    small.max_body_bytes = 1024; /* exactly a branch */
+    riak_client_free(sc);
+    sc = client_cfg(&small);
+    CHECK_EQ_INT(riak_aae_merge_branches(sc, 3, ids, 1, &t), RIAK_OK);
+    CHECK_EQ_INT(t.n_branches, 2);
+    if (t.n_branches == 2) CHECK_EQ_INT(t.branches[1].len, 1024);
+    riak_aae_tree_free(&t);
+    riak_client_free(sc);
+
+    /* a tree size Riak does not have */
+    atomic_store(&ext.bad_tree_size, 1);
+    CHECK_EQ_INT(riak_aae_merge_root(c, 3, &t), RIAK_E_PARSE);
+    CHECK(t.level1 == NULL);
+    atomic_store(&ext.bad_tree_size, 0);
+
+    riak_aae_keys k;
+    CHECK_EQ_INT(riak_aae_fetch_clocks_nval(c, 3, ids, 1, &k), RIAK_OK);
+    CHECK_EQ_INT(k.count, 2);
+    if (k.count == 2) {
+        CHECK_EQ_STR(k.items[1].key, "k2");
+        CHECK_EQ_STR(k.items[1].vclock, VCLOCK_B64);
+        CHECK(k.items[0].bucket_type == NULL);
+    }
+    riak_aae_keys_free(&k);
+
+    uint32_t segs[] = {1, 2, 3};
+    riak_aae_filter f = {.bucket_type = "maps",
+                         .bucket = "aaeb",
+                         .start_key = "a",
+                         .end_key = "z",
+                         .segments = segs,
+                         .n_segments = 3,
+                         .segment_tree_size = RIAK_AAE_SMALL,
+                         .modified_start = 100,
+                         .modified_end = 200,
+                         .use_hash_iv = true,
+                         .hash_iv = 7};
+    CHECK_EQ_INT(riak_aae_merge_range(c, &f, RIAK_AAE_XXSMALL, &t), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_tree_size, 0);
+    CHECK_EQ_INT(ext.aae_key_range, 1);
+    CHECK_EQ_INT(ext.aae_seg_filter, 1);
+    CHECK_EQ_INT(ext.aae_ids, 3);
+    CHECK_EQ_INT(ext.aae_mod_range, 1);
+    CHECK_EQ_INT(ext.aae_mod_start, 100);
+    CHECK_EQ_INT(ext.aae_mod_end, 200);
+    CHECK_EQ_INT(ext.aae_prehash, 0);
+    CHECK_EQ_INT(ext.aae_iv, 7);
+    CHECK_EQ_STR(ext.aae_type, "maps");
+    CHECK_EQ_STR(ext.aae_bucket, "aaeb");
+    CHECK_EQ_STR(ext.aae_start, "a");
+    CHECK_EQ_STR(ext.aae_end, "z");
+    CHECK(ext.aae_segs[0] == 1 && ext.aae_segs[1] == 2 && ext.aae_segs[2] == 3);
+    CHECK_EQ_INT(ext.aae_filter_size, 2 + 1); /* small */
+    CHECK_EQ_INT(t.size, RIAK_AAE_XXSMALL);
+    CHECK_EQ_INT(t.level1_len, 64);
+    CHECK_EQ_INT(t.n_branches, 2);
+    riak_aae_tree_free(&t);
+    CHECK_EQ_INT(riak_aae_merge_range(c, &f, (riak_aae_tree_size)9, &t), RIAK_E_INVALID_ARG);
+
+    memset(ext.aae_segs, 0, sizeof ext.aae_segs);
+    ext.aae_filter_size = 0;
+    ext.aae_bucket[0] = '\0';
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &f, &k), RIAK_OK);
+    CHECK_EQ_STR(ext.aae_bucket, "aaeb");
+    CHECK_EQ_STR(ext.aae_start, "a");
+    CHECK(ext.aae_segs[0] == 1 && ext.aae_segs[2] == 3);
+    CHECK_EQ_INT(ext.aae_filter_size, 2 + 1);
+    CHECK_EQ_INT(k.count, 2);
+    if (k.count == 2) {
+        CHECK_EQ_STR(k.items[0].bucket_type, "maps");
+        CHECK_EQ_STR(k.items[0].bucket, "aaeb");
+        CHECK_EQ_STR(k.items[0].key, "k1");
+        CHECK_EQ_STR(k.items[1].key, "k2");
+    }
+    riak_aae_keys_free(&k);
+    /* without a segment filter or key range nothing of them is sent */
+    riak_aae_filter plain = {.bucket = "aaeb"};
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &plain, &k), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_seg_filter, 0);
+    CHECK_EQ_INT(ext.aae_key_range, 0);
+    CHECK_EQ_INT(ext.aae_filter_size, 0);
+    CHECK_EQ_STR(ext.aae_type, "");
+    riak_aae_keys_free(&k);
+
+    /* filters and enums out of range never reach the node */
+    unsigned before = ext.received[214];
+    riak_aae_filter bad_size = f;
+    bad_size.segment_tree_size = (riak_aae_tree_size)9;
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &bad_size, &k), RIAK_E_INVALID_ARG);
+    riak_aae_filter no_segs = f;
+    no_segs.segments = NULL;
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &no_segs, &k), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(ext.received[214], before);
+    riak_aae_key_counts kc0;
+    CHECK_EQ_INT(riak_aae_find_keys(c, &f, (riak_aae_find)7, 1, &kc0), RIAK_E_INVALID_ARG);
+    uint64_t n0;
+    CHECK_EQ_INT(riak_aae_erase_keys(c, &f, (riak_aae_change)9, 0, &n0), RIAK_E_INVALID_ARG);
+    riak_aae_tree t0;
+    riak_aae_stats st0;
+    riak_aae_buckets b0;
+    CHECK_EQ_INT(riak_aae_merge_root(c, 3, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_merge_branches(c, 3, NULL, 1, &t0), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_merge_range(c, &f, RIAK_AAE_SMALL, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &f, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_find_keys(c, &f, RIAK_AAE_OBJECT_SIZE, 1, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_object_stats(c, &f, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_object_stats(c, NULL, &st0), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_list_buckets(c, 3, NULL), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_list_buckets(NULL, 3, &b0), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_find_tombs(c, &f, &k), RIAK_OK);
+    CHECK_EQ_INT(k.count, 2);
+    riak_aae_keys_free(&k);
+
+    riak_aae_filter half = {.bucket = "aaeb", .start_key = "a"};
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &half, &k), RIAK_E_INVALID_ARG);
+    riak_aae_filter nob = {0};
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, &nob, &k), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_fetch_clocks_range(c, NULL, &k), RIAK_E_INVALID_ARG);
+
+    riak_aae_key_counts kc;
+    CHECK_EQ_INT(riak_aae_find_keys(c, &f, RIAK_AAE_OBJECT_SIZE, 1000, &kc), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_finder, 1);
+    CHECK_EQ_INT(ext.aae_limit, 1000);
+    CHECK_EQ_INT(kc.count, 1);
+    if (kc.count == 1) {
+        CHECK_EQ_STR(kc.items[0].key, "big-key");
+        CHECK_EQ_INT(kc.items[0].value, 4096);
+    }
+    riak_aae_key_counts_free(&kc);
+    CHECK_EQ_INT(riak_aae_find_keys(c, &f, RIAK_AAE_SIBLING_COUNT, 2, &kc), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_finder, 0);
+    CHECK_EQ_INT(ext.aae_limit, 2);
+    riak_aae_key_counts_free(&kc);
+
+    riak_aae_stats st;
+    CHECK_EQ_INT(riak_aae_object_stats(c, &f, &st), RIAK_OK);
+    CHECK_EQ_INT(st.total_count, 12);
+    CHECK_EQ_INT(st.total_size, 3400);
+    CHECK_EQ_INT(st.n_sizes, 2);
+    CHECK_EQ_INT(st.n_siblings, 1);
+    if (st.n_sizes == 2) {
+        CHECK_EQ_INT(st.sizes[1].order, 3);
+        CHECK_EQ_INT(st.sizes[1].count, 2);
+    }
+    riak_aae_stats_free(&st);
+
+    uint64_t n = 0;
+    CHECK_EQ_INT(riak_aae_reap_tombs(c, &f, RIAK_AAE_JOB, 42, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 7);
+    CHECK_EQ_INT(ext.aae_change, 0); /* job */
+    CHECK_EQ_INT(ext.aae_job, 42);
+    CHECK_EQ_INT(riak_aae_reap_tombs(c, &f, RIAK_AAE_JOB, 0, &n), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_aae_erase_keys(c, &f, RIAK_AAE_COUNT, 0, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 8);
+    CHECK_EQ_INT(ext.aae_change, 2); /* count */
+    CHECK_EQ_INT(riak_aae_erase_keys(c, &f, RIAK_AAE_LOCAL, 0, &n), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_change, 1);
+    CHECK_EQ_INT(riak_aae_repair_keys(c, &f, &n), RIAK_OK);
+    CHECK_EQ_INT(n, 6);
+    CHECK_EQ_STR(ext.aae_bucket, "aaeb");
+    CHECK_EQ_INT(riak_aae_repl_keys(c, &f, "libriak_q", &n), RIAK_OK);
+    CHECK_EQ_INT(n, 5);
+    CHECK_EQ_STR(ext.aae_end, "z");
+    CHECK_EQ_STR(ext.aae_queue, "libriak_q");
+    CHECK_EQ_INT(riak_aae_repl_keys(c, &f, NULL, &n), RIAK_E_INVALID_ARG);
+
+    riak_aae_buckets b;
+    CHECK_EQ_INT(riak_aae_list_buckets(c, 2, &b), RIAK_OK);
+    CHECK_EQ_INT(ext.aae_n_val, 2);
+    CHECK_EQ_INT(b.count, 2);
+    if (b.count == 2) {
+        CHECK(b.items[0].bucket_type == NULL);
+        CHECK_EQ_STR(b.items[1].bucket_type, "maps");
+        CHECK_EQ_STR(b.items[1].bucket, "typed");
+    }
+    riak_aae_buckets_free(&b);
+    riak_client_free(c);
+}
+
+/* Requests that change state are sent once: a connection lost after the
+ * request may have been applied is reported, not repeated. Reads are retried. */
+static riak_status dropped_once(riak_client *c, int code, riak_status (*call)(riak_client *),
+                                unsigned *sent) {
+    unsigned before = ext.received[code];
+    atomic_store(&ext.drop_code, code);
+    riak_status st = call(c);
+    *sent = ext.received[code] - before;
+    atomic_store(&ext.drop_code, 0);
+    return st;
+}
+
+static const riak_aae_filter replay_filter = {.bucket = "aaeb"};
+
+static riak_status call_push(riak_client *c) {
+    riak_repl_key k = {.bucket = "b", .key = "k", .vclock = VCLOCK_B64};
+    return riak_repl_push(c, "q", &k, 1, NULL);
+}
+static riak_status call_fetch(riak_client *c) {
+    riak_repl_fetch_result fr;
+    riak_status st = riak_repl_fetch(c, "q", &fr);
+    if (st == RIAK_OK) riak_repl_fetch_result_free(&fr);
+    return st;
+}
+static riak_status call_counter(riak_client *c) {
+    return riak_counter_update(c, "b", "c", 1, NULL, NULL);
+}
+static riak_status call_reap_job(riak_client *c) {
+    uint64_t n;
+    return riak_aae_reap_tombs(c, &replay_filter, RIAK_AAE_JOB, 1, &n);
+}
+static riak_status call_erase_local(riak_client *c) {
+    uint64_t n;
+    return riak_aae_erase_keys(c, &replay_filter, RIAK_AAE_LOCAL, 0, &n);
+}
+static riak_status call_repair(riak_client *c) {
+    uint64_t n;
+    return riak_aae_repair_keys(c, &replay_filter, &n);
+}
+static riak_status call_repl_keys(riak_client *c) {
+    uint64_t n;
+    return riak_aae_repl_keys(c, &replay_filter, "q", &n);
+}
+static riak_status call_erase_count(riak_client *c) {
+    uint64_t n;
+    return riak_aae_erase_keys(c, &replay_filter, RIAK_AAE_COUNT, 0, &n);
+}
+static riak_status call_root(riak_client *c) {
+    riak_aae_tree t;
+    riak_status st = riak_aae_merge_root(c, 3, &t);
+    if (st == RIAK_OK) riak_aae_tree_free(&t);
+    return st;
+}
+static riak_status call_type_props(riak_client *c) {
+    return riak_set_type_props(c, "maps", "{\"props\":{\"n_val\":3}}");
+}
+static riak_status call_counter_get(riak_client *c) {
+    int64_t v;
+    return riak_counter_get(c, "b", "c", NULL, &v);
+}
+
+static void test_no_replay_pb(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.port = port;
+    cfg.max_retries = 2;
+    cfg.retry_base_ms = 1;
+    riak_client *c = client_cfg(&cfg);
+    struct {
+        const char *name;
+        int code;
+        riak_status (*call)(riak_client *);
+        bool repeatable;
+    } cases[] = {
+        {"push", 204, call_push, false},
+        {"fetch", 202, call_fetch, false},
+        {"counter update", 50, call_counter, false},
+        {"reap job", 230, call_reap_job, false},
+        {"erase local", 231, call_erase_local, false},
+        {"repair", 219, call_repair, false},
+        {"repl keys", 217, call_repl_keys, false},
+        {"erase count", 231, call_erase_count, true},
+        {"merge root", 210, call_root, true},
+        {"counter get", 52, call_counter_get, true},
+        {"type props", 32, call_type_props, true},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        unsigned sent = 0;
+        riak_status st = dropped_once(c, cases[i].code, cases[i].call, &sent);
+        if (cases[i].repeatable) {
+            CHECK_EQ_INT(st, RIAK_OK);
+            CHECK_EQ_INT(sent, 2);
+        } else {
+            CHECK_EQ_INT(st, RIAK_E_TRANSPORT);
+            CHECK_EQ_INT(sent, 1);
+        }
+        if ((st == RIAK_OK) != cases[i].repeatable) {
+            fprintf(stderr, "  case: %s\n", cases[i].name);
+        }
+    }
+    riak_client_free(c);
+}
+
+/* A Riak 2.2 node answers the newer requests with "Unknown message code";
+ * every call reports RIAK_E_UNSUPPORTED and the connection stays usable. */
+static void test_old_node_pb(void) {
+    riak_client *c = client();
+    atomic_store(&ext.old_node, 1);
+    riak_aae_tree t;
+    CHECK_EQ_INT(riak_aae_merge_root(c, 3, &t), RIAK_E_UNSUPPORTED);
+    riak_repl_fetch_result fr;
+    CHECK_EQ_INT(riak_repl_fetch(c, "q", &fr), RIAK_E_UNSUPPORTED);
+    riak_members m;
+    CHECK_EQ_INT(riak_cluster_membership(c, &m), RIAK_E_UNSUPPORTED);
+    char *id = NULL;
+    CHECK_EQ_INT(riak_get_cluster_id(c, &id), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_get_client_id(c, &id), RIAK_E_UNSUPPORTED);
+    int64_t v;
+    CHECK_EQ_INT(riak_counter_get(c, "b", "c", NULL, &v), RIAK_E_UNSUPPORTED);
+    CHECK(strstr(riak_client_errmsg(c), "Unknown message code") != NULL);
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    atomic_store(&ext.old_node, 0);
+    riak_client_free(c);
+}
+
+/* After a handler crash Riak closes the connection; the client must not
+ * reuse it, so the next request succeeds even without retries. */
+static void test_handler_crash_closes(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.port = port;
+    cfg.max_retries = 0;
+    riak_client *c = client_cfg(&cfg);
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    int before = atomic_load(&stub.accepts);
+    riak_object o;
+    CHECK_EQ_INT(riak_get(c, "b", "crash", NULL, &o), RIAK_E_SERVER);
+    CHECK(strstr(riak_client_errmsg(c), "Error processing incoming message") != NULL);
+    CHECK_EQ_INT(riak_ping(c), RIAK_OK);
+    CHECK_EQ_INT(atomic_load(&stub.accepts) - before, 1); /* a new connection */
     riak_client_free(c);
 }
 
@@ -823,10 +1496,18 @@ int main(void) {
     RUN(test_index);
     RUN(test_search);
     RUN(test_mapred);
-    RUN(test_reentry_refused);
     RUN(test_datatypes);
     RUN(test_idle_close);
     RUN(test_errors_retries);
+    RUN(test_new_options_pb);
+    RUN(test_props_counters_ids);
+    RUN(test_fold_and_links);
+    RUN(test_reentry_refused);
+    RUN(test_repl_queue);
+    RUN(test_aae_pb);
+    RUN(test_no_replay_pb);
+    RUN(test_old_node_pb);
+    RUN(test_handler_crash_closes);
     RUN(test_async);
     RUN(test_async_loop);
     RUN(test_tls);

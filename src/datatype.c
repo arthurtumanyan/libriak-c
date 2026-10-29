@@ -632,6 +632,7 @@ riak_status riak_dt_fetch(riak_client *client, const char *type, const char *buc
     if (st == RIAK_OK &&
         (riak_url_append_quorum(&url, "r", o->r) != 0 ||
          riak_url_append_quorum(&url, "pr", o->pr) != 0 ||
+         riak_url_append_quorum(&url, "node_confirms", o->node_confirms) != 0 ||
          (o->no_context && riak_url_append_query(&url, "include_context", "false") != 0) ||
          add_timeout(&url, o->server_timeout_ms) != 0)) {
         st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
@@ -691,6 +692,7 @@ riak_status riak_dt_update(riak_client *client, const char *type, const char *bu
     if (riak_url_append_quorum(&url, "w", o->w) != 0 ||
         riak_url_append_quorum(&url, "dw", o->dw) != 0 ||
         riak_url_append_quorum(&url, "pw", o->pw) != 0 ||
+        riak_url_append_quorum(&url, "node_confirms", o->node_confirms) != 0 ||
         (o->return_body && riak_url_append_query(&url, "returnbody", "true") != 0) ||
         add_timeout(&url, o->server_timeout_ms) != 0) {
         st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");

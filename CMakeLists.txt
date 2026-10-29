@@ -30,12 +30,13 @@ if(NOT TARGET json-c::json-c)
   add_library(json-c::json-c ALIAS PkgConfig::JSONC)
 endif()
 find_package(OpenSSL 1.1.1 REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PROTOBUFC REQUIRED IMPORTED_TARGET libprotobuf-c>=1.3)
 find_program(PROTOC_C protoc-c REQUIRED)
 
 # C code for the Riak protocol buffer messages is generated from proto/.
-set(RIAK_PROTOS riak riak_kv riak_dt riak_search riak_yokozuna)
+set(RIAK_PROTOS riak riak_kv riak_dt riak_search riak_yokozuna riak_repl)
 set(RIAK_PB_DIR ${PROJECT_BINARY_DIR}/pb)
 set(RIAK_PB_SOURCES)
 set(RIAK_PB_FILES)
@@ -85,12 +86,14 @@ if(RIAK_COVERAGE)
 endif()
 
 set(RIAK_SOURCES
+  src/aae.c
   src/async.c
   src/async_pb.c
   src/bucket.c
   src/client.c
   src/cluster.c
   src/datatype.c
+  src/ext.c
   src/http.c
   src/kv.c
   src/multipart.c
@@ -101,6 +104,7 @@ set(RIAK_SOURCES
   src/pb_query.c
   src/pbconn.c
   src/query.c
+  src/query_api.c
   src/util.c)
 
 # Object library shared by the shared/static targets and the unit tests,
@@ -110,7 +114,7 @@ target_include_directories(riak_objects PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 target_compile_definitions(riak_objects PRIVATE RIAK_BUILDING _POSIX_C_SOURCE=200809L)
-target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c OpenSSL::SSL
+target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c OpenSSL::SSL ZLIB::ZLIB
                       riak_pbgen PRIVATE $<BUILD_INTERFACE:riak_warnings>)
 
 add_library(riak SHARED $<TARGET_OBJECTS:riak_objects> $<TARGET_OBJECTS:riak_pbgen>)
@@ -119,7 +123,7 @@ foreach(t riak riak_static)
   target_include_directories(${t} PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c OpenSSL::SSL
+  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c OpenSSL::SSL ZLIB::ZLIB
                         PkgConfig::PROTOBUFC $<BUILD_INTERFACE:riak_warnings>)
   set_target_properties(${t} PROPERTIES OUTPUT_NAME riak-c)
 endforeach()

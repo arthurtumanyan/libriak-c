@@ -459,9 +459,11 @@ riak_status riak_pb_prepare_get(riak_client *c, const char *bucket, const char *
     RpbGetReq m = RPB_GET_REQ__INIT;
     m.bucket = riak_pb_bin(bucket);
     m.key = riak_pb_bin(key);
-    if (!QUORUM(r, o->r) || !QUORUM(pr, o->pr)) {
+    if (!QUORUM(r, o->r) || !QUORUM(pr, o->pr) || !QUORUM(node_confirms, o->node_confirms)) {
         return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
     }
+    m.has_deletedvclock = o->deletedvclock;
+    m.deletedvclock = o->deletedvclock;
     m.has_basic_quorum = o->basic_quorum;
     m.basic_quorum = o->basic_quorum;
     m.has_notfound_ok = o->notfound_ok;
@@ -535,6 +537,13 @@ riak_status riak_pb_finish_get(riak_client *c, const riak_opts *o, riak_pb_respo
     if (r->n_content == 0 ||
         (r->n_content == 1 && r->content[0]->has_deleted && r->content[0]->deleted)) {
         st = empty_get(c, r);
+        if (st == RIAK_E_NOT_FOUND && o->deletedvclock && r->has_vclock && r->vclock.len > 0) {
+            /* a tombstone: its clock lets a later write supersede the delete */
+            out->deleted = true;
+            if ((out->vclock = riak_pb_b64_encode(r->vclock)) == NULL) {
+                st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+            }
+        }
     } else if (r->n_content == 1) {
         st = content_to_object(c, r->content[0], r->has_vclock ? &r->vclock : NULL, out);
     } else if (o->resolver == NULL) {
@@ -635,8 +644,11 @@ riak_status riak_pb_prepare_put(riak_client *c, const char *bucket, const char *
             m.key = riak_pb_bin(key);
         }
         m.content = &cb.content;
-        if (!QUORUM(w, o->w) || !QUORUM(dw, o->dw) || !QUORUM(pw, o->pw)) {
+        if (!QUORUM(w, o->w) || !QUORUM(dw, o->dw) || !QUORUM(pw, o->pw) ||
+            !QUORUM(node_confirms, o->node_confirms)) {
             st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
+        } else if ((unsigned)o->sync_on_write > RIAK_SYNC_ALL) {
+            st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid sync_on_write");
         }
     }
     if (st == RIAK_OK && o->vclock) {
@@ -653,6 +665,14 @@ riak_status riak_pb_prepare_put(riak_client *c, const char *bucket, const char *
     if (st == RIAK_OK) {
         m.has_return_body = o->return_body;
         m.return_body = o->return_body;
+        m.has_return_head = o->return_head;
+        m.return_head = o->return_head;
+        m.has_asis = o->asis;
+        m.asis = o->asis;
+        if (o->sync_on_write != RIAK_SYNC_DEFAULT) {
+            m.has_sync_on_write = 1;
+            m.sync_on_write = (RpbPutReq__SyncOnWrite)(o->sync_on_write - RIAK_SYNC_BACKEND);
+        }
         m.has_if_not_modified = o->if_not_modified;
         m.if_not_modified = o->if_not_modified;
         m.has_if_none_match = o->if_none_match != NULL;
@@ -736,6 +756,9 @@ riak_status riak_pb_prepare_delete(riak_client *c, const char *bucket, const cha
     RpbDelReq m = RPB_DEL_REQ__INIT;
     m.bucket = riak_pb_bin(bucket);
     m.key = riak_pb_bin(key);
+    if (o->node_confirms != RIAK_Q_DEFAULT) {
+        return unsupported(c, "node_confirms on delete");
+    }
     if (!QUORUM(rw, o->rw) || !QUORUM(r, o->r) || !QUORUM(w, o->w) || !QUORUM(pr, o->pr) ||
         !QUORUM(pw, o->pw) || !QUORUM(dw, o->dw)) {
         return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
@@ -1028,6 +1051,14 @@ static char *props_to_json(const RpbBucketProps *p, const char *name) {
     BOOL(consistent);
     BOOL(write_once);
     U32(hll_precision);
+    QRM(node_confirms);
+    if (p->has_sync_on_write) {
+        static const char *const sync[] = {"backend", "one", "all"};
+        unsigned m = (unsigned)p->sync_on_write;
+        json_object_object_add(o, "sync_on_write",
+                               json_object_new_string(m < 3 ? sync[m] : "backend"));
+    }
+    BOOL(aae_tree_exclude);
 #undef U32
 #undef BOOL
 #undef QRM
@@ -1167,7 +1198,8 @@ static riak_status props_from_json(riak_client *c, const char *json, json_object
                 p->hll_precision = u;
             }
         } else if (IS("allow_mult") || IS("last_write_wins") || IS("basic_quorum") ||
-                   IS("notfound_ok") || IS("search") || IS("consistent") || IS("write_once")) {
+                   IS("notfound_ok") || IS("search") || IS("consistent") || IS("write_once") ||
+                   IS("aae_tree_exclude")) {
             ok = json_object_is_type(v, json_type_boolean);
             protobuf_c_boolean bv = json_object_get_boolean(v);
             if (IS("allow_mult")) {
@@ -1188,11 +1220,28 @@ static riak_status props_from_json(riak_client *c, const char *json, json_object
             } else if (IS("consistent")) {
                 p->has_consistent = 1;
                 p->consistent = bv;
+            } else if (IS("aae_tree_exclude")) {
+                p->has_aae_tree_exclude = 1;
+                p->aae_tree_exclude = bv;
             } else {
                 p->has_write_once = 1;
                 p->write_once = bv;
             }
-        } else if (IS("pr") || IS("r") || IS("w") || IS("pw") || IS("dw") || IS("rw")) {
+        } else if (IS("sync_on_write")) {
+            const char *sv =
+                json_object_is_type(v, json_type_string) ? json_object_get_string(v) : "";
+            p->has_sync_on_write = 1;
+            if (strcmp(sv, "backend") == 0) {
+                p->sync_on_write = RPB_BUCKET_PROPS__SYNC_ON_WRITE__sync_backend;
+            } else if (strcmp(sv, "one") == 0) {
+                p->sync_on_write = RPB_BUCKET_PROPS__SYNC_ON_WRITE__sync_one;
+            } else if (strcmp(sv, "all") == 0) {
+                p->sync_on_write = RPB_BUCKET_PROPS__SYNC_ON_WRITE__sync_all;
+            } else {
+                ok = false;
+            }
+        } else if (IS("pr") || IS("r") || IS("w") || IS("pw") || IS("dw") || IS("rw") ||
+                   IS("node_confirms")) {
             uint32_t q = 0;
             ok = quorum_from_json(v, &q);
             if (IS("pr")) {
@@ -1210,6 +1259,9 @@ static riak_status props_from_json(riak_client *c, const char *json, json_object
             } else if (IS("dw")) {
                 p->has_dw = 1;
                 p->dw = q;
+            } else if (IS("node_confirms")) {
+                p->has_node_confirms = 1;
+                p->node_confirms = q;
             } else {
                 p->has_rw = 1;
                 p->rw = q;
@@ -1479,5 +1531,443 @@ riak_status riak_pb_coverage(riak_client *c, const char *type, const char *bucke
     if (st != RIAK_OK) {
         riak_coverage_free(out);
     }
+    return st;
+}
+
+/* ---- bucket-type properties, client id ----------------------------- */
+
+riak_status riak_pb_set_type_props(riak_client *c, const char *type, const char *json) {
+    json_object *root = NULL;
+    props_build b;
+    riak_status st = props_from_json(c, json, &root, &b);
+    char *path = NULL;
+    if (st == RIAK_OK && (path = riak_strprintf("/types/%s/props", type)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    if (st == RIAK_OK) {
+        RpbSetBucketTypeReq m = RPB_SET_BUCKET_TYPE_REQ__INIT;
+        m.type = riak_pb_bin(type);
+        m.props = &b.props;
+        /* Riak answers a bucket-type change with RpbSetBucketResp */
+        riak_pb_call call = {.code = RIAK_PB_SET_BUCKET_TYPE_REQ,
+                             .resp_code = RIAK_PB_SET_BUCKET_RESP,
+                             .idempotent = true,
+                             .name = "RpbSetBucketTypeReq",
+                             .path = path};
+        st = riak_pb_exec(c, &call, &m.base, NULL, NULL);
+    }
+    free(path);
+    props_build_free(&b);
+    json_object_put(root);
+    return st;
+}
+
+riak_status riak_pb_client_id(riak_client *c, char **id) {
+    riak_pb_call call = {.code = RIAK_PB_GET_CLIENT_ID_REQ,
+                         .resp_code = RIAK_PB_GET_CLIENT_ID_RESP,
+                         .idempotent = true,
+                         .name = "RpbGetClientIdReq",
+                         .path = "/"};
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_exec(c, &call, NULL, &rpb_get_client_id_resp__descriptor, &msg);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    RpbGetClientIdResp *r = (RpbGetClientIdResp *)msg;
+    /* the id is binary; base64 keeps it printable */
+    *id = riak_pb_b64_encode(r->client_id);
+    rpb_get_client_id_resp__free_unpacked(r, NULL);
+    return *id ? RIAK_OK : riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+}
+
+/* ---- legacy counters ------------------------------------------------- */
+
+riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key, bool update,
+                            int64_t amount, const riak_opts *o, int64_t *value) {
+    char *path = riak_pb_path(c, NULL, bucket, "counters", key);
+    if (path == NULL) {
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    riak_status st;
+    ProtobufCMessage *msg = NULL;
+    if (update) {
+        RpbCounterUpdateReq m = RPB_COUNTER_UPDATE_REQ__INIT;
+        m.bucket = riak_pb_bin(bucket);
+        m.key = riak_pb_bin(key);
+        m.amount = amount;
+        if (!QUORUM(w, o->w) || !QUORUM(dw, o->dw) || !QUORUM(pw, o->pw) ||
+            !QUORUM(node_confirms, o->node_confirms)) {
+            free(path);
+            return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
+        }
+        m.has_returnvalue = value != NULL;
+        m.returnvalue = value != NULL;
+        riak_pb_call call = {.code = RIAK_PB_COUNTER_UPDATE_REQ,
+                             .resp_code = RIAK_PB_COUNTER_UPDATE_RESP,
+                             .idempotent = false, /* repeating would count twice */
+                             .name = "RpbCounterUpdateReq",
+                             .path = path};
+        st = riak_pb_exec(c, &call, &m.base, &rpb_counter_update_resp__descriptor, &msg);
+        if (st == RIAK_OK && value) {
+            RpbCounterUpdateResp *r = (RpbCounterUpdateResp *)msg;
+            *value = r->value;
+        }
+    } else {
+        RpbCounterGetReq m = RPB_COUNTER_GET_REQ__INIT;
+        m.bucket = riak_pb_bin(bucket);
+        m.key = riak_pb_bin(key);
+        if (!QUORUM(r, o->r) || !QUORUM(pr, o->pr) || !QUORUM(node_confirms, o->node_confirms)) {
+            free(path);
+            return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
+        }
+        m.has_basic_quorum = o->basic_quorum;
+        m.basic_quorum = o->basic_quorum;
+        m.has_notfound_ok = o->notfound_ok;
+        m.notfound_ok = o->notfound_ok;
+        riak_pb_call call = {.code = RIAK_PB_COUNTER_GET_REQ,
+                             .resp_code = RIAK_PB_COUNTER_GET_RESP,
+                             .idempotent = true,
+                             .name = "RpbCounterGetReq",
+                             .path = path};
+        st = riak_pb_exec(c, &call, &m.base, &rpb_counter_get_resp__descriptor, &msg);
+        if (st == RIAK_OK) {
+            RpbCounterGetResp *r = (RpbCounterGetResp *)msg;
+            if (!r->has_value) {
+                st = riak_set_error(c, RIAK_E_NOT_FOUND, "not found");
+            } else {
+                *value = r->value;
+            }
+        }
+    }
+    if (msg) {
+        protobuf_c_message_free_unpacked(msg, NULL);
+    }
+    free(path);
+    return st;
+}
+
+/* ---- object folds (RpbCSBucketReq) ---------------------------------- */
+
+typedef struct {
+    riak_client *c;
+    riak_object_cb cb;
+    void *ctx;
+    char **continuation;
+} fold_ctx;
+
+static bool fold_sink(void *ctx, const uint8_t *data, size_t len, bool *done, riak_status *err) {
+    fold_ctx *x = ctx;
+    RpbCSBucketResp *r = rpb_csbucket_resp__unpack(NULL, len, data);
+    if (r == NULL) {
+        *err = RIAK_E_PARSE;
+        return false;
+    }
+    bool more = true;
+    for (size_t i = 0; more && i < r->n_objects; i++) {
+        const RpbIndexObject *io = r->objects[i];
+        const RpbGetResp *g = io->object;
+        char *key = riak_pb_strdup(io->key);
+        if (key == NULL) {
+            *err = RIAK_E_NOMEM;
+            more = false;
+            break;
+        }
+        for (size_t j = 0; more && g && j < g->n_content; j++) {
+            riak_object obj;
+            if (content_to_object(x->c, g->content[j], g->has_vclock ? &g->vclock : NULL, &obj) !=
+                RIAK_OK) {
+                *err = RIAK_E_NOMEM;
+                more = false;
+                break;
+            }
+            more = x->cb(key, &obj, x->ctx);
+            riak_object_free(&obj);
+        }
+        free(key);
+    }
+    if (*err == RIAK_OK && r->has_continuation && x->continuation) {
+        char *cont = riak_pb_strdup(r->continuation);
+        if (cont == NULL) {
+            *err = RIAK_E_NOMEM;
+            more = false;
+        } else {
+            free(*x->continuation);
+            *x->continuation = cont;
+        }
+    }
+    *done = r->has_done && r->done;
+    rpb_csbucket_resp__free_unpacked(r, NULL);
+    return more && *err == RIAK_OK;
+}
+
+riak_status riak_pb_fold_objects(riak_client *c, const char *bucket, const riak_fold_query *q,
+                                 riak_object_cb cb, void *ctx, char **continuation) {
+    RpbCSBucketReq m = RPB_CSBUCKET_REQ__INIT;
+    m.bucket = riak_pb_bin(bucket);
+    m.start_key = riak_pb_bin(q->start_key);
+    if (q->end_key) {
+        m.has_end_key = 1;
+        m.end_key = riak_pb_bin(q->end_key);
+    }
+    m.has_start_incl = 1;
+    m.start_incl = !q->start_exclusive;
+    m.has_end_incl = 1;
+    m.end_incl = q->end_inclusive;
+    if (q->continuation) {
+        m.has_continuation = 1;
+        m.continuation = riak_pb_bin(q->continuation);
+    }
+    m.has_max_results = q->max_results > 0;
+    m.max_results = q->max_results;
+    m.has_timeout = q->server_timeout_ms > 0;
+    m.timeout = q->server_timeout_ms;
+    if (q->bucket_type) {
+        m.has_type = 1;
+        m.type = riak_pb_bin(q->bucket_type);
+    }
+    ProtobufCBinaryData cover = {0};
+    if (q->cover_context) {
+        if (!riak_pb_b64_decode(q->cover_context, &cover)) {
+            return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid cover_context");
+        }
+        m.has_cover_context = 1;
+        m.cover_context = cover;
+    }
+    char *path = riak_pb_path(c, q->bucket_type, bucket, "keys", NULL);
+    if (path == NULL) {
+        free(cover.data);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    riak_pb_call call = {.code = RIAK_PB_CS_BUCKET_REQ,
+                         .resp_code = RIAK_PB_CS_BUCKET_RESP,
+                         .idempotent = true,
+                         .name = "RpbCSBucketReq",
+                         .path = path};
+    fold_ctx x = {.c = c, .cb = cb, .ctx = ctx, .continuation = continuation};
+    riak_status st = riak_pb_stream(c, &call, &m.base, fold_sink, &x);
+    free(path);
+    free(cover.data);
+    return st;
+}
+
+/* ---- riak_repl: proxy get, cluster id ------------------------------- */
+
+/* riak_repl's service passes the payload through undecoded and expects it
+ * to start with the message code again (a "tunnelled" message). */
+static riak_status repl_tunnel(riak_client *c, uint8_t code, uint8_t resp_code, const char *name,
+                               const char *path, const ProtobufCMessage *m,
+                               riak_pb_response *resp) {
+    size_t n = m ? protobuf_c_message_get_packed_size(m) : 0;
+    uint8_t *buf = malloc(n + 1);
+    if (buf == NULL) {
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    buf[0] = code;
+    if (m) {
+        protobuf_c_message_pack(m, buf + 1);
+    }
+    riak_pb_request req = {.code = code,
+                           .resp_code = resp_code,
+                           .payload = buf,
+                           .len = n + 1,
+                           .idempotent = true,
+                           .name = name,
+                           .path = path};
+    riak_status st = riak_pb_perform(c, &req, resp);
+    free(buf);
+    return st;
+}
+
+riak_status riak_pb_cluster_id(riak_client *c, char **id) {
+    riak_pb_response resp = {0};
+    riak_status st =
+        repl_tunnel(c, RIAK_PB_REPL_GET_CLUSTER_ID_REQ, RIAK_PB_REPL_GET_CLUSTER_ID_RESP,
+                    "RpbReplGetClusterIdReq", "/", NULL, &resp);
+    RpbReplGetClusterIdResp *r =
+        st == RIAK_OK ? rpb_repl_get_cluster_id_resp__unpack(NULL, resp.body.len,
+                                                             (const uint8_t *)resp.body.data)
+                      : NULL;
+    riak_buf_free(&resp.body);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    if (r == NULL) {
+        return riak_set_error(c, RIAK_E_PARSE, "malformed RpbReplGetClusterIdResp");
+    }
+    *id = riak_pb_strdup(r->cluster_id);
+    rpb_repl_get_cluster_id_resp__free_unpacked(r, NULL);
+    return *id ? RIAK_OK : riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+}
+
+riak_status riak_pb_repl_get(riak_client *c, const char *cluster_id, const char *bucket,
+                             const char *key, const riak_opts *o, riak_object *out) {
+    if (o->bucket_type) {
+        return unsupported(c, "a bucket type in riak_repl_get");
+    }
+    RpbReplGetReq m = RPB_REPL_GET_REQ__INIT;
+    m.bucket = riak_pb_bin(bucket);
+    m.key = riak_pb_bin(key);
+    m.cluster_id = riak_pb_bin(cluster_id);
+    if (!QUORUM(r, o->r) || !QUORUM(pr, o->pr)) {
+        return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
+    }
+    m.has_basic_quorum = o->basic_quorum;
+    m.basic_quorum = o->basic_quorum;
+    m.has_notfound_ok = o->notfound_ok;
+    m.notfound_ok = o->notfound_ok;
+    m.has_head = o->head;
+    m.head = o->head;
+    m.has_deletedvclock = o->deletedvclock;
+    m.deletedvclock = o->deletedvclock;
+    m.has_sloppy_quorum = o->sloppy_quorum;
+    m.sloppy_quorum = o->sloppy_quorum;
+    m.has_n_val = o->n_val > 0;
+    m.n_val = o->n_val;
+    ProtobufCBinaryData vc = {0};
+    if (o->if_modified) {
+        if (o->vclock == NULL || !riak_pb_b64_decode(o->vclock, &vc)) {
+            return riak_set_error(c, RIAK_E_INVALID_ARG, "if_modified needs a valid vclock");
+        }
+        m.has_if_modified = 1;
+        m.if_modified = vc;
+    }
+    char *path = riak_pb_path(c, NULL, bucket, "keys", key);
+    if (path == NULL) {
+        free(vc.data);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    riak_pb_response resp = {0};
+    riak_status st = repl_tunnel(c, RIAK_PB_REPL_GET_REQ, RIAK_PB_GET_RESP, "RpbReplGetReq", path,
+                                 &m.base, &resp);
+    if (st == RIAK_OK) {
+        st = riak_pb_finish_get(c, o, &resp, out);
+    }
+    riak_buf_free(&resp.body);
+    free(path);
+    free(vc.data);
+    return st;
+}
+
+/* ---- nextgenrepl queues ------------------------------------------------ */
+
+riak_status riak_pb_repl_fetch(riak_client *c, const char *queue, riak_repl_fetch_result *out) {
+    RpbFetchReq m = RPB_FETCH_REQ__INIT;
+    m.queuename = riak_pb_bin(queue);
+    m.has_encoding = 1;
+    m.encoding = riak_pb_bin("internal_aaehash"); /* adds the segment id and hash */
+    riak_pb_call call = {.code = RIAK_PB_FETCH_REQ,
+                         .resp_code = RIAK_PB_FETCH_RESP,
+                         .idempotent = false, /* a fetch takes the entry off the queue */
+                         .name = "RpbFetchReq",
+                         .path = "/queuename"};
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_exec(c, &call, &m.base, &rpb_fetch_resp__descriptor, &msg);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    RpbFetchResp *r = (RpbFetchResp *)msg;
+    out->queue_empty = r->queue_empty;
+    out->deleted = r->has_deleted && r->deleted;
+    out->has_crc = r->has_crc_check;
+    out->crc = r->crc_check;
+    out->segment_id = r->segment_id;
+    out->segment_hash = r->segment_hash;
+    if (r->has_replencoded_object) {
+        out->object_len = r->replencoded_object.len;
+        out->object = malloc(out->object_len ? out->object_len : 1);
+        if (out->object == NULL) {
+            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+        } else if (out->object_len) {
+            memcpy(out->object, r->replencoded_object.data, out->object_len);
+        }
+    }
+    if (st == RIAK_OK && r->has_deleted_vclock &&
+        (out->deleted_vclock = riak_pb_b64_encode(r->deleted_vclock)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    rpb_fetch_resp__free_unpacked(r, NULL);
+    return st;
+}
+
+riak_status riak_pb_repl_push(riak_client *c, const char *queue, const riak_repl_key *keys,
+                              size_t n, riak_repl_push_result *out) {
+    RpbKeysValue *kv = calloc(n ? n : 1, sizeof *kv);
+    RpbKeysValue **kvp = (RpbKeysValue **)calloc(n ? n : 1, sizeof *kvp);
+    ProtobufCBinaryData *clocks = calloc(n ? n : 1, sizeof *clocks);
+    riak_status st =
+        kv && kvp && clocks ? RIAK_OK : riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    for (size_t i = 0; st == RIAK_OK && i < n; i++) {
+        rpb_keys_value__init(&kv[i]);
+        if (keys[i].bucket_type) {
+            kv[i].has_type = 1;
+            kv[i].type = riak_pb_bin(keys[i].bucket_type);
+        }
+        kv[i].bucket = riak_pb_bin(keys[i].bucket);
+        kv[i].key = riak_pb_bin(keys[i].key);
+        if (!riak_pb_b64_decode(keys[i].vclock, &clocks[i])) {
+            st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid vclock");
+            break;
+        }
+        kv[i].value = clocks[i];
+        kvp[i] = &kv[i];
+    }
+    ProtobufCMessage *msg = NULL;
+    if (st == RIAK_OK) {
+        RpbPushReq m = RPB_PUSH_REQ__INIT;
+        m.queuename = riak_pb_bin(queue);
+        m.n_keys_value = n;
+        m.keys_value = kvp;
+        riak_pb_call call = {.code = RIAK_PB_PUSH_REQ,
+                             .resp_code = RIAK_PB_PUSH_RESP,
+                             .idempotent = false,
+                             .name = "RpbPushReq",
+                             .path = "/queuename"};
+        st = riak_pb_exec(c, &call, &m.base, &rpb_push_resp__descriptor, &msg);
+    }
+    if (st == RIAK_OK && out) {
+        RpbPushResp *r = (RpbPushResp *)msg;
+        out->queue_exists = r->queue_exists;
+        out->fold_length = r->foldq_length;
+        out->fsync_length = r->fsync_length;
+        out->realtime_length = r->realt_length;
+    }
+    if (msg) {
+        protobuf_c_message_free_unpacked(msg, NULL);
+    }
+    for (size_t i = 0; clocks && i < n; i++) {
+        free(clocks[i].data);
+    }
+    free(clocks);
+    free((void *)kvp);
+    free(kv);
+    return st;
+}
+
+riak_status riak_pb_membership(riak_client *c, riak_members *out) {
+    /* Riak only accepts the request without a body (an empty message) */
+    riak_pb_call call = {.code = RIAK_PB_MEMBERSHIP_REQ,
+                         .resp_code = RIAK_PB_MEMBERSHIP_RESP,
+                         .idempotent = true,
+                         .name = "RpbMembershipReq",
+                         .path = "/membership_request"};
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_exec(c, &call, NULL, &rpb_membership_resp__descriptor, &msg);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    RpbMembershipResp *r = (RpbMembershipResp *)msg;
+    size_t n = r->n_up_nodes;
+    if ((out->items = calloc(n ? n : 1, sizeof *out->items)) == NULL) {
+        rpb_membership_resp__free_unpacked(r, NULL);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    for (size_t i = 0; st == RIAK_OK && i < n; i++) {
+        riak_member *mb = &out->items[out->count++];
+        mb->port = r->up_nodes[i]->port;
+        if ((mb->ip = riak_pb_strdup(r->up_nodes[i]->ip)) == NULL) {
+            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+        }
+    }
+    rpb_membership_resp__free_unpacked(r, NULL);
     return st;
 }

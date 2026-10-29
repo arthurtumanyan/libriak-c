@@ -27,7 +27,7 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 
 ```sh
 sudo apt install cmake libcurl4-openssl-dev libjson-c-dev \
-    libprotobuf-c-dev protobuf-c-compiler libssl-dev           # Debian/Ubuntu
+    libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev # Debian/Ubuntu
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
