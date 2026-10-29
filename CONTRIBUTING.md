@@ -32,6 +32,15 @@ The live tests, fuzzing and coverage are described in
   symbols).
 - User-visible changes are recorded under "Unreleased" in `CHANGELOG.md`, and
   the guides in `docs/` are updated with them.
+- Binary compatibility within a major version: public structures that
+  programs allocate (`riak_config`, `riak_opts`, ...) are never changed in
+  place. A changed structure gets a new symbol version node in
+  `cmake/libriak-c.map`, a frozen copy of its previous layout and entry
+  points for it (as `src/compat_v2.c` does for 2.0), and the functions that
+  take it get the new version as their default. Structures the library
+  allocates (`riak_async_result`, `riak_request_metrics`) only grow at the
+  end. Names are never moved between version nodes; `abi_symbols` and the
+  `abi` CI job check it.
 
 ## Writing style
 

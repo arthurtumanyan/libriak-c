@@ -206,6 +206,37 @@ jobs:
         if: failure()
         run: docker logs riak 2>&1 | tail -100
 
+  abi:
+    name: binary compatibility with 2.0.0
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev
+      - name: Build this version
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: Build 2.0.0 with its tests
+        run: |
+          git fetch --depth=1 origin 2d07d75866f56dcda0f5bdbb235180cd03c9adf7
+          git worktree add ../v2.0.0 FETCH_HEAD
+          cmake -S ../v2.0.0 -B ../v2.0.0/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build ../v2.0.0/build -j
+          ctest --test-dir ../v2.0.0/build -R tls_certs
+      - name: Run the 2.0.0 test programs against this library
+        working-directory: ../v2.0.0
+        run: |
+          lib="$GITHUB_WORKSPACE/build"
+          ldd build/tests/test_client | grep -F "$lib" >/dev/null && exit 1  # still the old one
+          for t in client async; do
+            LD_LIBRARY_PATH="$lib" python3 tests/stub_riak.py "build/tests/test_$t"
+          done
+          RIAK_TEST_CERTS=build/tests/certs LD_LIBRARY_PATH="$lib" \
+            python3 tests/stub_riak.py --tls build/tests/certs build/tests/test_tls
+          LD_LIBRARY_PATH="$lib" ldd build/tests/test_client | grep -F "$lib/libriak-c.so.2"
+      - name: Exported symbols
+        run: sh tests/abi/check_symbols.sh build/libriak-c.so tests/abi/libriak-c-2.0.0.symbols
+
   coverage:
     runs-on: ubuntu-24.04
     steps:

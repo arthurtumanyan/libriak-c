@@ -130,6 +130,23 @@ endforeach()
 target_compile_definitions(riak INTERFACE RIAK_SHARED)
 set_target_properties(riak PROPERTIES
   VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+
+# Binary compatibility with 2.0.0: symbol versions and the 2.0 entry points
+# (src/compat_v2.c). They need ELF symbol versioning, so other platforms build
+# without them and programs there are rebuilt against each release.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|DragonFly" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set(RIAK_SYMBOL_VERSIONS_DEFAULT ON)
+else()
+  set(RIAK_SYMBOL_VERSIONS_DEFAULT OFF)
+endif()
+option(RIAK_SYMBOL_VERSIONS "Version the shared library's symbols (ELF), with 2.0 compatibility"
+       ${RIAK_SYMBOL_VERSIONS_DEFAULT})
+if(RIAK_SYMBOL_VERSIONS)
+  target_sources(riak PRIVATE src/compat_v2.c)
+  target_link_options(riak PRIVATE
+    "LINKER:--version-script=${PROJECT_SOURCE_DIR}/cmake/libriak-c.map")
+  set_property(TARGET riak APPEND PROPERTY LINK_DEPENDS ${PROJECT_SOURCE_DIR}/cmake/libriak-c.map)
+endif()
 add_library(riak::riak ALIAS riak)
 add_library(riak::riak_static ALIAS riak_static)
 

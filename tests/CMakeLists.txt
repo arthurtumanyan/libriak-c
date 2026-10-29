@@ -83,6 +83,25 @@ else()
 endif()
 set_tests_properties(threads PROPERTIES TIMEOUT 120 ENVIRONMENT "${RIAK_THREADS_ENV}")
 
+# The 2.0 entry points, called directly against the HTTP stub
+add_executable(test_compat test_compat.c ${PROJECT_SOURCE_DIR}/src/compat_v2.c)
+target_link_libraries(test_compat PRIVATE riak_objects riak_pbgen riak_warnings)
+target_compile_definitions(test_compat PRIVATE RIAK_COMPAT_NO_SYMVER)
+target_include_directories(test_compat PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME compat
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py
+            $<TARGET_FILE:test_compat>)
+  set_tests_properties(compat PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+# Binary compatibility: every 2.0.0 function stays exported under LIBRIAK_2.0
+if(RIAK_SYMBOL_VERSIONS AND CMAKE_OBJDUMP)
+  add_test(NAME abi_symbols
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/abi/check_symbols.sh $<TARGET_FILE:riak>
+            ${CMAKE_CURRENT_SOURCE_DIR}/abi/libriak-c-2.0.0.symbols)
+endif()
+
 add_executable(test_live test_live.c)
 target_link_libraries(test_live PRIVATE riak riak_warnings)
 add_test(NAME live COMMAND test_live)

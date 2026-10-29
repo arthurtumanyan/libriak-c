@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- Programs built against 2.0.0 keep working without a rebuild: the shared
+  library versions its symbols (`LIBRIAK_2.0`, `LIBRIAK_2.1`) and keeps
+  2.0.0 entry points for the 14 functions whose structures grew, with the
+  2.0.0 layout and defaults (HTTP transport). Without them the structure
+  changes of this release would have broken those programs.
 - A streaming callback (key or bucket listing, index query, MapReduce,
   object fold) that issued a request on the client running it reused the
   connection and buffers of the stream in progress: a use-after-free over

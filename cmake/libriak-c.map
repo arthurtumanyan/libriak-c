@@ -1,0 +1,75 @@
+/* Symbol versions of libriak-c.so.2 (ELF). LIBRIAK_2.0 holds the functions
+   of 2.0.0 whose interface is unchanged; the 2.0 entry points of the functions
+   whose structures changed are bound to LIBRIAK_2.0 by .symver in
+   src/compat_v2.c. Every other public function, including the current
+   definitions of those, is LIBRIAK_2.1. A name is never moved between nodes. */
+LIBRIAK_2.0 {
+  global:
+    riak_async_client;
+    riak_async_free;
+    riak_async_on_socket;
+    riak_async_on_timeout;
+    riak_async_pending;
+    riak_async_ping;
+    riak_async_run;
+    riak_async_set_loop;
+    riak_client_check_nodes;
+    riak_client_errmsg;
+    riak_client_free;
+    riak_client_http_status;
+    riak_client_node_count;
+    riak_client_node_info;
+    riak_datatype_free;
+    riak_dt_map_get;
+    riak_dt_op_add;
+    riak_dt_op_free;
+    riak_dt_op_increment;
+    riak_dt_op_map_counter;
+    riak_dt_op_map_flag;
+    riak_dt_op_map_map;
+    riak_dt_op_map_register;
+    riak_dt_op_map_remove;
+    riak_dt_op_map_set;
+    riak_dt_op_new;
+    riak_dt_op_remove;
+    riak_free;
+    riak_get_bucket_props;
+    riak_get_type_props;
+    riak_global_cleanup;
+    riak_global_init;
+    riak_index_result_free;
+    riak_list_buckets;
+    riak_list_keys;
+    riak_mapred;
+    riak_mapred_stream;
+    riak_object_free;
+    riak_object_set_free;
+    riak_ping;
+    riak_reset_bucket_props;
+    riak_search;
+    riak_search_index_create;
+    riak_search_index_delete;
+    riak_search_index_get;
+    riak_search_index_list;
+    riak_search_result_free;
+    riak_search_schema_get;
+    riak_search_schema_put;
+    riak_set_bucket_props;
+    riak_stats;
+    riak_strerror;
+    riak_strlist_free;
+    riak_type_get_bucket_props;
+    riak_type_list_buckets;
+    riak_type_list_keys;
+    riak_type_reset_bucket_props;
+    riak_type_set_bucket_props;
+  local:
+    compat_v20_*;
+};
+
+LIBRIAK_2.1 {
+  global:
+    riak_*;
+  local:
+    *;
+} LIBRIAK_2.0;
