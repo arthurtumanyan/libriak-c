@@ -227,6 +227,21 @@ static riak_status to_sibling_set(riak_client *c, riak_response *resp, riak_obje
     return RIAK_OK;
 }
 
+riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const char *key,
+                                     const riak_opts *o, riak_prepared *p) {
+    return prepare_fetch(c, bucket, key, o, OP_GET_SIBLINGS, p);
+}
+
+riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out) {
+    memset(out, 0, sizeof *out);
+    riak_status st = (resp->status == 200 || resp->status == 300) ? to_sibling_set(c, resp, out)
+                                                                  : riak_http_error(c, resp);
+    if (st != RIAK_OK) {
+        riak_object_set_free(out);
+    }
+    return st;
+}
+
 riak_status riak_get_siblings(riak_client *client, const char *bucket, const char *key,
                               const riak_opts *opts, riak_object_set *out) {
     if (client == NULL || out == NULL) {
@@ -238,15 +253,10 @@ riak_status riak_get_siblings(riak_client *client, const char *bucket, const cha
     }
     riak_response resp = {0};
     riak_prepared p;
-    riak_status st =
-        prepare_fetch(client, bucket, key, opts ? opts : &no_opts, OP_GET_SIBLINGS, &p);
+    riak_status st = riak_kv_prepare_siblings(client, bucket, key, opts ? opts : &no_opts, &p);
     st = run(client, st, &p, &resp);
     if (st == RIAK_OK) {
-        st = (resp.status == 200 || resp.status == 300) ? to_sibling_set(client, &resp, out)
-                                                        : riak_http_error(client, &resp);
-    }
-    if (st != RIAK_OK) {
-        riak_object_set_free(out);
+        st = riak_kv_finish_siblings(client, &resp, out);
     }
     riak_response_free(&resp);
     return st;

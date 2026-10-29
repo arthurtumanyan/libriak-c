@@ -89,6 +89,7 @@ set(RIAK_SOURCES
   src/aae.c
   src/async.c
   src/async_pb.c
+  src/async_ops.c
   src/bucket.c
   src/client.c
   src/cluster.c

@@ -23,8 +23,11 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
   matrix of what each version serves
 - Clusters: round-robin or failover node selection, retries with backoff,
   ejection of failing nodes
-- Asynchronous requests on one thread, with hooks for external event loops;
-  one client per thread, checked with ThreadSanitizer
+- Asynchronous requests on one thread for the data path (objects, siblings,
+  data types, counters, index queries, Search, MapReduce, bucket properties)
+  and streamed listings, with hooks for external event loops; one client per
+  thread, checked with ThreadSanitizer
+- Binary compatibility: programs built against 2.0.0 run unchanged
 - Security: verified TLS (HTTPS or STARTTLS), password authentication,
   client certificates
 - Logging and per-request metrics callbacks

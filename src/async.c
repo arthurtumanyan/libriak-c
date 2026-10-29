@@ -9,24 +9,20 @@
  health tracking.
  */
 
-#include "internal.h"
-#include "pb.h"
+#include "async_op.h"
 
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-enum kind { K_PING, K_GET, K_PUT, K_DELETE };
-
 typedef struct op op;
 struct op {
     riak_attempt at; /* CURLOPT_PRIVATE points here */
     riak_async *a;
-    enum kind kind;
+    const riak_aop_def *def;
+    void *state;
     riak_prepared p;
-    riak_opts opts; /* only resolver / resolver_ctx are used after submission */
-    bool generated_key;
     riak_async_cb cb;
     void *ctx;
     riak_response resp;
@@ -50,8 +46,6 @@ struct riak_async {
     void *loop_ctx;
     long long curl_deadline; /* ms, 0 = none */
 };
-
-static const riak_opts no_opts;
 
 static CURL *take_handle(riak_async *a) {
     return a->n_pool ? a->pool[--a->n_pool] : curl_easy_init();
@@ -83,6 +77,7 @@ static void unlink_op(riak_async *a, op *o) {
 static void op_free(op *o) {
     riak_prepared_free(&o->p);
     riak_response_free(&o->resp);
+    if (o->def->free_state) o->def->free_state(o->state);
     free(o);
 }
 
@@ -90,31 +85,17 @@ static void op_free(op *o) {
  * already removed from the pending list, is freed. */
 static void finish_op(riak_async *a, op *o, riak_status st) {
     riak_client *c = a->c;
-    riak_async_result res = {.status = st, .http_status = o->resp.status};
-    if (st == RIAK_OK) {
-        switch (o->kind) {
-        case K_PING:
-            res.status = riak_finish_ping(c, &o->resp);
-            break;
-        case K_GET:
-            res.status = riak_kv_finish_get(c, &o->opts, &o->resp, &res.object);
-            break;
-        case K_PUT:
-            res.status = riak_kv_finish_put(c, o->generated_key, &o->resp, &res.object,
-                                            o->generated_key ? &res.created_key : NULL);
-            break;
-        case K_DELETE:
-            res.status = riak_kv_finish_delete(c, &o->resp);
-            break;
-        }
+    riak_async_result res = {.status = st, .http_status = o->resp.status, .kind = o->def->kind};
+    if (st == RIAK_OK && o->def->finish_http) {
+        res.status = o->def->finish_http(c, o->state, &o->resp, &res);
+    } else if (st != RIAK_OK && o->def->on_error) {
+        res.status = o->def->on_error(c, o->state, st);
     }
     res.errmsg = res.status == RIAK_OK ? "" : c->errmsg;
     o->cb(&res, o->ctx);
-    riak_object_free(&res.object);
-    free(res.created_key);
+    riak_async_result_clear(&res);
     op_free(o);
 }
-
 static void complete(riak_async *a, op *o, riak_status st) {
     unlink_op(a, o);
     finish_op(a, o, st);
@@ -158,7 +139,9 @@ static void drain(riak_async *a) {
         a->c->http_status = 0;
         riak_status st = riak_attempt_finish(&o->at, rc, &retry);
         give_handle(a, h);
-        if (riak_retry_allowed(a->c, riak_request_idempotent(&o->p.req), retry, o->attempt + 1)) {
+        /* a pinned request goes to its node only, as in the blocking path */
+        if (o->p.req.pin == 0 &&
+            riak_retry_allowed(a->c, riak_request_idempotent(&o->p.req), retry, o->attempt + 1)) {
             riak_response_free(&o->resp);
             o->retry_at = riak_now_ms() + riak_backoff_ms(a->c, o->attempt);
             if (o->retry_at <= 0) o->retry_at = 1;
@@ -190,75 +173,35 @@ static long long start_due_retries(riak_async *a) {
     return next;
 }
 
-static riak_status submit(riak_async *a, op *o, riak_status prepared) {
-    if (prepared != RIAK_OK) {
-        free(o);
-        return prepared;
+riak_status riak_async_submit_http(riak_async *a, const riak_aop_def *def, void *state,
+                                   riak_prepared *p, riak_async_cb cb, void *ctx) {
+    op *o = calloc(1, sizeof *o);
+    if (o == NULL) {
+        riak_prepared_free(p);
+        if (def->free_state) def->free_state(state);
+        return riak_set_error(a->c, RIAK_E_NOMEM, "out of memory");
     }
     o->a = a;
+    o->def = def;
+    o->state = state;
+    o->p = *p; /* the heap pointers inside req stay valid */
+    memset(p, 0, sizeof *p);
+    o->cb = cb;
+    o->ctx = ctx;
+    if (def->bind_http) def->bind_http(state, &o->resp);
     o->next = a->ops;
     if (a->ops) a->ops->prev = o;
     a->ops = o;
     a->pending++;
-    o->node = riak_pick_node(a->c, SIZE_MAX);
+    o->node =
+        o->p.req.pin > 0 ? (o->p.req.pin - 1) % a->c->n_nodes : riak_pick_node(a->c, SIZE_MAX);
     /* adding the transfer makes curl ask for a timer; the loop takes over */
     start_attempt(a, o);
     return RIAK_OK;
 }
 
-static op *new_op(riak_async *a, enum kind kind, const riak_opts *opts, riak_async_cb cb,
-                  void *ctx) {
-    op *o = calloc(1, sizeof *o);
-    if (o == NULL) {
-        riak_set_error(a->c, RIAK_E_NOMEM, "out of memory");
-        return NULL;
-    }
-    o->kind = kind;
-    o->opts = opts ? *opts : no_opts;
-    o->cb = cb;
-    o->ctx = ctx;
-    return o;
-}
-
-riak_status riak_async_ping(riak_async *a, riak_async_cb cb, void *ctx) {
-    if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
-    if (a->pb)
-        return riak_pb_async_submit(a->pb, RIAK_PBA_PING, NULL, NULL, NULL, 0, NULL, cb, ctx);
-    op *o = new_op(a, K_PING, NULL, cb, ctx);
-    return o ? submit(a, o, riak_prepare_ping(a->c, &o->p)) : RIAK_E_NOMEM;
-}
-
-riak_status riak_async_get(riak_async *a, const char *bucket, const char *key,
-                           const riak_opts *opts, riak_async_cb cb, void *ctx) {
-    if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
-    if (a->pb)
-        return riak_pb_async_submit(a->pb, RIAK_PBA_GET, bucket, key, NULL, 0, opts, cb, ctx);
-    op *o = new_op(a, K_GET, opts, cb, ctx);
-    return o ? submit(a, o, riak_kv_prepare_get(a->c, bucket, key, &o->opts, &o->p)) : RIAK_E_NOMEM;
-}
-
-riak_status riak_async_put(riak_async *a, const char *bucket, const char *key, const void *value,
-                           size_t len, const riak_opts *opts, riak_async_cb cb, void *ctx) {
-    if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
-    if (a->pb) {
-        if (value == NULL && len > 0) return RIAK_E_INVALID_ARG;
-        return riak_pb_async_submit(a->pb, RIAK_PBA_PUT, bucket, key, value, len, opts, cb, ctx);
-    }
-    op *o = new_op(a, K_PUT, opts, cb, ctx);
-    if (o == NULL) return RIAK_E_NOMEM;
-    o->generated_key = key == NULL;
-    return submit(a, o, riak_kv_prepare_put(a->c, bucket, key, value, len, &o->opts, true, &o->p));
-}
-
-riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key,
-                              const riak_opts *opts, riak_async_cb cb, void *ctx) {
-    if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
-    if (a->pb) {
-        return riak_pb_async_submit(a->pb, RIAK_PBA_DELETE, bucket, key, NULL, 0, opts, cb, ctx);
-    }
-    op *o = new_op(a, K_DELETE, opts, cb, ctx);
-    return o ? submit(a, o, riak_kv_prepare_delete(a->c, bucket, key, &o->opts, &o->p))
-             : RIAK_E_NOMEM;
+riak_pb_async *riak_async_pb_engine(riak_async *a) {
+    return a->pb;
 }
 
 size_t riak_async_run(riak_async *a, long timeout_ms) {

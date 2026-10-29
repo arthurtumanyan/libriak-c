@@ -164,8 +164,10 @@ static riak_status set_context(riak_client *c, protobuf_c_boolean has, ProtobufC
 
 /* ---- fetch ----------------------------------------------------------- */
 
-riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucket, const char *key,
-                             const riak_dt_opts *opts, riak_datatype *out) {
+riak_status riak_pb_dt_prepare_fetch(riak_client *c, const char *type, const char *bucket,
+                                     const char *key, const riak_dt_opts *opts,
+                                     riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
     DtFetchReq m = DT_FETCH_REQ__INIT;
     m.bucket = riak_pb_bin(bucket);
@@ -188,9 +190,15 @@ riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucke
                          .idempotent = true,
                          .name = "DtFetchReq",
                          .path = path};
-    ProtobufCMessage *msg;
-    riak_status st = riak_pb_exec(c, &call, &m.base, &dt_fetch_resp__descriptor, &msg);
+    riak_status st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
     free(path);
+    return st;
+}
+
+riak_status riak_pb_dt_finish_fetch(riak_client *c, riak_pb_response *resp, riak_datatype *out) {
+    memset(out, 0, sizeof *out);
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_unpack(c, resp, &dt_fetch_resp__descriptor, &msg);
     if (st != RIAK_OK) {
         return st;
     }
@@ -241,6 +249,22 @@ riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucke
     if (st != RIAK_OK) {
         riak_datatype_free(out);
     }
+    return st;
+}
+
+riak_status riak_pb_dt_fetch(riak_client *c, const char *type, const char *bucket, const char *key,
+                             const riak_dt_opts *opts, riak_datatype *out) {
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = riak_pb_dt_prepare_fetch(c, type, bucket, key, opts, &p);
+    if (st == RIAK_OK) {
+        st = riak_pb_perform(c, &p.req, &resp);
+    }
+    riak_pb_prepared_free(&p);
+    if (st == RIAK_OK) {
+        st = riak_pb_dt_finish_fetch(c, &resp, out);
+    }
+    riak_buf_free(&resp.body);
     return st;
 }
 
@@ -425,9 +449,10 @@ static riak_status build_op(arena *a, const riak_dt_op *op, DtOp *d) {
     }
 }
 
-riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *bucket, const char *key,
-                              const riak_dt_op *op, const char *context, const riak_dt_opts *opts,
-                              riak_datatype *out, char **created_key) {
+riak_status riak_pb_dt_prepare_update(riak_client *c, const char *type, const char *bucket,
+                                      const char *key, const riak_dt_op *op, const char *context,
+                                      const riak_dt_opts *opts, riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
     arena a = {0};
     DtOp dop;
@@ -466,32 +491,40 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
     m.timeout = o->server_timeout_ms;
     char *path = riak_pb_path(c, type, bucket, "datatypes", key);
     if (path == NULL) {
-        free(ctx.data);
-        arena_free(&a);
-        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    } else {
+        riak_pb_call call = {.code = RIAK_PB_DT_UPDATE_REQ,
+                             .resp_code = RIAK_PB_DT_UPDATE_RESP,
+                             .idempotent = false, /* counters would count twice */
+                             .name = "DtUpdateReq",
+                             .path = path};
+        st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
     }
-    riak_pb_call call = {.code = RIAK_PB_DT_UPDATE_REQ,
-                         .resp_code = RIAK_PB_DT_UPDATE_RESP,
-                         .idempotent = false, /* counters would count twice */
-                         .name = "DtUpdateReq",
-                         .path = path};
-    ProtobufCMessage *msg;
-    st = riak_pb_exec(c, &call, &m.base, &dt_update_resp__descriptor, &msg);
     free(path);
     free(ctx.data);
     arena_free(&a);
+    return st;
+}
+
+riak_status riak_pb_dt_finish_update(riak_client *c, riak_pb_response *resp, riak_dt_type type,
+                                     bool return_body, bool generated_key, riak_datatype *out,
+                                     char **created_key) {
+    if (out) memset(out, 0, sizeof *out);
+    if (created_key) *created_key = NULL;
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_unpack(c, resp, &dt_update_resp__descriptor, &msg);
     if (st != RIAK_OK) {
         return st;
     }
     DtUpdateResp *r = (DtUpdateResp *)msg;
-    if (created_key && key == NULL) {
+    if (created_key && generated_key) {
         if (!r->has_key) {
             st = riak_set_error(c, RIAK_E_PARSE, "no generated key in the response");
         } else if ((*created_key = riak_pb_strdup(r->key)) == NULL) {
             st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
         }
     }
-    if (st == RIAK_OK && out && o->return_body) {
+    if (st == RIAK_OK && out && return_body) {
         wire_value w = {.has_counter = r->has_counter_value,
                         .counter = r->counter_value,
                         .set = r->set_value,
@@ -502,7 +535,7 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
                         .hll = r->hll_value,
                         .gset = r->gset_value,
                         .n_gset = r->n_gset_value};
-        st = value_from_wire(&w, op->type, &out->value);
+        st = value_from_wire(&w, type, &out->value);
         if (st != RIAK_OK) {
             riak_set_error(c, st, "cannot decode data type");
         } else {
@@ -517,5 +550,24 @@ riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *buck
         free(*created_key);
         *created_key = NULL;
     }
+    return st;
+}
+
+riak_status riak_pb_dt_update(riak_client *c, const char *type, const char *bucket, const char *key,
+                              const riak_dt_op *op, const char *context, const riak_dt_opts *opts,
+                              riak_datatype *out, char **created_key) {
+    const riak_dt_opts *o = opts ? opts : &no_dt_opts;
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = riak_pb_dt_prepare_update(c, type, bucket, key, op, context, o, &p);
+    if (st == RIAK_OK) {
+        st = riak_pb_perform(c, &p.req, &resp);
+    }
+    riak_pb_prepared_free(&p);
+    if (st == RIAK_OK) {
+        st = riak_pb_dt_finish_update(c, &resp, op->type, o->return_body, key == NULL, out,
+                                      created_key);
+    }
+    riak_buf_free(&resp.body);
     return st;
 }

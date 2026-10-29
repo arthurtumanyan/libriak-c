@@ -613,6 +613,31 @@ static riak_status parse_body(riak_client *c, riak_response *resp, riak_datatype
     return st == RIAK_OK ? st : riak_set_error(c, st, "cannot parse data type");
 }
 
+riak_status riak_dt_http_prepare_fetch(riak_client *c, const char *type, const char *bucket,
+                                       const char *key, const riak_dt_opts *o, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st = dt_url(c, type, bucket, key, &p->url);
+    if (st == RIAK_OK &&
+        (riak_url_append_quorum(&p->url, "r", o->r) != 0 ||
+         riak_url_append_quorum(&p->url, "pr", o->pr) != 0 ||
+         riak_url_append_quorum(&p->url, "node_confirms", o->node_confirms) != 0 ||
+         (o->no_context && riak_url_append_query(&p->url, "include_context", "false") != 0) ||
+         add_timeout(&p->url, o->server_timeout_ms) != 0)) {
+        st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "GET", .url = p->url.data};
+    return RIAK_OK;
+}
+
+riak_status riak_dt_http_finish_fetch(riak_client *c, riak_response *resp, riak_datatype *out) {
+    memset(out, 0, sizeof *out);
+    return resp->status == 200 ? parse_body(c, resp, out) : riak_http_error(c, resp);
+}
+
 riak_status riak_dt_fetch(riak_client *client, const char *type, const char *bucket,
                           const char *key, const riak_dt_opts *opts, riak_datatype *out) {
     if (client == NULL || out == NULL) {
@@ -620,44 +645,97 @@ riak_status riak_dt_fetch(riak_client *client, const char *type, const char *buc
     }
     memset(out, 0, sizeof *out);
     const riak_dt_opts *o = opts ? opts : &no_dt_opts;
-    riak_buf url = {0};
     riak_status st = riak_check_name(client, key, "key");
-    if (st == RIAK_OK) {
+    if (st != RIAK_OK) {
+        return st;
+    }
+    if (riak_is_pb(client)) {
+        riak_buf url = {0}; /* the names are checked as over HTTP */
         st = dt_url(client, type, bucket, key, &url);
-    }
-    if (st == RIAK_OK && riak_is_pb(client)) {
         riak_buf_free(&url);
-        return riak_pb_dt_fetch(client, type, bucket, key, o, out);
+        return st == RIAK_OK ? riak_pb_dt_fetch(client, type, bucket, key, o, out) : st;
     }
-    if (st == RIAK_OK &&
-        (riak_url_append_quorum(&url, "r", o->r) != 0 ||
-         riak_url_append_quorum(&url, "pr", o->pr) != 0 ||
-         riak_url_append_quorum(&url, "node_confirms", o->node_confirms) != 0 ||
-         (o->no_context && riak_url_append_query(&url, "include_context", "false") != 0) ||
-         add_timeout(&url, o->server_timeout_ms) != 0)) {
-        st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
-    }
+    riak_prepared p;
     riak_response resp = {0};
+    st = riak_dt_http_prepare_fetch(client, type, bucket, key, o, &p);
     if (st == RIAK_OK) {
-        riak_request req = {.method = "GET", .url = url.data};
-        st = riak_perform(client, &req, &resp);
-        if (st == RIAK_OK) {
-            st = resp.status == 200 ? parse_body(client, &resp, out)
-                                    : riak_http_error(client, &resp);
-        }
+        st = riak_perform(client, &p.req, &resp);
+        riak_prepared_free(&p);
+    }
+    if (st == RIAK_OK) {
+        st = riak_dt_http_finish_fetch(client, &resp, out);
     }
     riak_response_free(&resp);
-    riak_buf_free(&url);
     return st;
 }
 
-/* Location: /types/<t>/buckets/<b>/keys/<key> */
 static char *key_from_location(const char *loc) {
     const char *slash = strrchr(loc, '/');
     if (slash == NULL || slash[1] == '\0') {
         return NULL;
     }
     return riak_url_unescape(slash + 1, strcspn(slash + 1, "?#"));
+}
+
+riak_status riak_dt_http_prepare_update(riak_client *c, const char *type, const char *bucket,
+                                        const char *key, const riak_dt_op *op, const char *context,
+                                        const riak_dt_opts *o, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st = riak_dt_op_to_json(op, context, &p->body);
+    if (st != RIAK_OK) {
+        return riak_set_error(c, st, "invalid data type operation");
+    }
+    if ((st = dt_url(c, type, bucket, key, &p->url)) == RIAK_OK &&
+        (riak_url_append_quorum(&p->url, "w", o->w) != 0 ||
+         riak_url_append_quorum(&p->url, "dw", o->dw) != 0 ||
+         riak_url_append_quorum(&p->url, "pw", o->pw) != 0 ||
+         riak_url_append_quorum(&p->url, "node_confirms", o->node_confirms) != 0 ||
+         (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0) ||
+         add_timeout(&p->url, o->server_timeout_ms) != 0)) {
+        st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
+    }
+    if (st == RIAK_OK) {
+        st = riak_add_header(c, &p->headers, "Content-Type", NULL, "application/json");
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "POST",
+                            .url = p->url.data,
+                            .headers = p->headers,
+                            .body = p->body,
+                            .body_len = strlen(p->body)};
+    return RIAK_OK;
+}
+
+riak_status riak_dt_http_finish_update(riak_client *c, riak_response *resp, bool generated_key,
+                                       riak_datatype *out, char **created_key) {
+    if (out) memset(out, 0, sizeof *out);
+    if (created_key) *created_key = NULL;
+    riak_status st = RIAK_OK;
+    if (resp->status != 200 && resp->status != 201 && resp->status != 204) {
+        st = riak_http_error(c, resp);
+        /* removing an absent element or field: {precondition,{not_present,...}} */
+        if (resp->status == 500 && resp->body.data && strstr(resp->body.data, "precondition")) {
+            st = RIAK_E_PRECONDITION;
+        }
+        return st;
+    }
+    if (created_key && generated_key) {
+        const char *loc = riak_headerlist_get(&resp->headers, "Location");
+        if (loc == NULL || (*created_key = key_from_location(loc)) == NULL) {
+            return riak_set_error(c, RIAK_E_PARSE, "no usable Location header");
+        }
+    }
+    if (out && resp->status == 200 && resp->body.len > 0) {
+        st = parse_body(c, resp, out);
+    }
+    if (st != RIAK_OK && created_key) {
+        free(*created_key);
+        *created_key = NULL;
+    }
+    return st;
 }
 
 riak_status riak_dt_update(riak_client *client, const char *type, const char *bucket,
@@ -678,64 +756,16 @@ riak_status riak_dt_update(riak_client *client, const char *type, const char *bu
         }
         return riak_pb_dt_update(client, type, bucket, key, op, context, o, out, created_key);
     }
-    char *body = NULL;
-    riak_status st = riak_dt_op_to_json(op, context, &body);
-    if (st != RIAK_OK) {
-        return riak_set_error(client, st, "invalid data type operation");
-    }
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
+    riak_prepared p;
     riak_response resp = {0};
-    if ((st = dt_url(client, type, bucket, key, &url)) != RIAK_OK) {
-        goto done;
+    riak_status st = riak_dt_http_prepare_update(client, type, bucket, key, op, context, o, &p);
+    if (st == RIAK_OK) {
+        st = riak_perform(client, &p.req, &resp);
+        riak_prepared_free(&p);
     }
-    if (riak_url_append_quorum(&url, "w", o->w) != 0 ||
-        riak_url_append_quorum(&url, "dw", o->dw) != 0 ||
-        riak_url_append_quorum(&url, "pw", o->pw) != 0 ||
-        riak_url_append_quorum(&url, "node_confirms", o->node_confirms) != 0 ||
-        (o->return_body && riak_url_append_query(&url, "returnbody", "true") != 0) ||
-        add_timeout(&url, o->server_timeout_ms) != 0) {
-        st = riak_set_error(client, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
-        goto done;
-    }
-    if ((st = riak_add_header(client, &headers, "Content-Type", NULL, "application/json")) !=
-        RIAK_OK) {
-        goto done;
-    }
-    riak_request req = {.method = "POST",
-                        .url = url.data,
-                        .headers = headers,
-                        .body = body,
-                        .body_len = strlen(body)};
-    if ((st = riak_perform(client, &req, &resp)) != RIAK_OK) {
-        goto done;
-    }
-    if (resp.status != 200 && resp.status != 201 && resp.status != 204) {
-        st = riak_http_error(client, &resp);
-        /* removing an absent element or field: {precondition,{not_present,...}} */
-        if (resp.status == 500 && resp.body.data && strstr(resp.body.data, "precondition")) {
-            st = RIAK_E_PRECONDITION;
-        }
-        goto done;
-    }
-    if (created_key && key == NULL) {
-        const char *loc = riak_headerlist_get(&resp.headers, "Location");
-        if (loc == NULL || (*created_key = key_from_location(loc)) == NULL) {
-            st = riak_set_error(client, RIAK_E_PARSE, "no usable Location header");
-            goto done;
-        }
-    }
-    if (out && resp.status == 200 && resp.body.len > 0) {
-        st = parse_body(client, &resp, out);
-    }
-done:
-    if (st != RIAK_OK && created_key) {
-        free(*created_key);
-        *created_key = NULL;
+    if (st == RIAK_OK) {
+        st = riak_dt_http_finish_update(client, &resp, key == NULL, out, created_key);
     }
     riak_response_free(&resp);
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
-    free(body);
     return st;
 }

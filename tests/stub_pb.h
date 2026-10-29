@@ -1174,8 +1174,14 @@ static int stub_handle(stub_conn *c, uint8_t code, const uint8_t *buf, size_t le
         return stub_get(c, buf, len);
     case 11:
         return stub_put(c, buf, len);
-    case 13:
-        return stub_send(c, 14, NULL);
+    case 13: {
+        RpbDelReq *q = rpb_del_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        int gone = stub_is(q->key, "gone");
+        rpb_del_req__free_unpacked(q, NULL);
+        /* a node may answer "notfound" for a key that is already gone */
+        return gone ? stub_error(c, "notfound") : stub_send(c, 14, NULL);
+    }
     case 15:
         return stub_names(c, 16, 0);
     case 17:

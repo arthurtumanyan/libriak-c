@@ -1275,6 +1275,255 @@ static void on_done(riak_async_result *r, void *ctx) {
     if (r->created_key) snprintf(t->key, sizeof t->key, "%s", r->created_key);
 }
 
+/* The data path and streams over the async handle: each result equals the
+ * blocking call's, and the retry rules hold. */
+typedef struct {
+    int done;
+    riak_status status;
+    riak_async_kind kind;
+    riak_async_result kept;
+} grab;
+
+static void take(riak_async_result *res, void *ctx) {
+    grab *g = ctx;
+    g->done++;
+    g->status = res->status;
+    g->kind = res->kind;
+    g->kept = *res; /* ownership moves here */
+    memset(&res->object, 0, sizeof res->object);
+    memset(&res->siblings, 0, sizeof res->siblings);
+    memset(&res->datatype, 0, sizeof res->datatype);
+    memset(&res->index, 0, sizeof res->index);
+    memset(&res->search, 0, sizeof res->search);
+    res->json = res->created_key = res->continuation = NULL;
+    g->kept.errmsg = NULL;
+}
+
+static void grab_free(grab *g) {
+    riak_object_free(&g->kept.object);
+    riak_object_set_free(&g->kept.siblings);
+    riak_datatype_free(&g->kept.datatype);
+    riak_index_result_free(&g->kept.index);
+    riak_search_result_free(&g->kept.search);
+    riak_free(g->kept.json);
+    riak_free(g->kept.created_key);
+    riak_free(g->kept.continuation);
+    memset(g, 0, sizeof *g);
+}
+
+static riak_status wait_one(riak_async *a, grab *g) {
+    while (g->done == 0 && riak_async_run(a, 5000) > 0) {
+    }
+    CHECK_EQ_INT(g->done, 1);
+    return g->status;
+}
+
+static bool count_match(const char *key, const char *term, void *ctx) {
+    (void)key;
+    (void)term;
+    ++*(int *)ctx;
+    return true;
+}
+
+static bool count_phase(unsigned phase, const char *data, void *ctx) {
+    (void)phase;
+    (void)data;
+    ++*(int *)ctx;
+    return true;
+}
+
+static void test_async_data_path(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.port = port;
+    cfg.max_retries = 2;
+    cfg.retry_base_ms = 1;
+    riak_async *a = NULL;
+    CHECK_EQ_INT(riak_async_new(&cfg, &a), RIAK_OK);
+    if (a == NULL) return;
+    riak_client *c = client(); /* blocking reference */
+    grab g = {0};
+
+    CHECK_EQ_INT(riak_async_get_siblings(a, "b", "sibs", NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kind, RIAK_ASYNC_GET_SIBLINGS);
+    CHECK_EQ_INT(g.kept.siblings.count, 2);
+    grab_free(&g);
+
+    riak_datatype ref;
+    CHECK_EQ_INT(riak_dt_fetch(c, "maps", "b", "k", NULL, &ref), RIAK_OK);
+    CHECK_EQ_INT(riak_async_dt_fetch(a, "maps", "b", "k", NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kept.datatype.value.type, ref.value.type);
+    CHECK_EQ_INT(g.kept.datatype.value.n_entries, ref.value.n_entries);
+    CHECK_EQ_STR(g.kept.datatype.context, ref.context);
+    riak_datatype_free(&ref);
+    grab_free(&g);
+    riak_dt_op *op = riak_dt_op_new(RIAK_DT_GSET);
+    riak_dt_op_add(op, "x");
+    riak_dt_opts rb = {.return_body = true};
+    CHECK_EQ_INT(riak_async_dt_update(a, "gsets", "b", "k", op, NULL, &rb, take, &g), RIAK_OK);
+    riak_dt_op_free(op);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(ext.dt_return_body, 1);
+    CHECK(g.kept.datatype.value.n_elements == 1 &&
+          strcmp(g.kept.datatype.value.elements[0], "x") == 0);
+    grab_free(&g);
+    op = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(op, 2);
+    CHECK_EQ_INT(riak_async_dt_update(a, "counters", "b", NULL, op, NULL, NULL, take, &g), RIAK_OK);
+    riak_dt_op_free(op);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_STR(g.kept.created_key, "dtkey");
+    grab_free(&g);
+
+    CHECK_EQ_INT(riak_async_counter_get(a, "b", "c", NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kept.counter, 42);
+    grab_free(&g);
+    CHECK_EQ_INT(riak_async_counter_update(a, "b", "c", -5, NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kept.counter, 35);
+    CHECK_EQ_INT(ext.counter_returnvalue, 1);
+    grab_free(&g);
+    /* an update is sent once, also asynchronously */
+    unsigned sent = ext.received[50];
+    atomic_store(&ext.drop_code, 50);
+    CHECK_EQ_INT(riak_async_counter_update(a, "b", "c", 1, NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_TRANSPORT);
+    CHECK_EQ_INT(ext.received[50] - sent, 1);
+    grab_free(&g);
+    /* a read is retried */
+    sent = ext.received[52];
+    atomic_store(&ext.drop_code, 52);
+    CHECK_EQ_INT(riak_async_counter_get(a, "b", "c", NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(ext.received[52] - sent, 2);
+    grab_free(&g);
+    atomic_store(&ext.drop_code, 0);
+
+    riak_index_query q = {.index = "age_int", .range_min = "1", .range_max = "9"};
+    riak_index_result r;
+    CHECK_EQ_INT(riak_index_query_run(c, "b", &q, &r), RIAK_OK);
+    CHECK_EQ_INT(riak_async_index_query(a, "b", &q, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kept.index.count, r.count);
+    if (g.kept.index.count == 2) CHECK_EQ_STR(g.kept.index.keys[1], r.keys[1]);
+    CHECK_EQ_STR(g.kept.index.continuation, r.continuation);
+    riak_index_result_free(&r);
+    grab_free(&g);
+    int matches = 0;
+    CHECK_EQ_INT(riak_async_index_query_stream(a, "b", &q, count_match, &matches, take, &g),
+                 RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(matches, 2);
+    CHECK_EQ_STR(g.kept.continuation, "c2");
+    grab_free(&g);
+
+    riak_search_query sq = {.q = "name:alice"};
+    riak_search_result sr;
+    CHECK_EQ_INT(riak_search(c, "people", &sq, &sr), RIAK_OK);
+    CHECK_EQ_INT(riak_async_search(a, "people", &sq, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(g.kept.search.count, sr.count);
+    CHECK_EQ_STR(g.kept.search.raw, sr.raw);
+    riak_search_result_free(&sr);
+    grab_free(&g);
+    CHECK_EQ_INT(riak_async_search(a, "missing", &sq, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_NOT_FOUND);
+    grab_free(&g);
+
+    CHECK_EQ_INT(riak_async_mapred(a, "{\"inputs\":\"b\"}", take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_STR(g.kept.json, "[[1,2,3],[\"x\"]]");
+    grab_free(&g);
+    int phases = 0;
+    CHECK_EQ_INT(riak_async_mapred_stream(a, "{\"inputs\":\"b\"}", count_phase, &phases, take, &g),
+                 RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(phases, 3);
+    grab_free(&g);
+
+    char *props = NULL;
+    CHECK_EQ_INT(riak_get_bucket_props(c, "b", &props), RIAK_OK);
+    CHECK_EQ_INT(riak_async_get_bucket_props(a, NULL, "b", take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_STR(g.kept.json, props);
+    riak_free(props);
+    grab_free(&g);
+    CHECK_EQ_INT(riak_async_set_bucket_props(a, NULL, "b", "{\"props\":{\"n_val\":4}}", take, &g),
+                 RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(stub.set_n_val, 4);
+    grab_free(&g);
+
+    names n = {0};
+    CHECK_EQ_INT(riak_async_list_keys_stream(a, NULL, "b", on_name, &n, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(n.n, 3);
+    CHECK_EQ_STR(n.names[2], "n3");
+    grab_free(&g);
+    names two = {.stop_after = 2};
+    CHECK_EQ_INT(riak_async_list_buckets_stream(a, NULL, on_name, &two, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    CHECK_EQ_INT(two.n, 2);
+    CHECK_EQ_INT(g.kind, RIAK_ASYNC_LIST_BUCKETS);
+    grab_free(&g);
+    /* the connection of the stopped stream is not reused */
+    CHECK_EQ_INT(riak_async_ping(a, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
+    grab_free(&g);
+
+    CHECK_EQ_INT(riak_async_list_keys_stream(a, NULL, "", on_name, &n, take, &g),
+                 RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(riak_async_search(a, "people", NULL, take, &g), RIAK_E_INVALID_ARG);
+    CHECK_EQ_INT(g.done, 0);
+    riak_client_free(c);
+    riak_async_free(a);
+}
+
+/* Results a callback does not take are freed by the library (LeakSanitizer
+ * checks it), and an absent key is deleted successfully. */
+static void ignore(riak_async_result *res, void *ctx) {
+    int *n = ctx;
+    *n += res->status == RIAK_OK;
+}
+
+static void test_async_results_freed(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    cfg.port = port;
+    riak_async *a = NULL;
+    CHECK_EQ_INT(riak_async_new(&cfg, &a), RIAK_OK);
+    if (a == NULL) return;
+    int ok = 0;
+    riak_index_query q = {.index = "age_int", .range_min = "1", .range_max = "9"};
+    riak_search_query sq = {.q = "name:alice"};
+    riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(op, 1);
+    riak_dt_opts rb = {.return_body = true};
+    CHECK_EQ_INT(riak_async_get(a, "b", "k", NULL, ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_get_siblings(a, "b", "sibs", NULL, ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_dt_fetch(a, "maps", "b", "k", NULL, ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_dt_update(a, "counters", "b", NULL, op, NULL, &rb, ignore, &ok),
+                 RIAK_OK);
+    CHECK_EQ_INT(riak_async_index_query(a, "b", &q, ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_search(a, "people", &sq, ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_mapred(a, "{\"inputs\":\"b\"}", ignore, &ok), RIAK_OK);
+    CHECK_EQ_INT(riak_async_get_bucket_props(a, NULL, "b", ignore, &ok), RIAK_OK);
+    int matches = 0;
+    CHECK_EQ_INT(riak_async_index_query_stream(a, "b", &q, count_match, &matches, ignore, &ok),
+                 RIAK_OK);
+    CHECK_EQ_INT(riak_async_delete(a, "b", "gone", NULL, ignore, &ok), RIAK_OK);
+    riak_dt_op_free(op);
+    CHECK_EQ_INT(riak_async_run(a, 5000), 0);
+    CHECK_EQ_INT(ok, 10);
+    riak_async_free(a);
+    riak_client *c = client();
+    CHECK_EQ_INT(riak_delete(c, "b", "gone", NULL), RIAK_OK); /* as the blocking call */
+    riak_client_free(c);
+}
+
 static void test_async(void) {
     riak_config cfg;
     riak_config_init(&cfg);
@@ -1519,6 +1768,8 @@ int main(void) {
     RUN(test_old_node_pb);
     RUN(test_handler_crash_closes);
     RUN(test_async);
+    RUN(test_async_data_path);
+    RUN(test_async_results_freed);
     RUN(test_async_loop);
     RUN(test_tls);
     riak_global_cleanup();

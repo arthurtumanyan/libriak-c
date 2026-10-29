@@ -40,6 +40,7 @@ bucket type can be created).
 | `riak_cluster_membership()` | yes | yes | no | yes | yes |
 | `riak_get_cluster_id()`, `riak_repl_get()` | yes | `RIAK_E_UNSUPPORTED` | no | yes | yes |
 | Statistics (`riak_stats()`) | through `http_port` | yes | yes | yes | yes |
+| Asynchronous data path and streams (`riak_async_*`) | yes | yes | yes | yes | yes |
 | TLS and authentication | STARTTLS | HTTPS | with `tls_legacy` | yes | yes |
 
 Notes:

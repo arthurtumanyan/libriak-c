@@ -339,6 +339,67 @@ typedef struct {
 } riak_pb_prepared;
 
 void riak_pb_prepared_free(riak_pb_prepared *p);
+riak_status riak_pb_finish_siblings(riak_client *c, riak_pb_response *resp, riak_object_set *out);
+riak_status riak_pb_counter_prepare(riak_client *c, const char *bucket, const char *key,
+                                    bool update, int64_t amount, const riak_opts *o,
+                                    bool want_value, riak_pb_prepared *p);
+riak_status riak_pb_counter_finish(riak_client *c, riak_pb_response *resp, bool update,
+                                   int64_t *value);
+typedef struct {
+    riak_index_cb cb;
+    void *ctx;
+    char **continuation; /* receives the continuation, or NULL */
+} riak_pb_index_ctx;
+/* A streamed index query whose matches go to x->cb. */
+riak_status riak_pb_index_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
+                                  riak_pb_index_ctx *x, riak_pb_prepared *p);
+riak_status riak_pb_search_prepare(riak_client *c, const char *index, const riak_search_query *q,
+                                   riak_pb_prepared *p);
+riak_status riak_pb_search_finish(riak_client *c, riak_pb_response *resp, riak_search_result *out);
+typedef struct {
+    riak_mapred_cb cb; /* streaming; NULL: results are collected per phase */
+    void *ctx;
+    void **phases; /* json_object *, one per phase */
+    unsigned n_phases;
+} riak_pb_mapred_ctx;
+riak_status riak_pb_mapred_prepare(riak_client *c, const char *job, riak_pb_mapred_ctx *x,
+                                   riak_pb_prepared *p);
+/* The collected results as the JSON document HTTP returns. */
+riak_status riak_pb_mapred_result(riak_client *c, riak_pb_mapred_ctx *x, char **result);
+void riak_pb_mapred_ctx_free(riak_pb_mapred_ctx *x);
+typedef struct {
+    riak_name_cb cb;
+    void *ctx;
+    bool buckets; /* set by riak_pb_list_prepare() */
+} riak_pb_list_ctx;
+/* A streamed listing: the keys of bucket, or the buckets when it is NULL. */
+riak_status riak_pb_list_prepare(riak_client *c, const char *type, const char *bucket,
+                                 riak_pb_list_ctx *x, riak_pb_prepared *p);
+riak_status riak_pb_props_prepare_get(riak_client *c, const char *type, const char *bucket,
+                                      riak_pb_prepared *p);
+riak_status riak_pb_props_finish_get(riak_client *c, riak_pb_response *resp, const char *bucket,
+                                     char **json);
+riak_status riak_pb_props_prepare_set(riak_client *c, const char *type, const char *bucket,
+                                      const char *json, riak_pb_prepared *p);
+riak_status riak_pb_dt_prepare_fetch(riak_client *c, const char *type, const char *bucket,
+                                     const char *key, const riak_dt_opts *opts,
+                                     riak_pb_prepared *p);
+riak_status riak_pb_dt_finish_fetch(riak_client *c, riak_pb_response *resp, riak_datatype *out);
+riak_status riak_pb_dt_prepare_update(riak_client *c, const char *type, const char *bucket,
+                                      const char *key, const riak_dt_op *op, const char *context,
+                                      const riak_dt_opts *opts, riak_pb_prepared *p);
+riak_status riak_pb_dt_finish_update(riak_client *c, riak_pb_response *resp, riak_dt_type type,
+                                     bool return_body, bool generated_key, riak_datatype *out,
+                                     char **created_key);
+/* call and msg as a prepared request: the message is packed (strings it
+ * points to are no longer needed afterwards), and sink, if any, receives
+ * every response message. */
+riak_status riak_pb_prepare_call(riak_client *c, const riak_pb_call *call,
+                                 const ProtobufCMessage *msg, riak_pb_sink_fn sink, void *ctx,
+                                 riak_pb_prepared *p);
+/* The single response message of a finished request. */
+riak_status riak_pb_unpack(riak_client *c, const riak_pb_response *resp,
+                           const ProtobufCMessageDescriptor *desc, ProtobufCMessage **out);
 riak_status riak_pb_prepare_get(riak_client *c, const char *bucket, const char *key,
                                 const riak_opts *o, riak_pb_prepared *p);
 riak_status riak_pb_finish_get(riak_client *c, const riak_opts *o, riak_pb_response *resp,
@@ -360,10 +421,6 @@ struct riak_async;
 riak_pb_async *riak_pb_async_new(riak_client *c);
 void riak_pb_async_free(riak_pb_async *a);
 size_t riak_pb_async_pending(const riak_pb_async *a);
-enum riak_pb_async_kind { RIAK_PBA_PING, RIAK_PBA_GET, RIAK_PBA_PUT, RIAK_PBA_DELETE };
-riak_status riak_pb_async_submit(riak_pb_async *a, enum riak_pb_async_kind kind, const char *bucket,
-                                 const char *key, const void *value, size_t len,
-                                 const riak_opts *opts, riak_async_cb cb, void *ctx);
 size_t riak_pb_async_run(riak_pb_async *a, long timeout_ms);
 void riak_pb_async_set_loop(riak_pb_async *a, riak_socket_fn socket_fn, riak_timer_fn timer_fn,
                             void *ctx);

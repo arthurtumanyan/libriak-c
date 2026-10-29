@@ -20,14 +20,8 @@
 
 /* ---- secondary indexes --------------------------------------------- */
 
-typedef struct {
-    riak_index_cb cb;
-    void *ctx;
-    char **continuation;
-} index_ctx;
-
 static bool index_sink(void *ctx, const uint8_t *data, size_t len, bool *done, riak_status *err) {
-    index_ctx *x = ctx;
+    riak_pb_index_ctx *x = ctx;
     RpbIndexResp *r = rpb_index_resp__unpack(NULL, len, data);
     if (r == NULL) {
         *err = RIAK_E_PARSE;
@@ -74,8 +68,9 @@ static bool index_sink(void *ctx, const uint8_t *data, size_t len, bool *done, r
     return more && *err == RIAK_OK;
 }
 
-riak_status riak_pb_index(riak_client *c, const char *bucket, const riak_index_query *q,
-                          riak_index_cb cb, void *ctx, char **continuation) {
+riak_status riak_pb_index_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
+                                  riak_pb_index_ctx *x, riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     riak_status st;
     if (q == NULL) {
         return riak_set_error(c, RIAK_E_INVALID_ARG, "query must not be NULL");
@@ -146,10 +141,23 @@ riak_status riak_pb_index(riak_client *c, const char *bucket, const riak_index_q
                          .idempotent = true,
                          .name = "RpbIndexReq",
                          .path = path.data};
-    index_ctx x = {.cb = cb, .ctx = ctx, .continuation = continuation};
-    st = riak_pb_stream(c, &call, &m.base, index_sink, &x);
+    st = riak_pb_prepare_call(c, &call, &m.base, index_sink, x, p);
     free(cover.data);
     riak_buf_free(&path);
+    return st;
+}
+
+riak_status riak_pb_index(riak_client *c, const char *bucket, const riak_index_query *q,
+                          riak_index_cb cb, void *ctx, char **continuation) {
+    riak_pb_index_ctx x = {.cb = cb, .ctx = ctx, .continuation = continuation};
+    riak_pb_prepared p;
+    riak_status st = riak_pb_index_prepare(c, bucket, q, &x, &p);
+    if (st == RIAK_OK) {
+        riak_pb_response resp = {0};
+        st = riak_pb_perform(c, &p.req, &resp);
+        riak_buf_free(&resp.body);
+    }
+    riak_pb_prepared_free(&p);
     return st;
 }
 
@@ -217,8 +225,9 @@ static char *search_json(const RpbSearchQueryResp *r) {
     return s;
 }
 
-riak_status riak_pb_search(riak_client *c, const char *index, const riak_search_query *q,
-                           riak_search_result *out) {
+riak_status riak_pb_search_prepare(riak_client *c, const char *index, const riak_search_query *q,
+                                   riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     RpbSearchQueryReq m = RPB_SEARCH_QUERY_REQ__INIT;
     m.q = riak_pb_bin(q->q);
     m.index = riak_pb_bin(index);
@@ -261,10 +270,16 @@ riak_status riak_pb_search(riak_client *c, const char *index, const riak_search_
                          .idempotent = true,
                          .name = "RpbSearchQueryReq",
                          .path = path};
-    ProtobufCMessage *msg;
-    riak_status st = riak_pb_exec(c, &call, &m.base, &rpb_search_query_resp__descriptor, &msg);
+    riak_status st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
     free(path);
     free(fields);
+    return st;
+}
+
+riak_status riak_pb_search_finish(riak_client *c, riak_pb_response *resp, riak_search_result *out) {
+    memset(out, 0, sizeof *out);
+    ProtobufCMessage *msg;
+    riak_status st = riak_pb_unpack(c, resp, &rpb_search_query_resp__descriptor, &msg);
     if (st != RIAK_OK) {
         return st;
     }
@@ -280,6 +295,22 @@ riak_status riak_pb_search(riak_client *c, const char *index, const riak_search_
         return riak_set_error(c, st, "cannot parse search response");
     }
     return RIAK_OK;
+}
+
+riak_status riak_pb_search(riak_client *c, const char *index, const riak_search_query *q,
+                           riak_search_result *out) {
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = riak_pb_search_prepare(c, index, q, &p);
+    if (st == RIAK_OK) {
+        st = riak_pb_perform(c, &p.req, &resp);
+    }
+    riak_pb_prepared_free(&p);
+    if (st == RIAK_OK) {
+        st = riak_pb_search_finish(c, &resp, out);
+    }
+    riak_buf_free(&resp.body);
+    return st;
 }
 
 /* ---- Search administration ------------------------------------------ */
@@ -390,15 +421,8 @@ riak_status riak_pb_search_schema_get(riak_client *c, const char *name, char **x
 
 /* ---- MapReduce ------------------------------------------------------- */
 
-typedef struct {
-    riak_mapred_cb cb; /* streaming */
-    void *ctx;
-    json_object **phases; /* collecting: results per phase */
-    unsigned n_phases;
-} mapred_ctx;
-
 static bool mapred_sink(void *ctx, const uint8_t *data, size_t len, bool *done, riak_status *err) {
-    mapred_ctx *x = ctx;
+    riak_pb_mapred_ctx *x = ctx;
     RpbMapRedResp *r = rpb_map_red_resp__unpack(NULL, len, data);
     if (r == NULL) {
         *err = RIAK_E_PARSE;
@@ -421,8 +445,8 @@ static bool mapred_sink(void *ctx, const uint8_t *data, size_t len, bool *done, 
                 more = false;
             } else {
                 if (phase >= x->n_phases) {
-                    json_object **grown =
-                        (json_object **)realloc((void *)x->phases, (phase + 1) * sizeof *grown);
+                    json_object **grown = (json_object **)realloc(
+                        (void *)x->phases, (phase + 1) * sizeof(json_object *));
                     if (grown == NULL) {
                         json_object_put(items);
                         free(json);
@@ -433,7 +457,7 @@ static bool mapred_sink(void *ctx, const uint8_t *data, size_t len, bool *done, 
                     for (unsigned i = x->n_phases; i <= phase; i++) {
                         grown[i] = NULL;
                     }
-                    x->phases = grown;
+                    x->phases = (void **)grown;
                     x->n_phases = phase + 1;
                 }
                 if (x->phases[phase] == NULL) {
@@ -455,8 +479,8 @@ static bool mapred_sink(void *ctx, const uint8_t *data, size_t len, bool *done, 
     return more;
 }
 
-riak_status riak_pb_mapred(riak_client *c, const char *job, riak_mapred_cb cb, void *ctx,
-                           char **result) {
+riak_status riak_pb_mapred_prepare(riak_client *c, const char *job, riak_pb_mapred_ctx *x,
+                                   riak_pb_prepared *p) {
     RpbMapRedReq m = RPB_MAP_RED_REQ__INIT;
     m.request = riak_pb_bin(job);
     m.content_type = riak_pb_bin("application/json");
@@ -465,37 +489,57 @@ riak_status riak_pb_mapred(riak_client *c, const char *job, riak_mapred_cb cb, v
                          .idempotent = false, /* POST over HTTP: not repeated */
                          .name = "RpbMapRedReq",
                          .path = "/mapred"};
-    mapred_ctx x = {.cb = cb, .ctx = ctx};
-    riak_status st = riak_pb_stream(c, &call, &m.base, mapred_sink, &x);
+    return riak_pb_prepare_call(c, &call, &m.base, mapred_sink, x, p);
+}
+
+riak_status riak_pb_mapred_result(riak_client *c, riak_pb_mapred_ctx *x, char **result) {
+    /* one phase: its results; several: one list per phase, as HTTP returns */
+    json_object **phases = (json_object **)x->phases;
+    json_object *doc;
+    size_t used = 0;
+    unsigned last = 0;
+    for (unsigned i = 0; i < x->n_phases; i++) {
+        if (phases[i]) {
+            used++;
+            last = i;
+        }
+    }
+    if (used == 1) {
+        doc = json_object_get(phases[last]);
+    } else {
+        doc = json_object_new_array();
+        for (unsigned i = 0; doc && i < x->n_phases; i++) {
+            if (phases[i]) json_object_array_add(doc, json_object_get(phases[i]));
+        }
+    }
+    *result = doc ? riak_strdup(json_object_to_json_string_ext(doc, JSON_C_TO_STRING_PLAIN)) : NULL;
+    json_object_put(doc);
+    return *result ? RIAK_OK : riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+}
+
+void riak_pb_mapred_ctx_free(riak_pb_mapred_ctx *x) {
+    for (unsigned i = 0; i < x->n_phases; i++) {
+        json_object_put((json_object *)x->phases[i]);
+    }
+    free((void *)x->phases);
+    x->phases = NULL;
+    x->n_phases = 0;
+}
+
+riak_status riak_pb_mapred(riak_client *c, const char *job, riak_mapred_cb cb, void *ctx,
+                           char **result) {
+    riak_pb_mapred_ctx x = {.cb = cb, .ctx = ctx};
+    riak_pb_prepared p;
+    riak_status st = riak_pb_mapred_prepare(c, job, &x, &p);
+    if (st == RIAK_OK) {
+        riak_pb_response resp = {0};
+        st = riak_pb_perform(c, &p.req, &resp);
+        riak_buf_free(&resp.body);
+    }
+    riak_pb_prepared_free(&p);
     if (st == RIAK_OK && result) {
-        /* one phase: its results; several: one list per phase, as HTTP returns */
-        json_object *doc;
-        size_t used = 0;
-        unsigned last = 0;
-        for (unsigned i = 0; i < x.n_phases; i++) {
-            if (x.phases[i]) {
-                used++;
-                last = i;
-            }
-        }
-        if (used == 1) {
-            doc = json_object_get(x.phases[last]);
-        } else {
-            doc = json_object_new_array();
-            for (unsigned i = 0; doc && i < x.n_phases; i++) {
-                if (x.phases[i]) json_object_array_add(doc, json_object_get(x.phases[i]));
-            }
-        }
-        *result =
-            doc ? riak_strdup(json_object_to_json_string_ext(doc, JSON_C_TO_STRING_PLAIN)) : NULL;
-        json_object_put(doc);
-        if (*result == NULL) {
-            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
-        }
+        st = riak_pb_mapred_result(c, &x, result);
     }
-    for (unsigned i = 0; i < x.n_phases; i++) {
-        json_object_put(x.phases[i]);
-    }
-    free((void *)x.phases);
+    riak_pb_mapred_ctx_free(&x);
     return st;
 }

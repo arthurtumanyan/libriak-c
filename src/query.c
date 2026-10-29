@@ -18,20 +18,8 @@
 
 /* ---- streamed multipart responses ---------------------------------- */
 
-typedef bool (*chunk_fn)(void *ctx, const char *json, size_t len, riak_status *err);
-
-/* Sink that splits a 200 multipart/mixed body into JSON parts as it arrives. */
-typedef struct {
-    riak_client *c;
-    riak_response *resp;
-    riak_mpstream *mp;
-    chunk_fn fn;
-    void *ctx;
-    bool stopped; /* fn asked to stop: ignore the rest */
-} stream_ctx;
-
 static bool on_part(void *ctx, riak_part *part, riak_status *err) {
-    stream_ctx *s = ctx;
+    riak_http_stream *s = ctx;
     if (!s->fn(s->ctx, part->body, part->len, err)) {
         if (*err == RIAK_OK) {
             s->stopped = true; /* caller is done: abort the transfer */
@@ -42,8 +30,9 @@ static bool on_part(void *ctx, riak_part *part, riak_status *err) {
     return true;
 }
 
-static bool stream_sink(void *ctx, const char *data, size_t len, riak_status *err) {
-    stream_ctx *s = ctx;
+/* Sink that splits a 200 multipart/mixed body into JSON parts as it arrives. */
+bool riak_http_stream_sink(void *ctx, const char *data, size_t len, riak_status *err) {
+    riak_http_stream *s = ctx;
     if (s->mp == NULL) {
         char *boundary =
             riak_multipart_boundary(riak_headerlist_get(&s->resp->headers, "Content-Type"));
@@ -62,27 +51,36 @@ static bool stream_sink(void *ctx, const char *data, size_t len, riak_status *er
     return true;
 }
 
-/* A streamed request is performed; parts are passed to fn. */
-static riak_status perform_stream(riak_client *c, const riak_request *base, chunk_fn fn,
-                                  void *ctx) {
-    riak_response resp = {0};
-    stream_ctx s = {.c = c, .resp = &resp, .fn = fn, .ctx = ctx};
-    riak_request req = *base;
-    req.sink = stream_sink;
-    req.sink_ctx = &s;
-    req.unbounded = true;
-    riak_status st = riak_perform(c, &req, &resp);
-    if (s.stopped) {
-        riak_clear_error(c); /* the abort was requested, not an error */
+void riak_http_stream_attach(riak_http_stream *s, riak_request *req) {
+    req->sink = riak_http_stream_sink;
+    req->sink_ctx = s;
+    req->unbounded = true;
+}
+
+riak_status riak_http_stream_end(riak_http_stream *s, riak_status st) {
+    if (s->stopped) {
+        riak_clear_error(s->c); /* the abort was requested, not an error */
         st = RIAK_OK;
     } else if (st == RIAK_OK) {
-        if (resp.status != 200) {
-            st = riak_http_error(c, &resp);
-        } else if (s.mp == NULL || riak_mpstream_finish(s.mp) != RIAK_OK) {
-            st = riak_set_error(c, RIAK_E_PARSE, "truncated multipart stream");
+        if (s->resp->status != 200) {
+            st = riak_http_error(s->c, s->resp);
+        } else if (s->mp == NULL || riak_mpstream_finish(s->mp) != RIAK_OK) {
+            st = riak_set_error(s->c, RIAK_E_PARSE, "truncated multipart stream");
         }
     }
-    riak_mpstream_free(s.mp);
+    riak_mpstream_free(s->mp);
+    s->mp = NULL;
+    return st;
+}
+
+/* A streamed request is performed; parts are passed to fn. */
+static riak_status perform_stream(riak_client *c, const riak_request *base, riak_chunk_fn fn,
+                                  void *ctx) {
+    riak_response resp = {0};
+    riak_http_stream s = {.c = c, .resp = &resp, .fn = fn, .ctx = ctx};
+    riak_request req = *base;
+    riak_http_stream_attach(&s, &req);
+    riak_status st = riak_http_stream_end(&s, riak_perform(c, &req, &resp));
     riak_response_free(&resp);
     return st;
 }
@@ -145,15 +143,8 @@ static riak_status index_url(riak_client *c, const char *bucket, const riak_inde
     return rc ? riak_set_error(c, RIAK_E_NOMEM, "out of memory") : RIAK_OK;
 }
 
-typedef struct {
-    riak_strlist keys, terms;
-    size_t kcap, tcap;
-    bool want_terms;
-    bool nomem;
-} index_acc;
-
-static bool accumulate(const char *key, const char *term, void *ctx) {
-    index_acc *a = ctx;
+bool riak_index_acc_add(const char *key, const char *term, void *ctx) {
+    riak_index_acc *a = ctx;
     if (riak_strlist_push(&a->keys, &a->kcap, key, strlen(key)) != 0 ||
         (a->want_terms &&
          riak_strlist_push(&a->terms, &a->tcap, term ? term : "", term ? strlen(term) : 0) != 0)) {
@@ -163,8 +154,8 @@ static bool accumulate(const char *key, const char *term, void *ctx) {
     return true;
 }
 
-/* The accumulated matches become the result page. */
-static riak_status take_matches(index_acc *acc, riak_index_result *out) {
+/* The accumulated matches become the result page; on failure they are freed. */
+riak_status riak_index_acc_take(riak_index_acc *acc, riak_index_result *out) {
     riak_status st = acc->nomem ? RIAK_E_NOMEM : RIAK_OK;
     if (st == RIAK_OK && acc->keys.items == NULL) {
         acc->keys.items = (char **)calloc(1, sizeof(char *));
@@ -187,10 +178,10 @@ static riak_status take_matches(index_acc *acc, riak_index_result *out) {
 
 static riak_status pb_index_run(riak_client *c, const char *bucket, const riak_index_query *q,
                                 riak_index_result *out) {
-    index_acc acc = {.want_terms = q && q->return_terms};
-    riak_status st = riak_pb_index(c, bucket, q, accumulate, &acc, &out->continuation);
+    riak_index_acc acc = {.want_terms = q && q->return_terms};
+    riak_status st = riak_pb_index(c, bucket, q, riak_index_acc_add, &acc, &out->continuation);
     if (st == RIAK_OK) {
-        st = take_matches(&acc, out);
+        st = riak_index_acc_take(&acc, out);
         if (st != RIAK_OK) {
             riak_set_error(c, st, "out of memory");
         }
@@ -199,6 +190,41 @@ static riak_status pb_index_run(riak_client *c, const char *bucket, const riak_i
         riak_strlist_free(&acc.terms);
     }
     if (st != RIAK_OK) {
+        riak_index_result_free(out);
+    }
+    return st;
+}
+
+riak_status riak_index_http_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
+                                    bool stream, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st = index_url(c, bucket, q, stream, &p->url);
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "GET", .url = p->url.data};
+    return RIAK_OK;
+}
+
+riak_status riak_index_http_finish(riak_client *c, riak_response *resp, bool want_terms,
+                                   riak_index_result *out) {
+    memset(out, 0, sizeof *out);
+    if (resp->status != 200) {
+        return riak_http_error(c, resp);
+    }
+    riak_index_acc acc = {.want_terms = want_terms};
+    bool stopped;
+    riak_status st = riak_parse_index_json(resp->body.data ? resp->body.data : "", resp->body.len,
+                                           riak_index_acc_add, &acc, &out->continuation, &stopped);
+    if (st == RIAK_OK) {
+        st = riak_index_acc_take(&acc, out);
+    } else {
+        riak_strlist_free(&acc.keys);
+        riak_strlist_free(&acc.terms);
+    }
+    if (st != RIAK_OK) {
+        riak_set_error(c, st, "cannot parse index response");
         riak_index_result_free(out);
     }
     return st;
@@ -213,56 +239,28 @@ riak_status riak_index_query_run(riak_client *client, const char *bucket, const 
     if (riak_is_pb(client)) {
         return pb_index_run(client, bucket, q, out);
     }
-    riak_buf url = {0};
-    riak_status st = index_url(client, bucket, q, false, &url);
+    riak_prepared p;
+    riak_status st = riak_index_http_prepare(client, bucket, q, false, &p);
     if (st != RIAK_OK) {
-        riak_buf_free(&url);
         return st;
     }
-    riak_request req = {.method = "GET", .url = url.data};
     riak_response resp = {0};
-    st = riak_perform(client, &req, &resp);
-    riak_buf_free(&url);
-    if (st != RIAK_OK) {
-        return st;
-    }
-    if (resp.status != 200) {
-        st = riak_http_error(client, &resp);
-    } else {
-        index_acc acc = {.want_terms = q->return_terms};
-        bool stopped;
-        st = riak_parse_index_json(resp.body.data ? resp.body.data : "", resp.body.len, accumulate,
-                                   &acc, &out->continuation, &stopped);
-        if (st == RIAK_OK) {
-            st = take_matches(&acc, out);
-        } else {
-            riak_strlist_free(&acc.keys);
-            riak_strlist_free(&acc.terms);
-        }
-        if (st != RIAK_OK) {
-            riak_set_error(client, st, "cannot parse index response");
-        }
+    st = riak_perform(client, &p.req, &resp);
+    riak_prepared_free(&p);
+    if (st == RIAK_OK) {
+        st = riak_index_http_finish(client, &resp, q->return_terms, out);
     }
     riak_response_free(&resp);
-    if (st != RIAK_OK) {
-        riak_index_result_free(out);
-    }
     return st;
 }
 
-typedef struct {
-    riak_index_cb cb;
-    void *ctx;
-    char **continuation;
-} index_stream;
-
 static bool forward(const char *key, const char *term, void *ctx) {
-    index_stream *s = ctx;
+    riak_index_stream *s = ctx;
     return s->cb(key, term, s->ctx);
 }
 
-static bool index_chunk(void *ctx, const char *json, size_t len, riak_status *err) {
-    index_stream *s = ctx;
+bool riak_index_chunk(void *ctx, const char *json, size_t len, riak_status *err) {
+    riak_index_stream *s = ctx;
     char *cont = NULL;
     bool stopped;
     *err = riak_parse_index_json(json, len, forward, s, &cont, &stopped);
@@ -295,9 +293,9 @@ riak_status riak_index_query_stream(riak_client *client, const char *bucket,
     riak_buf url = {0};
     riak_status st = index_url(client, bucket, q, true, &url);
     if (st == RIAK_OK) {
-        index_stream s = {.cb = cb, .ctx = ctx, .continuation = continuation};
+        riak_index_stream s = {.cb = cb, .ctx = ctx, .continuation = continuation};
         riak_request req = {.method = "GET", .url = url.data};
-        st = perform_stream(client, &req, index_chunk, &s);
+        st = perform_stream(client, &req, riak_index_chunk, &s);
     }
     riak_buf_free(&url);
     if (st != RIAK_OK && continuation) {
@@ -329,6 +327,48 @@ static int search_param(riak_buf *url, const char *name, const char *value) {
 
 static riak_status search_not_found(riak_client *c, riak_status st);
 
+riak_status riak_search_http_prepare(riak_client *c, const char *index, const riak_search_query *q,
+                                     riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_buf *url = &p->url;
+    char num[16];
+    int rc = riak_buf_append_str(url, c->root) || riak_buf_append_str(url, "search/query/") ||
+             riak_url_append_escaped(url, index) || riak_url_append_query(url, "wt", "json") ||
+             riak_url_append_query(url, "q", q->q) || search_param(url, "fq", q->filter) ||
+             search_param(url, "sort", q->sort) || search_param(url, "fl", q->fields) ||
+             search_param(url, "df", q->default_field) || search_param(url, "q.op", q->op);
+    if (q->start) {
+        snprintf(num, sizeof num, "%u", q->start);
+        rc = rc || riak_url_append_query(url, "start", num);
+    }
+    if (q->rows) {
+        snprintf(num, sizeof num, "%u", q->rows);
+        rc = rc || riak_url_append_query(url, "rows", num);
+    }
+    if (rc) {
+        riak_prepared_free(p);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    p->req = (riak_request){.method = "GET", .url = p->url.data};
+    return RIAK_OK;
+}
+
+riak_status riak_search_http_finish(riak_client *c, riak_response *resp, riak_search_result *out) {
+    memset(out, 0, sizeof *out);
+    char *raw = NULL;
+    riak_status st = riak_body_take(c, resp, RIAK_BODY_JSON_OBJECT, &raw);
+    if (st != RIAK_OK) {
+        return search_not_found(c, st);
+    }
+    st = riak_parse_search(raw, strlen(raw), out);
+    out->raw = raw;
+    if (st != RIAK_OK) {
+        riak_search_result_free(out);
+        return riak_set_error(c, st, "cannot parse search response");
+    }
+    return RIAK_OK;
+}
+
 riak_status riak_search(riak_client *client, const char *index, const riak_search_query *q,
                         riak_search_result *out) {
     if (client == NULL || out == NULL || q == NULL) {
@@ -343,39 +383,18 @@ riak_status riak_search(riak_client *client, const char *index, const riak_searc
     if (riak_is_pb(client)) {
         return riak_pb_search(client, index, q, out);
     }
-    riak_buf url = {0};
-    char num[16];
-    int rc = riak_buf_append_str(&url, client->root) ||
-             riak_buf_append_str(&url, "search/query/") || riak_url_append_escaped(&url, index) ||
-             riak_url_append_query(&url, "wt", "json") || riak_url_append_query(&url, "q", q->q) ||
-             search_param(&url, "fq", q->filter) || search_param(&url, "sort", q->sort) ||
-             search_param(&url, "fl", q->fields) || search_param(&url, "df", q->default_field) ||
-             search_param(&url, "q.op", q->op);
-    if (q->start) {
-        snprintf(num, sizeof num, "%u", q->start);
-        rc = rc || riak_url_append_query(&url, "start", num);
+    riak_prepared p;
+    if ((st = riak_search_http_prepare(client, index, q, &p)) != RIAK_OK) {
+        return st;
     }
-    if (q->rows) {
-        snprintf(num, sizeof num, "%u", q->rows);
-        rc = rc || riak_url_append_query(&url, "rows", num);
+    riak_response resp = {0};
+    st = riak_perform(client, &p.req, &resp);
+    riak_prepared_free(&p);
+    if (st == RIAK_OK) {
+        st = riak_search_http_finish(client, &resp, out);
     }
-    if (rc) {
-        riak_buf_free(&url);
-        return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
-    }
-    char *raw = NULL;
-    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, &raw);
-    riak_buf_free(&url);
-    if (st != RIAK_OK) {
-        return search_not_found(client, st);
-    }
-    st = riak_parse_search(raw, strlen(raw), out);
-    out->raw = raw;
-    if (st != RIAK_OK) {
-        riak_search_result_free(out);
-        return riak_set_error(client, st, "cannot parse search response");
-    }
-    return RIAK_OK;
+    riak_response_free(&resp);
+    return st;
 }
 
 static int search_admin_url(riak_buf *url, const riak_client *c, const char *what,
@@ -548,16 +567,41 @@ riak_status riak_search_schema_get(riak_client *client, const char *name, char *
 
 /* ---- MapReduce ----------------------------------------------------- */
 
-static riak_status mapred_request(riak_client *c, const char *job, bool chunked, riak_buf *url,
-                                  struct curl_slist **headers) {
+riak_status riak_mapred_http_prepare(riak_client *c, const char *job, bool chunked,
+                                     riak_prepared *p) {
+    memset(p, 0, sizeof *p);
     if (c == NULL || job == NULL) {
         return RIAK_E_INVALID_ARG;
     }
-    if (riak_buf_append_str(url, c->root) || riak_buf_append_str(url, "mapred") ||
-        (chunked && riak_url_append_query(url, "chunked", "true"))) {
+    riak_status st = RIAK_OK;
+    if (riak_buf_append_str(&p->url, c->root) || riak_buf_append_str(&p->url, "mapred") ||
+        (chunked && riak_url_append_query(&p->url, "chunked", "true")) ||
+        (p->body = riak_strdup(job)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    } else {
+        st = riak_add_header(c, &p->headers, "Content-Type", NULL, "application/json");
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "POST",
+                            .url = p->url.data,
+                            .headers = p->headers,
+                            .body = p->body,
+                            .body_len = strlen(p->body)};
+    return RIAK_OK;
+}
+
+riak_status riak_mapred_http_finish(riak_client *c, riak_response *resp, char **result) {
+    *result = NULL;
+    if (resp->status != 200) {
+        return riak_http_error(c, resp);
+    }
+    if ((*result = riak_buf_steal(&resp->body, NULL)) == NULL) {
         return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
     }
-    return riak_add_header(c, headers, "Content-Type", NULL, "application/json");
+    return RIAK_OK;
 }
 
 riak_status riak_mapred(riak_client *client, const char *job, char **result) {
@@ -570,38 +614,23 @@ riak_status riak_mapred(riak_client *client, const char *job, char **result) {
     if (client && job && riak_is_pb(client)) {
         return riak_pb_mapred(client, job, NULL, NULL, result);
     }
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
-    riak_response resp = {0};
-    riak_status st = mapred_request(client, job, false, &url, &headers);
-    if (st == RIAK_OK) {
-        riak_request req = {.method = "POST",
-                            .url = url.data,
-                            .headers = headers,
-                            .body = job,
-                            .body_len = strlen(job)};
-        st = riak_perform(client, &req, &resp);
+    riak_prepared p;
+    riak_status st = riak_mapred_http_prepare(client, job, false, &p);
+    if (st != RIAK_OK) {
+        return st;
     }
+    riak_response resp = {0};
+    st = riak_perform(client, &p.req, &resp);
+    riak_prepared_free(&p);
     if (st == RIAK_OK) {
-        if (resp.status != 200) {
-            st = riak_http_error(client, &resp);
-        } else if ((*result = riak_buf_steal(&resp.body, NULL)) == NULL) {
-            st = riak_set_error(client, RIAK_E_NOMEM, "out of memory");
-        }
+        st = riak_mapred_http_finish(client, &resp, result);
     }
     riak_response_free(&resp);
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
     return st;
 }
 
-typedef struct {
-    riak_mapred_cb cb;
-    void *ctx;
-} mapred_stream;
-
-static bool mapred_chunk(void *ctx, const char *json, size_t len, riak_status *err) {
-    mapred_stream *m = ctx;
+bool riak_mapred_chunk(void *ctx, const char *json, size_t len, riak_status *err) {
+    riak_mapred_stream_ctx *m = ctx;
     unsigned phase;
     char *data;
     *err = riak_parse_mapred_chunk(json, len, &phase, &data);
@@ -620,19 +649,12 @@ riak_status riak_mapred_stream(riak_client *client, const char *job, riak_mapred
     if (client && job && riak_is_pb(client)) {
         return riak_pb_mapred(client, job, cb, ctx, NULL);
     }
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
-    riak_status st = mapred_request(client, job, true, &url, &headers);
+    riak_prepared p;
+    riak_status st = riak_mapred_http_prepare(client, job, true, &p);
     if (st == RIAK_OK) {
-        mapred_stream m = {.cb = cb, .ctx = ctx};
-        riak_request req = {.method = "POST",
-                            .url = url.data,
-                            .headers = headers,
-                            .body = job,
-                            .body_len = strlen(job)};
-        st = perform_stream(client, &req, mapred_chunk, &m);
+        riak_mapred_stream_ctx m = {.cb = cb, .ctx = ctx};
+        st = perform_stream(client, &p.req, riak_mapred_chunk, &m);
     }
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
+    riak_prepared_free(&p);
     return st;
 }

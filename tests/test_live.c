@@ -601,6 +601,180 @@ static void test_async(void) {
     riak_async_free(a);
 }
 
+typedef struct {
+    int done;
+    riak_status status;
+    riak_async_result kept;
+} live_grab;
+
+static void live_take(riak_async_result *res, void *ctx) {
+    live_grab *g = ctx;
+    g->done++;
+    g->status = res->status;
+    g->kept = *res;
+    memset(&res->siblings, 0, sizeof res->siblings);
+    memset(&res->datatype, 0, sizeof res->datatype);
+    memset(&res->index, 0, sizeof res->index);
+    res->json = NULL;
+    res->continuation = NULL;
+    if (res->status != RIAK_OK) {
+        fprintf(stderr, "  async: %s\n", res->errmsg);
+    }
+}
+
+static riak_status live_wait(riak_async *a, live_grab *g) {
+    while (g->done == 0 && riak_async_run(a, 30000) > 0) {
+    }
+    CHECK_EQ_INT(g->done, 1);
+    return g->status;
+}
+
+static void live_grab_free(live_grab *g) {
+    riak_object_set_free(&g->kept.siblings);
+    riak_datatype_free(&g->kept.datatype);
+    riak_index_result_free(&g->kept.index);
+    riak_free(g->kept.json);
+    riak_free(g->kept.continuation);
+    memset(g, 0, sizeof *g);
+}
+
+static bool live_count(const char *key, const char *term, void *ctx) {
+    (void)key;
+    (void)term;
+    ++*(int *)ctx;
+    return true;
+}
+
+static bool live_count_name(const char *name, size_t len, void *ctx) {
+    (void)name;
+    (void)len;
+    ++*(int *)ctx;
+    return true;
+}
+
+/* The data path over the async handle, compared with the blocking calls. */
+static void test_async_data_path(void) {
+    riak_config cfg;
+    riak_config_init(&cfg);
+    live_config(&cfg);
+    cfg.host = live_host;
+    cfg.port = live_port;
+    cfg.http_port = live_http_port;
+    riak_async *a = NULL;
+    CHECK_EQ_INT(riak_async_new(&cfg, &a), RIAK_OK);
+    if (a == NULL) return;
+    live_grab g = {0};
+    char ab[96];
+    snprintf(ab, sizeof ab, "%s-async", bucket);
+
+    /* keys with an index entry; listed, queried and folded by MapReduce */
+    for (int i = 0; i < 3; i++) {
+        char key[8];
+        snprintf(key, sizeof key, "a%d", i);
+        riak_kv_pair idx[] = {{"grp_bin", "all"}};
+        riak_opts o = {.content_type = "application/json", .indexes = idx, .n_indexes = 1};
+        CHECK_EQ_INT(riak_put(rc, ab, key, "\"v\"", 3, &o, NULL, NULL), RIAK_OK);
+    }
+    int listed = 0;
+    CHECK_EQ_INT(riak_async_list_keys_stream(a, NULL, ab, live_count_name, &listed, live_take, &g),
+                 RIAK_OK);
+    CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+    CHECK_EQ_INT(listed, 3);
+    live_grab_free(&g);
+
+    if (has_feature("2i")) {
+        riak_index_query q = {.index = "grp_bin", .value = "all"};
+        CHECK_EQ_INT(riak_async_index_query(a, ab, &q, live_take, &g), RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        CHECK_EQ_INT(g.kept.index.count, 3);
+        live_grab_free(&g);
+        int streamed = 0;
+        CHECK_EQ_INT(riak_async_index_query_stream(a, ab, &q, live_count, &streamed, live_take, &g),
+                     RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        CHECK_EQ_INT(streamed, 3);
+        live_grab_free(&g);
+    }
+
+    char job[512];
+    snprintf(job, sizeof job,
+             "{\"inputs\":[[\"%s\",\"a0\"],[\"%s\",\"a1\"]],\"query\":["
+             "{\"map\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+             "\"function\":\"map_object_value\"}},"
+             "{\"reduce\":{\"language\":\"erlang\",\"module\":\"riak_kv_mapreduce\","
+             "\"function\":\"reduce_count_inputs\"}}]}",
+             ab, ab);
+    CHECK_EQ_INT(riak_async_mapred(a, job, live_take, &g), RIAK_OK);
+    CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+    CHECK_EQ_STR(g.kept.json, "[2]");
+    live_grab_free(&g);
+
+    char *props = NULL;
+    CHECK_EQ_INT(riak_get_bucket_props(rc, ab, &props), RIAK_OK);
+    CHECK_EQ_INT(riak_async_get_bucket_props(a, NULL, ab, live_take, &g), RIAK_OK);
+    CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+    CHECK_EQ_STR(g.kept.json, props);
+    riak_free(props);
+    live_grab_free(&g);
+
+    if (multi_type) {
+        riak_opts m = {.bucket_type = multi_type, .content_type = "text/plain"};
+        CHECK_EQ_INT(riak_put(rc, ab, "sib", "one", 3, &m, NULL, NULL), RIAK_OK);
+        CHECK_EQ_INT(riak_put(rc, ab, "sib", "two", 3, &m, NULL, NULL), RIAK_OK);
+        CHECK_EQ_INT(riak_async_get_siblings(a, ab, "sib", &m, live_take, &g), RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        CHECK_EQ_INT(g.kept.siblings.count, 2);
+        live_grab_free(&g);
+        riak_delete(rc, ab, "sib", &m);
+    }
+
+    if (has_feature("dt")) {
+        riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);
+        riak_dt_op_increment(op, 3);
+        riak_dt_opts rb = {.return_body = true};
+        CHECK_EQ_INT(
+            riak_async_dt_update(a, "libriak_counters", ab, "c", op, NULL, &rb, live_take, &g),
+            RIAK_OK);
+        riak_dt_op_free(op);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        long long after = g.kept.datatype.value.counter;
+        live_grab_free(&g);
+        CHECK_EQ_INT(riak_async_dt_fetch(a, "libriak_counters", ab, "c", NULL, live_take, &g),
+                     RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        CHECK_EQ_INT(g.kept.datatype.value.counter, after);
+        live_grab_free(&g);
+    }
+
+    if (has_feature("counters")) {
+        char cb[112];
+        snprintf(cb, sizeof cb, "%s-counters", ab); /* legacy counters need allow_mult */
+        CHECK_EQ_INT(riak_set_bucket_props(rc, cb, "{\"props\":{\"allow_mult\":true}}"), RIAK_OK);
+        CHECK_EQ_INT(riak_async_counter_update(a, cb, "hits", 4, NULL, live_take, &g), RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        int64_t value = g.kept.counter;
+        live_grab_free(&g);
+        CHECK_EQ_INT(riak_async_counter_get(a, cb, "hits", NULL, live_take, &g), RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_OK);
+        CHECK_EQ_INT(g.kept.counter, value);
+        live_grab_free(&g);
+    }
+
+    if (!has_feature("search")) {
+        riak_search_query sq = {.q = "*:*"};
+        CHECK_EQ_INT(riak_async_search(a, "libriak_none", &sq, live_take, &g), RIAK_OK);
+        CHECK_EQ_INT(live_wait(a, &g), RIAK_E_UNSUPPORTED);
+        live_grab_free(&g);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        char key[8];
+        snprintf(key, sizeof key, "a%d", i);
+        riak_delete(rc, ab, key, NULL);
+    }
+    riak_async_free(a);
+}
+
 static bool count_name(const char *name, size_t len, void *ctx) {
     (void)name;
     (void)len;
@@ -1322,6 +1496,7 @@ int main(void) {
     RUN(test_missing_features_unsupported);
     RUN(test_failover);
     RUN(test_async);
+    RUN(test_async_data_path);
 
     riak_client_free(rc);
     riak_global_cleanup();

@@ -1647,19 +1647,53 @@ RIAK_API riak_status riak_repl_get(riak_client *client, const char *cluster_id, 
 /** Opaque async handle; created by riak_async_new(). */
 typedef struct riak_async riak_async;
 
-/** Outcome of an async request, passed to its ::riak_async_cb. */
+/** The request an ::riak_async_result belongs to. */
+typedef enum {
+    RIAK_ASYNC_PING = 0,         /**< riak_async_ping() */
+    RIAK_ASYNC_GET,              /**< riak_async_get(): #riak_async_result::object */
+    RIAK_ASYNC_PUT,              /**< riak_async_put(): object, created_key */
+    RIAK_ASYNC_DELETE,           /**< riak_async_delete() */
+    RIAK_ASYNC_GET_SIBLINGS,     /**< riak_async_get_siblings(): siblings */
+    RIAK_ASYNC_DT_FETCH,         /**< riak_async_dt_fetch(): datatype */
+    RIAK_ASYNC_DT_UPDATE,        /**< riak_async_dt_update(): datatype, created_key */
+    RIAK_ASYNC_COUNTER_GET,      /**< riak_async_counter_get(): counter */
+    RIAK_ASYNC_COUNTER_UPDATE,   /**< riak_async_counter_update(): counter */
+    RIAK_ASYNC_INDEX_QUERY,      /**< riak_async_index_query(): index */
+    RIAK_ASYNC_INDEX_STREAM,     /**< riak_async_index_query_stream(): continuation */
+    RIAK_ASYNC_SEARCH,           /**< riak_async_search(): search */
+    RIAK_ASYNC_MAPRED,           /**< riak_async_mapred(): json */
+    RIAK_ASYNC_MAPRED_STREAM,    /**< riak_async_mapred_stream() */
+    RIAK_ASYNC_GET_BUCKET_PROPS, /**< riak_async_get_bucket_props(): json */
+    RIAK_ASYNC_SET_BUCKET_PROPS, /**< riak_async_set_bucket_props() */
+    RIAK_ASYNC_LIST_KEYS,        /**< riak_async_list_keys_stream() */
+    RIAK_ASYNC_LIST_BUCKETS      /**< riak_async_list_buckets_stream() */
+} riak_async_kind;
+
+/**
+ * Outcome of an async request, passed to its ::riak_async_cb. The members
+ * that carry results are set according to #kind; the others are zero.
+ */
 typedef struct {
-    riak_status status; /**< Result of the request. */
-    long http_status;   /**< HTTP status; 0 when no response was received. */
-    const char *errmsg; /**< Error detail; valid only during the callback. */
-    riak_object object; /**< Get, and put with return_body: the object. */
-    char *created_key;  /**< Put with a NULL key: the generated key. */
+    riak_status status;        /**< Result of the request. */
+    long http_status;          /**< HTTP status; 0 when no response was received. */
+    const char *errmsg;        /**< Error detail; valid only during the callback. */
+    riak_object object;        /**< Get, and put with return_body: the object. */
+    char *created_key;         /**< Put or data type update with a NULL key: the generated key. */
+    riak_async_kind kind;      /**< The request this result belongs to. */
+    riak_object_set siblings;  /**< riak_async_get_siblings(): the siblings. */
+    riak_datatype datatype;    /**< Data type fetch, and update with return_body. */
+    riak_index_result index;   /**< riak_async_index_query(): one page of matches. */
+    riak_search_result search; /**< riak_async_search(): the documents. */
+    char *json;                /**< MapReduce result array, or bucket properties. */
+    int64_t counter;           /**< Legacy counter value. */
+    char *continuation;        /**< riak_async_index_query_stream(): next page, or NULL. */
 } riak_async_result;
 
 /**
- * Completion callback. riak_async_result::object and
- * riak_async_result::created_key may be kept by copying them and clearing the
- * originals; whatever remains is freed when the callback returns.
+ * Completion callback. The result members (#riak_async_result::object,
+ * siblings, datatype, index, search, json, created_key, continuation) may be
+ * kept by copying them and clearing the originals; whatever remains is freed
+ * when the callback returns.
  */
 typedef void (*riak_async_cb)(riak_async_result *res, void *ctx);
 
@@ -1730,6 +1764,180 @@ RIAK_API riak_status riak_async_put(riak_async *a, const char *bucket, const cha
  */
 RIAK_API riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key,
                                        const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_get_siblings(); the result is riak_async_result::siblings.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options as for riak_get_siblings(); NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_get_siblings(riak_async *a, const char *bucket, const char *key,
+                                             const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_dt_fetch(); the result is riak_async_result::datatype.
+ * @param a Async handle.
+ * @param type Bucket type of the data type.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_dt_fetch(riak_async *a, const char *type, const char *bucket,
+                                         const char *key, const riak_dt_opts *opts,
+                                         riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_dt_update(); with return_body the value is
+ * riak_async_result::datatype, with a NULL key the key is
+ * riak_async_result::created_key. The operation is encoded on submission and
+ * may be freed afterwards.
+ * @param a Async handle.
+ * @param type Bucket type of the data type.
+ * @param bucket Bucket name.
+ * @param key Key; NULL lets Riak generate one.
+ * @param op Operation.
+ * @param context Context of a previous fetch, or NULL.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_dt_update(riak_async *a, const char *type, const char *bucket,
+                                          const char *key, const riak_dt_op *op,
+                                          const char *context, const riak_dt_opts *opts,
+                                          riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_counter_get(); the value is riak_async_result::counter.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_counter_get(riak_async *a, const char *bucket, const char *key,
+                                            const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_counter_update(); the new value is riak_async_result::counter.
+ * Sent once: a lost answer is reported, not repeated.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param amount Increment (negative to decrement).
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_counter_update(riak_async *a, const char *bucket, const char *key,
+                                               int64_t amount, const riak_opts *opts,
+                                               riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_index_query_run(); the page is riak_async_result::index.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param q Query.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_index_query(riak_async *a, const char *bucket,
+                                            const riak_index_query *q, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_index_query_stream(): each match goes to item as it arrives,
+ * inside riak_async_run() or the loop hooks; returning false stops the
+ * stream. The continuation of a paged query is
+ * riak_async_result::continuation.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param q Query.
+ * @param item Called for every match.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_index_query_stream(riak_async *a, const char *bucket,
+                                                   const riak_index_query *q, riak_index_cb item,
+                                                   void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_search(); the documents are riak_async_result::search.
+ * @param a Async handle.
+ * @param index Search index.
+ * @param q Query.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_search(riak_async *a, const char *index, const riak_search_query *q,
+                                       riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_mapred(); the result array is riak_async_result::json.
+ * @param a Async handle.
+ * @param job MapReduce job (JSON).
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_mapred(riak_async *a, const char *job, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_mapred_stream(): each phase result goes to item as it
+ * arrives; returning false stops the stream.
+ * @param a Async handle.
+ * @param job MapReduce job (JSON).
+ * @param item Called for every phase result.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_mapred_stream(riak_async *a, const char *job, riak_mapred_cb item,
+                                              void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_type_get_bucket_props(); the document is
+ * riak_async_result::json.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_get_bucket_props(riak_async *a, const char *type,
+                                                 const char *bucket, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_type_set_bucket_props().
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param json Properties document `{"props":{...}}`.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_set_bucket_props(riak_async *a, const char *type,
+                                                 const char *bucket, const char *json,
+                                                 riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_list_keys_stream(): each key goes to item as it arrives;
+ * returning false stops the listing.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param item Called for every key.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_list_keys_stream(riak_async *a, const char *type,
+                                                 const char *bucket, riak_name_cb item,
+                                                 void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_list_buckets_stream(): each bucket name goes to item as it
+ * arrives; returning false stops the listing.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param item Called for every bucket.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_list_buckets_stream(riak_async *a, const char *type,
+                                                    riak_name_cb item, void *item_ctx,
+                                                    riak_async_cb cb, void *ctx);
 
 /**
  * Built-in event loop: requests are processed until none is pending or

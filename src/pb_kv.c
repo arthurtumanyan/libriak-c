@@ -588,19 +588,13 @@ riak_status riak_pb_get(riak_client *c, const char *bucket, const char *key, con
     return st;
 }
 
-riak_status riak_pb_get_siblings(riak_client *c, const char *bucket, const char *key,
-                                 const riak_opts *o, riak_object_set *out) {
-    riak_pb_prepared p;
-    riak_pb_response resp = {0};
-    riak_status st = run_prepared(c, riak_pb_prepare_get(c, bucket, key, o, &p), &p, &resp);
-    if (st != RIAK_OK) {
-        return st;
-    }
-    RpbGetResp *r = rpb_get_resp__unpack(NULL, resp.body.len, (const uint8_t *)resp.body.data);
-    riak_buf_free(&resp.body);
+riak_status riak_pb_finish_siblings(riak_client *c, riak_pb_response *resp, riak_object_set *out) {
+    memset(out, 0, sizeof *out);
+    RpbGetResp *r = rpb_get_resp__unpack(NULL, resp->body.len, (const uint8_t *)resp->body.data);
     if (r == NULL) {
         return riak_set_error(c, RIAK_E_PARSE, "malformed RpbGetResp");
     }
+    riak_status st;
     if (r->n_content == 0 ||
         (r->n_content == 1 && r->content[0]->has_deleted && r->content[0]->deleted)) {
         st = empty_get(c, r);
@@ -611,6 +605,18 @@ riak_status riak_pb_get_siblings(riak_client *c, const char *bucket, const char 
     if (st != RIAK_OK) {
         riak_object_set_free(out);
     }
+    return st;
+}
+
+riak_status riak_pb_get_siblings(riak_client *c, const char *bucket, const char *key,
+                                 const riak_opts *o, riak_object_set *out) {
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = run_prepared(c, riak_pb_prepare_get(c, bucket, key, o, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_pb_finish_siblings(c, &resp, out);
+    }
+    riak_buf_free(&resp.body);
     return st;
 }
 
@@ -856,14 +862,8 @@ riak_status riak_pb_server_info(riak_client *c, riak_server_info *out) {
 
 /* ---- listings -------------------------------------------------------- */
 
-typedef struct {
-    riak_name_cb cb;
-    void *ctx;
-    bool buckets;
-} list_ctx;
-
 static bool list_sink(void *ctx, const uint8_t *data, size_t len, bool *done, riak_status *err) {
-    list_ctx *l = ctx;
+    riak_pb_list_ctx *l = ctx;
     ProtobufCBinaryData *names;
     size_t n;
     protobuf_c_boolean has_done, is_done;
@@ -907,25 +907,25 @@ static bool list_sink(void *ctx, const uint8_t *data, size_t len, bool *done, ri
     return more;
 }
 
-riak_status riak_pb_list_buckets(riak_client *c, const char *type, riak_name_cb cb, void *ctx) {
-    RpbListBucketsReq m = RPB_LIST_BUCKETS_REQ__INIT;
-    m.has_stream = 1;
-    m.stream = 1;
-    if (type) {
-        m.has_type = 1;
-        m.type = riak_pb_bin(type);
+riak_status riak_pb_list_prepare(riak_client *c, const char *type, const char *bucket,
+                                 riak_pb_list_ctx *x, riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
+    x->buckets = bucket == NULL;
+    if (bucket == NULL) {
+        RpbListBucketsReq m = RPB_LIST_BUCKETS_REQ__INIT;
+        m.has_stream = 1;
+        m.stream = 1;
+        if (type) {
+            m.has_type = 1;
+            m.type = riak_pb_bin(type);
+        }
+        riak_pb_call call = {.code = RIAK_PB_LIST_BUCKETS_REQ,
+                             .resp_code = RIAK_PB_LIST_BUCKETS_RESP,
+                             .idempotent = true,
+                             .name = "RpbListBucketsReq",
+                             .path = "/buckets?buckets=stream"};
+        return riak_pb_prepare_call(c, &call, &m.base, list_sink, x, p);
     }
-    riak_pb_call call = {.code = RIAK_PB_LIST_BUCKETS_REQ,
-                         .resp_code = RIAK_PB_LIST_BUCKETS_RESP,
-                         .idempotent = true,
-                         .name = "RpbListBucketsReq",
-                         .path = "/buckets?buckets=stream"};
-    list_ctx l = {.cb = cb, .ctx = ctx, .buckets = true};
-    return riak_pb_stream(c, &call, &m.base, list_sink, &l);
-}
-
-riak_status riak_pb_list_keys(riak_client *c, const char *type, const char *bucket, riak_name_cb cb,
-                              void *ctx) {
     RpbListKeysReq m = RPB_LIST_KEYS_REQ__INIT;
     m.bucket = riak_pb_bin(bucket);
     if (type) {
@@ -941,10 +941,32 @@ riak_status riak_pb_list_keys(riak_client *c, const char *type, const char *buck
                          .idempotent = true,
                          .name = "RpbListKeysReq",
                          .path = path};
-    list_ctx l = {.cb = cb, .ctx = ctx, .buckets = false};
-    riak_status st = riak_pb_stream(c, &call, &m.base, list_sink, &l);
+    riak_status st = riak_pb_prepare_call(c, &call, &m.base, list_sink, x, p);
     free(path);
     return st;
+}
+
+static riak_status list_run(riak_client *c, const char *type, const char *bucket, riak_name_cb cb,
+                            void *ctx) {
+    riak_pb_list_ctx x = {.cb = cb, .ctx = ctx};
+    riak_pb_prepared p;
+    riak_status st = riak_pb_list_prepare(c, type, bucket, &x, &p);
+    if (st == RIAK_OK) {
+        riak_pb_response resp = {0};
+        st = riak_pb_perform(c, &p.req, &resp);
+        riak_buf_free(&resp.body);
+    }
+    riak_pb_prepared_free(&p);
+    return st;
+}
+
+riak_status riak_pb_list_buckets(riak_client *c, const char *type, riak_name_cb cb, void *ctx) {
+    return list_run(c, type, NULL, cb, ctx);
+}
+
+riak_status riak_pb_list_keys(riak_client *c, const char *type, const char *bucket, riak_name_cb cb,
+                              void *ctx) {
+    return list_run(c, type, bucket, cb, ctx);
 }
 
 /* ---- bucket properties <-> JSON ------------------------------------- */
@@ -1343,16 +1365,32 @@ static riak_status props_from_json(riak_client *c, const char *json, json_object
     return RIAK_OK;
 }
 
-static riak_status bucket_props_call(riak_client *c, uint8_t code, const char *name,
-                                     const ProtobufCMessage *m, const char *path, char **json,
-                                     const char *bucket) {
-    riak_pb_call call = {.code = code,
+riak_status riak_pb_props_prepare_get(riak_client *c, const char *type, const char *bucket,
+                                      riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
+    RpbGetBucketReq m = RPB_GET_BUCKET_REQ__INIT;
+    m.bucket = riak_pb_bin(bucket);
+    if (type) {
+        m.has_type = 1;
+        m.type = riak_pb_bin(type);
+    }
+    char *path = riak_pb_path(c, type, bucket, "props", NULL);
+    if (path == NULL) return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    riak_pb_call call = {.code = RIAK_PB_GET_BUCKET_REQ,
                          .resp_code = RIAK_PB_GET_BUCKET_RESP,
                          .idempotent = true,
-                         .name = name,
+                         .name = "RpbGetBucketReq",
                          .path = path};
+    riak_status st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
+    free(path);
+    return st;
+}
+
+riak_status riak_pb_props_finish_get(riak_client *c, riak_pb_response *resp, const char *bucket,
+                                     char **json) {
+    *json = NULL;
     ProtobufCMessage *msg;
-    riak_status st = riak_pb_exec(c, &call, m, &rpb_get_bucket_resp__descriptor, &msg);
+    riak_status st = riak_pb_unpack(c, resp, &rpb_get_bucket_resp__descriptor, &msg);
     if (st != RIAK_OK) {
         return st;
     }
@@ -1364,33 +1402,42 @@ static riak_status bucket_props_call(riak_client *c, uint8_t code, const char *n
 
 riak_status riak_pb_get_bucket_props(riak_client *c, const char *type, const char *bucket,
                                      char **json) {
-    RpbGetBucketReq m = RPB_GET_BUCKET_REQ__INIT;
-    m.bucket = riak_pb_bin(bucket);
-    if (type) {
-        m.has_type = 1;
-        m.type = riak_pb_bin(type);
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = run_prepared(c, riak_pb_props_prepare_get(c, type, bucket, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_pb_props_finish_get(c, &resp, bucket, json);
     }
-    char *path = riak_pb_path(c, type, bucket, "props", NULL);
-    if (path == NULL) return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
-    riak_status st = bucket_props_call(c, RIAK_PB_GET_BUCKET_REQ, "RpbGetBucketReq", &m.base, path,
-                                       json, bucket);
-    free(path);
+    riak_buf_free(&resp.body);
     return st;
 }
 
 riak_status riak_pb_get_type_props(riak_client *c, const char *type, char **json) {
+    *json = NULL;
     RpbGetBucketTypeReq m = RPB_GET_BUCKET_TYPE_REQ__INIT;
     m.type = riak_pb_bin(type);
     char *path = riak_strprintf("/types/%s/props", type);
     if (path == NULL) return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
-    riak_status st = bucket_props_call(c, RIAK_PB_GET_BUCKET_TYPE_REQ, "RpbGetBucketTypeReq",
-                                       &m.base, path, json, NULL);
+    riak_pb_call call = {.code = RIAK_PB_GET_BUCKET_TYPE_REQ,
+                         .resp_code = RIAK_PB_GET_BUCKET_RESP,
+                         .idempotent = true,
+                         .name = "RpbGetBucketTypeReq",
+                         .path = path};
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st =
+        run_prepared(c, riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, &p), &p, &resp);
     free(path);
+    if (st == RIAK_OK) {
+        st = riak_pb_props_finish_get(c, &resp, NULL, json);
+    }
+    riak_buf_free(&resp.body);
     return st;
 }
 
-riak_status riak_pb_set_bucket_props(riak_client *c, const char *type, const char *bucket,
-                                     const char *json) {
+riak_status riak_pb_props_prepare_set(riak_client *c, const char *type, const char *bucket,
+                                      const char *json, riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     json_object *root = NULL;
     props_build b;
     riak_status st = props_from_json(c, json, &root, &b);
@@ -1412,11 +1459,21 @@ riak_status riak_pb_set_bucket_props(riak_client *c, const char *type, const cha
                              .idempotent = true,
                              .name = "RpbSetBucketReq",
                              .path = path};
-        st = riak_pb_exec(c, &call, &m.base, NULL, NULL);
+        st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
     }
     free(path);
     props_build_free(&b);
     json_object_put(root);
+    return st;
+}
+
+riak_status riak_pb_set_bucket_props(riak_client *c, const char *type, const char *bucket,
+                                     const char *json) {
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st =
+        run_prepared(c, riak_pb_props_prepare_set(c, type, bucket, json, &p), &p, &resp);
+    riak_buf_free(&resp.body);
     return st;
 }
 
@@ -1582,14 +1639,15 @@ riak_status riak_pb_client_id(riak_client *c, char **id) {
 
 /* ---- legacy counters ------------------------------------------------- */
 
-riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key, bool update,
-                            int64_t amount, const riak_opts *o, int64_t *value) {
+riak_status riak_pb_counter_prepare(riak_client *c, const char *bucket, const char *key,
+                                    bool update, int64_t amount, const riak_opts *o,
+                                    bool want_value, riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
     char *path = riak_pb_path(c, NULL, bucket, "counters", key);
     if (path == NULL) {
         return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
     }
     riak_status st;
-    ProtobufCMessage *msg = NULL;
     if (update) {
         RpbCounterUpdateReq m = RPB_COUNTER_UPDATE_REQ__INIT;
         m.bucket = riak_pb_bin(bucket);
@@ -1600,18 +1658,14 @@ riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key,
             free(path);
             return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum");
         }
-        m.has_returnvalue = value != NULL;
-        m.returnvalue = value != NULL;
+        m.has_returnvalue = want_value;
+        m.returnvalue = want_value;
         riak_pb_call call = {.code = RIAK_PB_COUNTER_UPDATE_REQ,
                              .resp_code = RIAK_PB_COUNTER_UPDATE_RESP,
                              .idempotent = false, /* repeating would count twice */
                              .name = "RpbCounterUpdateReq",
                              .path = path};
-        st = riak_pb_exec(c, &call, &m.base, &rpb_counter_update_resp__descriptor, &msg);
-        if (st == RIAK_OK && value) {
-            RpbCounterUpdateResp *r = (RpbCounterUpdateResp *)msg;
-            *value = r->value;
-        }
+        st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
     } else {
         RpbCounterGetReq m = RPB_COUNTER_GET_REQ__INIT;
         m.bucket = riak_pb_bin(bucket);
@@ -1629,12 +1683,28 @@ riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key,
                              .idempotent = true,
                              .name = "RpbCounterGetReq",
                              .path = path};
-        st = riak_pb_exec(c, &call, &m.base, &rpb_counter_get_resp__descriptor, &msg);
+        st = riak_pb_prepare_call(c, &call, &m.base, NULL, NULL, p);
+    }
+    free(path);
+    return st;
+}
+
+riak_status riak_pb_counter_finish(riak_client *c, riak_pb_response *resp, bool update,
+                                   int64_t *value) {
+    ProtobufCMessage *msg = NULL;
+    riak_status st;
+    if (update) {
+        st = riak_pb_unpack(c, resp, &rpb_counter_update_resp__descriptor, &msg);
+        if (st == RIAK_OK && value) {
+            *value = ((RpbCounterUpdateResp *)msg)->value;
+        }
+    } else {
+        st = riak_pb_unpack(c, resp, &rpb_counter_get_resp__descriptor, &msg);
         if (st == RIAK_OK) {
             RpbCounterGetResp *r = (RpbCounterGetResp *)msg;
             if (!r->has_value) {
                 st = riak_set_error(c, RIAK_E_NOT_FOUND, "not found");
-            } else {
+            } else if (value) {
                 *value = r->value;
             }
         }
@@ -1642,7 +1712,20 @@ riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key,
     if (msg) {
         protobuf_c_message_free_unpacked(msg, NULL);
     }
-    free(path);
+    return st;
+}
+
+riak_status riak_pb_counter(riak_client *c, const char *bucket, const char *key, bool update,
+                            int64_t amount, const riak_opts *o, int64_t *value) {
+    riak_pb_prepared p;
+    riak_pb_response resp = {0};
+    riak_status st = run_prepared(
+        c, riak_pb_counter_prepare(c, bucket, key, update, amount, o, value != NULL, &p), &p,
+        &resp);
+    if (st == RIAK_OK) {
+        st = riak_pb_counter_finish(c, &resp, update, value);
+    }
+    riak_buf_free(&resp.body);
     return st;
 }
 

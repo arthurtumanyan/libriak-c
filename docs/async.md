@@ -1,7 +1,7 @@
 # Asynchronous requests
 
-A `riak_async` handle runs any number of get, put, delete and ping requests
-concurrently on one thread: over Protocol Buffers with a pool of
+A `riak_async` handle runs any number of requests concurrently on one
+thread: over Protocol Buffers with a pool of
 non-blocking connections per node (at most
 `riak_config::pb_max_connections_per_node`, 8 by default; further requests
 wait for a free connection), over HTTP with libcurl's multi interface. It
@@ -36,10 +36,12 @@ riak_async_free(a);
 
 ## Callbacks
 
-- `res->errmsg` is valid only during the callback.
-- `res->object` (get, and put with `return_body`) and `res->created_key`
-  (put without a key) are freed when the callback returns, unless they are
-  kept by copying them and clearing the originals:
+- `res->errmsg` is valid only during the callback; `res->kind` names the
+  request.
+- The result members (`object`, `siblings`, `datatype`, `index`, `search`,
+  `json`, `counter`, `created_key`, `continuation`, see the table below)
+  are freed when the callback returns, unless they are kept by copying them
+  and clearing the originals:
 
 ```c
 static void keep(riak_async_result *res, void *ctx) {
@@ -76,8 +78,50 @@ riak_async_set_loop(a, on_socket, on_timer, loop_ctx);   /* before the first req
 loop is found in `tests/test_async.c`, and `examples/async.c` writes many keys
 concurrently with the built-in loop.
 
+## Calls
+
+| Call | Result in `riak_async_result` |
+|---|---|
+| `riak_async_ping()` | — |
+| `riak_async_get()` | `object` |
+| `riak_async_put()` | `object` with `return_body`; `created_key` without a key |
+| `riak_async_delete()` | — |
+| `riak_async_get_siblings()` | `siblings` |
+| `riak_async_dt_fetch()` | `datatype` |
+| `riak_async_dt_update()` | `datatype` with `return_body`; `created_key` without a key |
+| `riak_async_counter_get()`, `riak_async_counter_update()` | `counter` |
+| `riak_async_index_query()` | `index` (one page, with its continuation) |
+| `riak_async_index_query_stream()` | each match goes to the item callback; `continuation` |
+| `riak_async_search()` | `search` |
+| `riak_async_mapred()` | `json` (the result array) |
+| `riak_async_mapred_stream()` | each phase result goes to the item callback |
+| `riak_async_get_bucket_props()` | `json` |
+| `riak_async_set_bucket_props()` | — |
+| `riak_async_list_keys_stream()`, `riak_async_list_buckets_stream()` | each name goes to the item callback |
+
+Each call takes the arguments of its blocking counterpart, builds the same
+request and interprets the answer the same way, on both transports; the
+retry rules are the same too (reads are retried, counter and data type
+updates and delivering streams are not). A data type operation is encoded
+on submission and may be freed right after the call.
+
+Streams have two callbacks: the item callback runs for every key, match or
+phase result as it arrives, inside `riak_async_run()` or the loop hooks, and
+returning `false` from it stops the stream (its connection is then closed,
+and the request completes with `RIAK_OK`); the completion callback runs
+once at the end.
+
+```c
+static bool on_key(const char *key, size_t len, void *ctx) {
+    printf("%.*s\n", (int)len, key);
+    return true;
+}
+riak_async_list_keys_stream(a, NULL, "users", on_key, NULL, done, NULL);
+```
+
 ## Scope
 
-The asynchronous API covers object get, put, delete and ping. Queries, data
-types and bucket operations are available through the blocking API, which
-can run on separate threads with one client each.
+Administration and operations calls stay blocking: Riak Search index and
+schema administration, statistics, the Query API, AAE folds, replication
+queues, link walking, object folds, preference lists and coverage plans.
+They can run on separate threads with one client each.

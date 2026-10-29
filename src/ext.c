@@ -84,46 +84,78 @@ riak_status riak_get_client_id(riak_client *client, char **id) {
 
 /* ---- Riak 1.4 counters ------------------------------------------------ */
 
-static riak_status counter_http(riak_client *c, const char *bucket, const char *key, bool update,
-                                int64_t amount, const riak_opts *o, int64_t *value) {
-    riak_buf url = {0};
-    int rc = riak_url_bucket(&url, c, NULL, bucket, "counters", key);
+riak_status riak_counter_http_prepare(riak_client *c, const char *bucket, const char *key,
+                                      bool update, int64_t amount, const riak_opts *o,
+                                      bool want_value, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    int rc = riak_url_bucket(&p->url, c, NULL, bucket, "counters", key);
     if (update) {
-        rc = rc || riak_url_append_quorum(&url, "w", o->w) ||
-             riak_url_append_quorum(&url, "dw", o->dw) ||
-             riak_url_append_quorum(&url, "pw", o->pw) ||
-             (value && riak_url_append_query(&url, "returnvalue", "true"));
+        rc = rc || riak_url_append_quorum(&p->url, "w", o->w) ||
+             riak_url_append_quorum(&p->url, "dw", o->dw) ||
+             riak_url_append_quorum(&p->url, "pw", o->pw) ||
+             (want_value && riak_url_append_query(&p->url, "returnvalue", "true"));
     } else {
-        rc = rc || riak_url_append_quorum(&url, "r", o->r) ||
-             riak_url_append_quorum(&url, "pr", o->pr) ||
-             (o->basic_quorum && riak_url_append_query(&url, "basic_quorum", "true")) ||
-             (o->notfound_ok && riak_url_append_query(&url, "notfound_ok", "true"));
+        rc = rc || riak_url_append_quorum(&p->url, "r", o->r) ||
+             riak_url_append_quorum(&p->url, "pr", o->pr) ||
+             (o->basic_quorum && riak_url_append_query(&p->url, "basic_quorum", "true")) ||
+             (o->notfound_ok && riak_url_append_query(&p->url, "notfound_ok", "true"));
     }
-    rc = rc || riak_url_append_quorum(&url, "node_confirms", o->node_confirms);
+    rc = rc || riak_url_append_quorum(&p->url, "node_confirms", o->node_confirms);
     if (rc) {
-        riak_buf_free(&url);
+        riak_prepared_free(p);
         return riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
+    }
+    if (!update) {
+        p->req = (riak_request){.method = "GET", .url = p->url.data};
+        return RIAK_OK;
     }
     char num[32];
     snprintf(num, sizeof num, "%" PRId64, amount);
-    riak_response resp = {0};
-    riak_status st = update ? http_call(c, "POST", url.data, "text/plain", num, strlen(num), &resp)
-                            : http_call(c, "GET", url.data, NULL, NULL, 0, &resp);
-    riak_buf_free(&url);
-    if (st == RIAK_OK) {
-        if (resp.status != 200 && resp.status != 204) {
-            st = riak_http_error(c, &resp);
-        } else if (value) {
-            char *end = NULL;
-            const char *body = resp.body.data ? resp.body.data : "";
-            errno = 0;
-            long long v = strtoll(body, &end, 10);
-            if (end == body || errno == ERANGE) {
-                st = riak_set_error(c, RIAK_E_PARSE, "malformed counter value");
-            } else {
-                *value = v;
-            }
+    riak_status st = riak_add_header(c, &p->headers, "Content-Type", NULL, "text/plain");
+    if (st == RIAK_OK && (p->body = riak_strdup(num)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
+        return st;
+    }
+    p->req = (riak_request){.method = "POST",
+                            .url = p->url.data,
+                            .headers = p->headers,
+                            .body = p->body,
+                            .body_len = strlen(p->body)};
+    return RIAK_OK;
+}
+
+riak_status riak_counter_http_finish(riak_client *c, riak_response *resp, int64_t *value) {
+    if (resp->status != 200 && resp->status != 204) {
+        return riak_http_error(c, resp);
+    }
+    if (value) {
+        char *end = NULL;
+        const char *body = resp->body.data ? resp->body.data : "";
+        errno = 0;
+        long long v = strtoll(body, &end, 10);
+        if (end == body || errno == ERANGE) {
+            return riak_set_error(c, RIAK_E_PARSE, "malformed counter value");
         }
+        *value = v;
+    }
+    return RIAK_OK;
+}
+
+static riak_status counter_http(riak_client *c, const char *bucket, const char *key, bool update,
+                                int64_t amount, const riak_opts *o, int64_t *value) {
+    riak_prepared p;
+    riak_response resp = {0};
+    riak_status st =
+        riak_counter_http_prepare(c, bucket, key, update, amount, o, value != NULL, &p);
+    if (st == RIAK_OK) {
+        st = riak_perform(c, &p.req, &resp);
+        riak_prepared_free(&p);
+    }
+    if (st == RIAK_OK) {
+        st = riak_counter_http_finish(c, &resp, value);
     }
     riak_response_free(&resp);
     return st;

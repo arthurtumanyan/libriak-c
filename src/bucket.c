@@ -20,29 +20,34 @@ static riak_status check_type(riak_client *c, const char *type) {
     return type ? riak_check_name(c, type, "bucket type") : RIAK_OK;
 }
 
+riak_status riak_body_take(riak_client *c, riak_response *resp, int kind, char **body) {
+    *body = NULL;
+    if (resp->status != 200) {
+        return riak_http_error(c, resp);
+    }
+    riak_status st = RIAK_OK;
+    json_object *obj = NULL;
+    if (kind != RIAK_BODY_RAW) {
+        obj = json_tokener_parse(resp->body.data ? resp->body.data : "");
+        enum json_type want = kind == RIAK_BODY_JSON_ARRAY ? json_type_array : json_type_object;
+        if (obj == NULL || !json_object_is_type(obj, want)) {
+            st = riak_set_error(c, RIAK_E_PARSE, "response is not a JSON %s",
+                                kind == RIAK_BODY_JSON_ARRAY ? "array" : "object");
+        }
+    }
+    if (st == RIAK_OK && (*body = riak_buf_steal(&resp->body, NULL)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    json_object_put(obj);
+    return st;
+}
+
 riak_status riak_get_body(riak_client *c, const char *url, int kind, char **body) {
     riak_request req = {.method = "GET", .url = url};
     riak_response resp = {0};
     riak_status st = riak_perform(c, &req, &resp);
-    if (st != RIAK_OK) {
-        return st;
-    }
-    if (resp.status != 200) {
-        st = riak_http_error(c, &resp);
-    } else {
-        json_object *obj = NULL;
-        if (kind != RIAK_BODY_RAW) {
-            obj = json_tokener_parse(resp.body.data ? resp.body.data : "");
-            enum json_type want = kind == RIAK_BODY_JSON_ARRAY ? json_type_array : json_type_object;
-            if (obj == NULL || !json_object_is_type(obj, want)) {
-                st = riak_set_error(c, RIAK_E_PARSE, "response is not a JSON %s",
-                                    kind == RIAK_BODY_JSON_ARRAY ? "array" : "object");
-            }
-        }
-        if (st == RIAK_OK && (*body = riak_buf_steal(&resp.body, NULL)) == NULL) {
-            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
-        }
-        json_object_put(obj);
+    if (st == RIAK_OK) {
+        st = riak_body_take(c, &resp, kind, body);
     }
     riak_response_free(&resp);
     return st;
@@ -180,32 +185,38 @@ riak_status riak_list_keys(riak_client *client, const char *bucket, riak_strlist
     return riak_type_list_keys(client, NULL, bucket, out);
 }
 
-static riak_status props_request(riak_client *client, const char *type, const char *bucket,
-                                 const char *method, const char *json, riak_response *resp) {
-    riak_status st;
-    if ((st = check_type(client, type)) != RIAK_OK ||
-        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
+riak_status riak_props_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                    const char *json, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st = RIAK_OK;
+    if (riak_url_bucket(&p->url, c, type, bucket, "props", NULL) != 0 ||
+        (json && (p->body = riak_strdup(json)) == NULL)) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    } else if (json) {
+        st = riak_add_header(c, &p->headers, "Content-Type", NULL, "application/json");
+    }
+    if (st != RIAK_OK) {
+        riak_prepared_free(p);
         return st;
     }
-    riak_buf url = {0};
-    struct curl_slist *headers = NULL;
-    if (riak_url_bucket(&url, client, type, bucket, "props", NULL) != 0) {
-        riak_buf_free(&url);
-        return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
-    }
-    if (json != NULL) {
-        st = riak_add_header(client, &headers, "Content-Type", NULL, "application/json");
-    }
+    p->req = (riak_request){.method = json ? "PUT" : "GET",
+                            .url = p->url.data,
+                            .headers = p->headers,
+                            .body = p->body,
+                            .body_len = p->body ? strlen(p->body) : 0};
+    return RIAK_OK;
+}
+
+riak_status riak_props_http_finish_set(riak_client *c, riak_response *resp) {
+    return resp->status == 204 || resp->status == 200 ? RIAK_OK : riak_http_error(c, resp);
+}
+
+/* A prepared request is run and freed; the response is left for finish. */
+static riak_status run_http(riak_client *c, riak_status st, riak_prepared *p, riak_response *resp) {
     if (st == RIAK_OK) {
-        riak_request req = {.method = method,
-                            .url = url.data,
-                            .headers = headers,
-                            .body = json,
-                            .body_len = json ? strlen(json) : 0};
-        st = riak_perform(client, &req, resp);
+        st = riak_perform(c, &p->req, resp);
+        riak_prepared_free(p);
     }
-    curl_slist_free_all(headers);
-    riak_buf_free(&url);
     return st;
 }
 
@@ -223,13 +234,13 @@ riak_status riak_type_get_bucket_props(riak_client *client, const char *type, co
     if (riak_is_pb(client)) {
         return riak_pb_get_bucket_props(client, type, bucket, json);
     }
-    riak_buf url = {0};
-    if (riak_url_bucket(&url, client, type, bucket, "props", NULL) != 0) {
-        riak_buf_free(&url);
-        return riak_set_error(client, RIAK_E_NOMEM, "out of memory");
+    riak_prepared p;
+    riak_response resp = {0};
+    st = run_http(client, riak_props_http_prepare(client, type, bucket, NULL, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_body_take(client, &resp, RIAK_BODY_JSON_OBJECT, json);
     }
-    st = riak_get_body(client, url.data, RIAK_BODY_JSON_OBJECT, json);
-    riak_buf_free(&url);
+    riak_response_free(&resp);
     return st;
 }
 
@@ -242,21 +253,19 @@ riak_status riak_type_set_bucket_props(riak_client *client, const char *type, co
     if (client == NULL || json == NULL) {
         return RIAK_E_INVALID_ARG;
     }
-    if (riak_is_pb(client)) {
-        riak_status st;
-        if ((st = check_type(client, type)) != RIAK_OK ||
-            (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
-            return st;
-        }
-        return riak_pb_set_bucket_props(client, type, bucket, json);
-    }
-    riak_response resp = {0};
-    riak_status st = props_request(client, type, bucket, "PUT", json, &resp);
-    if (st != RIAK_OK) {
+    riak_status st;
+    if ((st = check_type(client, type)) != RIAK_OK ||
+        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
         return st;
     }
-    if (resp.status != 204 && resp.status != 200) {
-        st = riak_http_error(client, &resp);
+    if (riak_is_pb(client)) {
+        return riak_pb_set_bucket_props(client, type, bucket, json);
+    }
+    riak_prepared p;
+    riak_response resp = {0};
+    st = run_http(client, riak_props_http_prepare(client, type, bucket, json, &p), &p, &resp);
+    if (st == RIAK_OK) {
+        st = riak_props_http_finish_set(client, &resp);
     }
     riak_response_free(&resp);
     return st;
@@ -279,12 +288,19 @@ riak_status riak_type_reset_bucket_props(riak_client *client, const char *type,
         }
         return riak_pb_reset_bucket_props(client, type, bucket);
     }
-    riak_response resp = {0};
-    riak_status st = props_request(client, type, bucket, "DELETE", NULL, &resp);
-    if (st != RIAK_OK) {
+    riak_status st;
+    if ((st = check_type(client, type)) != RIAK_OK ||
+        (st = riak_check_name(client, bucket, "bucket")) != RIAK_OK) {
         return st;
     }
-    if (resp.status != 204) {
+    riak_prepared p;
+    riak_response resp = {0};
+    st = riak_props_http_prepare(client, type, bucket, NULL, &p);
+    if (st == RIAK_OK) {
+        p.req.method = "DELETE";
+    }
+    st = run_http(client, st, &p, &resp);
+    if (st == RIAK_OK && resp.status != 204) {
         st = riak_http_error(client, &resp);
     }
     riak_response_free(&resp);
@@ -365,16 +381,9 @@ riak_status riak_stats(riak_client *client, char **json) {
 
 /* ---- streamed listings ------------------------------------------------ */
 
-typedef struct {
-    riak_keystream *ks;
-    riak_name_cb cb;
-    void *ctx;
-    bool stopped;
-} name_stream;
-
 /* Names parsed so far are handed to the callback as the body arrives. */
 static bool name_sink(void *ctx, const char *data, size_t len, riak_status *abort_status) {
-    name_stream *s = ctx;
+    riak_name_stream *s = ctx;
     riak_status st = riak_keystream_feed(s->ks, data, len);
     if (st != RIAK_OK) {
         *abort_status = st;
@@ -394,46 +403,62 @@ static bool name_sink(void *ctx, const char *data, size_t len, riak_status *abor
     return more;
 }
 
-static riak_status http_list_stream(riak_client *c, const char *type, const char *bucket,
-                                    riak_name_cb cb, void *ctx) {
-    riak_buf url = {0};
+riak_status riak_list_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                   riak_name_stream *s, riak_prepared *p) {
+    memset(p, 0, sizeof *p);
     int rc;
     if (bucket) {
-        rc = riak_url_bucket(&url, c, type, bucket, "keys", NULL) ||
-             riak_url_append_query(&url, "keys", "stream");
+        rc = riak_url_bucket(&p->url, c, type, bucket, "keys", NULL) ||
+             riak_url_append_query(&p->url, "keys", "stream");
     } else {
-        rc = riak_buf_append_str(&url, c->root) ||
-             (type && (riak_buf_append_str(&url, "types/") || riak_url_append_escaped(&url, type) ||
-                       riak_buf_append_str(&url, "/"))) ||
-             riak_buf_append_str(&url, "buckets?buckets=stream");
+        rc = riak_buf_append_str(&p->url, c->root) ||
+             (type &&
+              (riak_buf_append_str(&p->url, "types/") || riak_url_append_escaped(&p->url, type) ||
+               riak_buf_append_str(&p->url, "/"))) ||
+             riak_buf_append_str(&p->url, "buckets?buckets=stream");
     }
-    name_stream s = {.ks = rc ? NULL : riak_keystream_new_field(bucket ? "keys" : "buckets"),
-                     .cb = cb,
-                     .ctx = ctx};
-    if (s.ks == NULL) {
-        riak_buf_free(&url);
+    s->ks = rc ? NULL : riak_keystream_new_field(bucket ? "keys" : "buckets");
+    if (s->ks == NULL) {
+        riak_prepared_free(p);
         return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
     }
-    riak_request req = {
-        .method = "GET", .url = url.data, .sink = name_sink, .sink_ctx = &s, .unbounded = true};
-    riak_response resp = {0};
-    riak_status st = riak_perform(c, &req, &resp);
-    if (s.stopped) {
+    p->req = (riak_request){
+        .method = "GET", .url = p->url.data, .sink = name_sink, .sink_ctx = s, .unbounded = true};
+    return RIAK_OK;
+}
+
+riak_status riak_list_http_end(riak_client *c, riak_name_stream *s, riak_status st,
+                               riak_response *resp) {
+    if (s->stopped) {
         riak_clear_error(c); /* the callback asked to stop */
         st = RIAK_OK;
     } else if (st == RIAK_OK) {
         riak_strlist rest;
-        if (resp.status != 200) {
-            st = riak_http_error(c, &resp);
-        } else if ((st = riak_keystream_finish(s.ks, &rest)) != RIAK_OK) {
+        if (resp->status != 200) {
+            st = riak_http_error(c, resp);
+        } else if ((st = riak_keystream_finish(s->ks, &rest)) != RIAK_OK) {
             riak_set_error(c, st, "truncated listing");
         } else {
             riak_strlist_free(&rest);
         }
     }
+    riak_keystream_free(s->ks);
+    s->ks = NULL;
+    return st;
+}
+
+static riak_status http_list_stream(riak_client *c, const char *type, const char *bucket,
+                                    riak_name_cb cb, void *ctx) {
+    riak_name_stream s = {.cb = cb, .ctx = ctx};
+    riak_prepared p;
+    riak_status st = riak_list_http_prepare(c, type, bucket, &s, &p);
+    if (st != RIAK_OK) {
+        return st;
+    }
+    riak_response resp = {0};
+    st = riak_list_http_end(c, &s, riak_perform(c, &p.req, &resp), &resp);
+    riak_prepared_free(&p);
     riak_response_free(&resp);
-    riak_keystream_free(s.ks);
-    riak_buf_free(&url);
     return st;
 }
 

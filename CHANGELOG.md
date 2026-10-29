@@ -51,6 +51,19 @@
   the rules are unchanged and shared by both transports.
 
 ### Added
+- Asynchronous data path and streams on both transports:
+  `riak_async_get_siblings()`, `riak_async_dt_fetch()`,
+  `riak_async_dt_update()`, `riak_async_counter_get()`,
+  `riak_async_counter_update()`, `riak_async_index_query()`,
+  `riak_async_index_query_stream()`, `riak_async_search()`,
+  `riak_async_mapred()`, `riak_async_mapred_stream()`,
+  `riak_async_get_bucket_props()`, `riak_async_set_bucket_props()`,
+  `riak_async_list_keys_stream()` and `riak_async_list_buckets_stream()`.
+  `riak_async_result` gains `kind` and, appended, `siblings`, `datatype`,
+  `index`, `search`, `json`, `counter` and `continuation`. Every blocking
+  operation of the data path is split into prepare and finish functions
+  that the asynchronous calls share, so both build the same requests and
+  read the answers the same way.
 - Riak 2.9 to 3.4 features, on both transports where Riak serves them:
   - request options `node_confirms`, `sync_on_write`, `asis`,
     `return_head` and `deletedvclock`, `riak_index_query.pagination_sort`

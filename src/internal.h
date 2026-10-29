@@ -140,6 +140,89 @@ riak_status riak_kv_prepare_delete(riak_client *c, const char *bucket, const cha
 riak_status riak_kv_finish_delete(riak_client *c, riak_response *resp);
 riak_status riak_prepare_ping(riak_client *c, riak_prepared *p);
 riak_status riak_finish_ping(riak_client *c, riak_response *resp);
+riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const char *key,
+                                     const riak_opts *o, riak_prepared *p);
+riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out);
+riak_status riak_dt_http_prepare_fetch(riak_client *c, const char *type, const char *bucket,
+                                       const char *key, const riak_dt_opts *o, riak_prepared *p);
+riak_status riak_dt_http_finish_fetch(riak_client *c, riak_response *resp, riak_datatype *out);
+riak_status riak_dt_http_prepare_update(riak_client *c, const char *type, const char *bucket,
+                                        const char *key, const riak_dt_op *op, const char *context,
+                                        const riak_dt_opts *o, riak_prepared *p);
+/* generated_key: the request had no key and the server chose one */
+riak_status riak_dt_http_finish_update(riak_client *c, riak_response *resp, bool generated_key,
+                                       riak_datatype *out, char **created_key);
+riak_status riak_counter_http_prepare(riak_client *c, const char *bucket, const char *key,
+                                      bool update, int64_t amount, const riak_opts *o,
+                                      bool want_value, riak_prepared *p);
+riak_status riak_counter_http_finish(riak_client *c, riak_response *resp, int64_t *value);
+
+/* Body of a 200 response (kind as for riak_get_body()), taken out of resp. */
+riak_status riak_body_take(riak_client *c, riak_response *resp, int kind, char **body);
+
+/* Streams: a 200 multipart/mixed body split into JSON parts as it arrives;
+ * fn returning false stops the stream. */
+typedef bool (*riak_chunk_fn)(void *ctx, const char *json, size_t len, riak_status *err);
+typedef struct {
+    riak_client *c;
+    riak_response *resp; /* the response being received */
+    struct riak_mpstream *mp;
+    riak_chunk_fn fn;
+    void *ctx;
+    bool stopped; /* fn asked to stop: the rest is ignored */
+} riak_http_stream;
+bool riak_http_stream_sink(void *ctx, const char *data, size_t len, riak_status *err);
+/* req delivers its body to s. */
+void riak_http_stream_attach(riak_http_stream *s, riak_request *req);
+/* The outcome of the request (st) once it ended; frees the parser. */
+riak_status riak_http_stream_end(riak_http_stream *s, riak_status st);
+
+riak_status riak_index_http_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
+                                    bool stream, riak_prepared *p);
+riak_status riak_index_http_finish(riak_client *c, riak_response *resp, bool want_terms,
+                                   riak_index_result *out);
+typedef struct {
+    riak_index_cb cb;
+    void *ctx;
+    char **continuation;
+} riak_index_stream;
+/* Matches collected into a result page (riak_index_query_run()). */
+typedef struct {
+    riak_strlist keys, terms;
+    size_t kcap, tcap;
+    bool want_terms;
+    bool nomem;
+} riak_index_acc;
+bool riak_index_acc_add(const char *key, const char *term, void *ctx);
+riak_status riak_index_acc_take(riak_index_acc *acc, riak_index_result *out);
+bool riak_index_chunk(void *ctx, const char *json, size_t len, riak_status *err);
+riak_status riak_search_http_prepare(riak_client *c, const char *index, const riak_search_query *q,
+                                     riak_prepared *p);
+riak_status riak_search_http_finish(riak_client *c, riak_response *resp, riak_search_result *out);
+riak_status riak_mapred_http_prepare(riak_client *c, const char *job, bool chunked,
+                                     riak_prepared *p);
+riak_status riak_mapred_http_finish(riak_client *c, riak_response *resp, char **result);
+typedef struct {
+    riak_mapred_cb cb;
+    void *ctx;
+} riak_mapred_stream_ctx;
+bool riak_mapred_chunk(void *ctx, const char *json, size_t len, riak_status *err);
+/* GET (json NULL) or PUT of a bucket's properties. */
+riak_status riak_props_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                    const char *json, riak_prepared *p);
+riak_status riak_props_http_finish_set(riak_client *c, riak_response *resp);
+/* Streamed listings: the keys of bucket, or the buckets when it is NULL. */
+typedef struct {
+    struct riak_keystream *ks;
+    riak_name_cb cb;
+    void *ctx;
+    bool stopped;
+} riak_name_stream;
+riak_status riak_list_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                   riak_name_stream *s, riak_prepared *p);
+/* The outcome of the listing (st) once it ended; frees the parser. */
+riak_status riak_list_http_end(riak_client *c, riak_name_stream *s, riak_status st,
+                               riak_response *resp);
 
 /* ---- one attempt on one easy handle (shared by sync and async) ---- */
 

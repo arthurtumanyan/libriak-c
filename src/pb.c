@@ -362,26 +362,47 @@ static riak_status pack(riak_client *c, const ProtobufCMessage *msg, uint8_t **b
     return RIAK_OK;
 }
 
-static riak_status run(riak_client *c, const riak_pb_call *call, const ProtobufCMessage *msg,
-                       riak_pb_sink_fn sink, void *ctx, riak_pb_response *resp) {
-    uint8_t *buf;
-    size_t len;
-    riak_status st = pack(c, msg, &buf, &len);
+riak_status riak_pb_prepare_call(riak_client *c, const riak_pb_call *call,
+                                 const ProtobufCMessage *msg, riak_pb_sink_fn sink, void *ctx,
+                                 riak_pb_prepared *p) {
+    memset(p, 0, sizeof *p);
+    riak_status st = pack(c, msg, &p->payload, &p->len);
     if (st != RIAK_OK) {
         return st;
     }
-    riak_pb_request req = {.code = call->code,
-                           .resp_code = call->resp_code,
-                           .payload = buf,
-                           .len = len,
-                           .sink = sink,
-                           .sink_ctx = ctx,
-                           .idempotent = call->idempotent,
-                           .pin = call->pin,
-                           .name = call->name,
-                           .path = call->path ? call->path : "/"};
-    st = riak_pb_perform(c, &req, resp);
-    free(buf);
+    p->path = riak_strdup(call->path ? call->path : "/");
+    if (p->path == NULL) {
+        free(p->payload);
+        memset(p, 0, sizeof *p);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    p->req = (riak_pb_request){.code = call->code,
+                               .resp_code = call->resp_code,
+                               .payload = p->payload,
+                               .len = p->len,
+                               .sink = sink,
+                               .sink_ctx = ctx,
+                               .idempotent = call->idempotent,
+                               .pin = call->pin,
+                               .name = call->name,
+                               .path = p->path};
+    return RIAK_OK;
+}
+
+riak_status riak_pb_unpack(riak_client *c, const riak_pb_response *resp,
+                           const ProtobufCMessageDescriptor *desc, ProtobufCMessage **out) {
+    *out = protobuf_c_message_unpack(desc, NULL, resp->body.len, (const uint8_t *)resp->body.data);
+    return *out ? RIAK_OK : riak_set_error(c, RIAK_E_PARSE, "malformed %s", desc->name);
+}
+
+static riak_status run(riak_client *c, const riak_pb_call *call, const ProtobufCMessage *msg,
+                       riak_pb_sink_fn sink, void *ctx, riak_pb_response *resp) {
+    riak_pb_prepared p;
+    riak_status st = riak_pb_prepare_call(c, call, msg, sink, ctx, &p);
+    if (st == RIAK_OK) {
+        st = riak_pb_perform(c, &p.req, resp);
+    }
+    riak_pb_prepared_free(&p);
     return st;
 }
 
@@ -393,11 +414,7 @@ riak_status riak_pb_exec(riak_client *c, const riak_pb_call *call, const Protobu
     riak_pb_response resp = {0};
     riak_status st = run(c, call, msg, NULL, NULL, &resp);
     if (st == RIAK_OK && resp_desc && out) {
-        *out = protobuf_c_message_unpack(resp_desc, NULL, resp.body.len,
-                                         (const uint8_t *)resp.body.data);
-        if (*out == NULL) {
-            st = riak_set_error(c, RIAK_E_PARSE, "malformed %s", resp_desc->name);
-        }
+        st = riak_pb_unpack(c, &resp, resp_desc, out);
     }
     riak_buf_free(&resp.body);
     return st;

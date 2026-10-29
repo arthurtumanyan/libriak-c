@@ -10,7 +10,7 @@
  the same cluster code as blocking calls; backoffs are timers.
  */
 
-#include "pb.h"
+#include "async_op.h"
 
 #include <limits.h>
 #include <poll.h>
@@ -22,10 +22,9 @@
 typedef struct pbop pbop;
 struct pbop {
     riak_pb_async *a;
-    enum riak_pb_async_kind kind;
+    const riak_aop_def *def;
+    void *state;
     riak_pb_prepared p;
-    riak_opts opts; /* only resolver / resolver_ctx are used after submission */
-    bool generated_key;
     riak_async_cb cb;
     void *ctx;
     riak_pb_response resp;
@@ -58,8 +57,6 @@ struct riak_pb_async {
     riak_timer_fn timer_fn;
     void *loop_ctx;
 };
-
-static const riak_opts no_opts;
 
 /* ---- bookkeeping ------------------------------------------------------ */
 
@@ -159,32 +156,20 @@ static void release_conn(riak_pb_async *a, riak_pbconn *k) {
 
 static void finish_op(riak_pb_async *a, pbop *o, riak_status st) {
     riak_client *c = a->c;
-    riak_async_result res = {.status = st};
-    if (st == RIAK_OK) {
-        switch (o->kind) {
-        case RIAK_PBA_GET:
-            res.status = riak_pb_finish_get(c, &o->opts, &o->resp, &res.object);
-            break;
-        case RIAK_PBA_PUT:
-            res.status = riak_pb_finish_put(c, &o->resp, o->opts.return_body ? &res.object : NULL,
-                                            o->generated_key ? &res.created_key : NULL);
-            break;
-        default:
-            break;
-        }
-    } else if (st == RIAK_E_NOT_FOUND && o->kind == RIAK_PBA_DELETE) {
-        riak_clear_error(c); /* deleting an absent key succeeds */
-        res.status = RIAK_OK;
+    riak_async_result res = {.status = st, .kind = o->def->kind};
+    if (st == RIAK_OK && o->def->finish_pb) {
+        res.status = o->def->finish_pb(c, o->state, &o->resp, &res);
+    } else if (st != RIAK_OK && o->def->on_error) {
+        res.status = o->def->on_error(c, o->state, st);
     }
     res.errmsg = res.status == RIAK_OK ? "" : c->errmsg;
     o->cb(&res, o->ctx);
-    riak_object_free(&res.object);
-    free(res.created_key);
+    riak_async_result_clear(&res);
     riak_pb_prepared_free(&o->p);
     riak_buf_free(&o->resp.body);
+    if (o->def->free_state) o->def->free_state(o->state);
     free(o);
 }
-
 static void complete(riak_pb_async *a, pbop *o, riak_status st) {
     unlink_op(a, o);
     finish_op(a, o, st);
@@ -241,7 +226,8 @@ static void attempt_done(riak_pb_async *a, riak_pbconn *k) {
     riak_status st = riak_pbconn_finish(k, &retry);
     o->conn = NULL;
     release_conn(a, k);
-    if (riak_retry_allowed(a->c, o->p.req.idempotent, retry, o->attempt + 1)) {
+    /* a pinned request goes to its node only, as in the blocking path */
+    if (o->p.req.pin == 0 && riak_retry_allowed(a->c, o->p.req.idempotent, retry, o->attempt + 1)) {
         riak_buf_free(&o->resp.body);
         o->resp.stopped = false;
         o->retry_at = riak_now_ms() + riak_backoff_ms(a->c, o->attempt);
@@ -350,47 +336,31 @@ size_t riak_pb_async_pending(const riak_pb_async *a) {
     return a->pending;
 }
 
-riak_status riak_pb_async_submit(riak_pb_async *a, enum riak_pb_async_kind kind, const char *bucket,
-                                 const char *key, const void *value, size_t len,
-                                 const riak_opts *opts, riak_async_cb cb, void *ctx) {
+riak_status riak_pb_async_submit_op(riak_pb_async *a, const riak_aop_def *def, void *state,
+                                    riak_pb_prepared *p, riak_async_cb cb, void *ctx) {
     riak_client *c = a->c;
     pbop *o = calloc(1, sizeof *o);
-    if (o == NULL) return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    if (o == NULL) {
+        riak_pb_prepared_free(p);
+        if (def->free_state) def->free_state(state);
+        return riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
     o->a = a;
-    o->kind = kind;
-    o->opts = opts ? *opts : no_opts;
+    o->def = def;
+    o->state = state;
+    o->p = *p; /* the heap pointers inside req stay valid */
+    memset(p, 0, sizeof *p);
     o->cb = cb;
     o->ctx = ctx;
-    riak_status st;
-    switch (kind) {
-    case RIAK_PBA_PING:
-        st = riak_pb_prepare_ping(c, &o->p);
-        break;
-    case RIAK_PBA_GET:
-        st = riak_pb_prepare_get(c, bucket, key, &o->opts, &o->p);
-        break;
-    case RIAK_PBA_PUT:
-        o->generated_key = key == NULL;
-        st = riak_pb_prepare_put(c, bucket, key, value, len, &o->opts, &o->p);
-        break;
-    default:
-        st = riak_pb_prepare_delete(c, bucket, key, &o->opts, &o->p);
-        break;
-    }
-    if (st != RIAK_OK) {
-        free(o);
-        return st;
-    }
     o->next = a->ops;
     if (a->ops) a->ops->prev = o;
     a->ops = o;
     a->pending++;
-    o->node = riak_pick_node(c, SIZE_MAX);
+    o->node = o->p.req.pin > 0 ? (o->p.req.pin - 1) % c->n_nodes : riak_pick_node(c, SIZE_MAX);
     start(a, o);
     rearm_timer(a);
     return RIAK_OK;
 }
-
 size_t riak_pb_async_run(riak_pb_async *a, long timeout_ms) {
     long long deadline = timeout_ms >= 0 ? riak_now_ms() + timeout_ms : 0;
     struct pollfd *fds = NULL;
