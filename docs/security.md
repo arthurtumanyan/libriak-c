@@ -38,7 +38,8 @@ renegotiation and leaves out DHE key exchange. ECDHE is still offered, so a
 node with a working ECDHE keeps forward secrecy; the old nodes above fall
 back to RSA key exchange, which has none. Certificate and host name
 verification are unaffected. The option weakens TLS and is meant only for
-such nodes; current Riak releases do not need it.
+such nodes; current Riak releases do not need it. Riak KV 3.2 and 3.4
+complete the handshake with default settings on both transports.
 
 ## Riak security
 
@@ -74,6 +75,10 @@ cfg.tls_key_password = "passphrase";   /* encrypted keys only */
   handshake and not mistaken for a retryable network error.
 - The client keeps its own copies of the password and key passphrase and
   overwrites them when it is freed.
+- Riak refuses link walking while security is enabled, on both transports;
+  `riak_link_walk()` returns `RIAK_E_UNSUPPORTED`. Riak 3.x has no Search
+  permissions (`search.admin`, `search.query`); granting them makes the
+  whole grant fail.
 
 ## Other safeguards
 
@@ -82,6 +87,10 @@ cfg.tls_key_password = "passphrase";   /* encrypted keys only */
 - Responses larger than `max_body_bytes` (64 MiB by default) are rejected,
   which bounds memory use with a misbehaving server. Over Protocol Buffers
   the limit applies to every message, before it is read.
+- Compressed AAE tree branches are inflated to at most `max_body_bytes`,
+  so a small response cannot expand without bound.
+- Server documents of an unexpected shape (wrong JSON types, truncated
+  binary records, out-of-range numbers) are reported as `RIAK_E_PARSE`.
 - Only the `http` and `https` protocols are enabled in libcurl.
 - Protocol Buffers sockets never raise `SIGPIPE`, also under TLS.
 - The authentication message is wiped from memory after it is sent.

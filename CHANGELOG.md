@@ -3,17 +3,24 @@
 ## Unreleased
 
 ### Fixed
-- A streaming callback (key or bucket listing, index query, MapReduce) that
-  issued a request on the client running it reused the connection and
-  buffers of the stream in progress: a use-after-free over Protocol Buffers
-  and a stack use-after-return over HTTP. Such requests now return
-  `RIAK_E_INVALID_ARG` without touching the connection, and
+- A streaming callback (key or bucket listing, index query, MapReduce,
+  object fold) that issued a request on the client running it reused the
+  connection and buffers of the stream in progress: a use-after-free over
+  Protocol Buffers and a stack use-after-return over HTTP. Such requests
+  now return `RIAK_E_INVALID_ARG` without touching the connection, and
   `riak_client_free()` called from such a callback is ignored and logged
   instead of freeing the client in use.
 - Connection errors are formatted with `strerror_r()` instead of the
   non-reentrant `strerror()`.
 
 ### Changed
+- zlib is required (AAE tree branches).
+- `RIAK_E_UNSUPPORTED` also covers calls the node does not implement:
+  Riak 2.2 "Unknown message code" answers and its HTML 404 for newer HTTP
+  resources, Riak 3.x preference lists over HTTP, and link walking under
+  Riak security.
+- A Protocol Buffers connection on which Riak reported a crashed request
+  handler is closed instead of reused.
 - libcurl 7.66 or newer is required (`curl_multi_poll`).
 - HTTP 426 (security enabled, request over plain HTTP) is reported as
   `RIAK_E_UNAUTHORIZED`, as the equivalent Protocol Buffers error is.
@@ -25,6 +32,26 @@
   the rules are unchanged and shared by both transports.
 
 ### Added
+- Riak 2.9 to 3.4 features, on both transports where Riak serves them:
+  - request options `node_confirms`, `sync_on_write`, `asis`,
+    `return_head` and `deletedvclock`, `riak_index_query.pagination_sort`
+    and `riak_dt_opts.node_confirms`;
+  - bucket properties `node_confirms`, `sync_on_write`, `aae_tree_exclude`;
+  - `riak_set_type_props()`, `riak_get_client_id()`, legacy counters
+    (`riak_counter_update()`, `riak_counter_get()`);
+  - object folds (`riak_fold_objects()`), link walking
+    (`riak_link_walk()`) and the Riak 3.4 Query API (`riak_query_run()`,
+    `riak_query_fetch()`);
+  - AAE folds (`riak_aae_*`), nextgenrepl queues (`riak_repl_fetch()`,
+    `riak_repl_push()`, `riak_cluster_membership()`) and riak_repl
+    (`riak_get_cluster_id()`, `riak_repl_get()`).
+  The `.proto` files are refreshed from OpenRiak riak_pb (`openriak-3.4`),
+  and `riak_repl.proto` is added.
+- Live tests against Riak KV 2.2.3, 3.2.6 and 3.4.1 (OpenRiak images built
+  from source in `tests/docker/openriak`, node setup in
+  `tests/docker/setup-node.sh`), plain and with TLS and authentication; a
+  feature matrix in `docs/features.md`.
+- `tests/test_threads.c` and `-DRIAK_SANITIZE=thread`.
 - Protocol Buffers transport covering every public call: objects, siblings
   and resolvers, listings, bucket and bucket-type properties (as the same
   JSON documents as HTTP), secondary indexes, Riak Search and its

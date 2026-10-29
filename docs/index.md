@@ -12,8 +12,10 @@ protobuf-c, OpenSSL, libcurl and json-c.
 | [Configuration](configuration.md) | Every `riak_config` field and its default |
 | [Transports](transports.md) | Protocol Buffers and HTTP, their differences, connections, coverage plans |
 | [Errors and ownership](errors.md) | Status codes, error details, memory ownership, threading |
-| [Objects and buckets](objects.md) | Get, put, delete, metadata, bucket types, siblings, conditional requests |
-| [Queries](queries.md) | Secondary indexes, Riak Search, MapReduce |
+| [Features](features.md) | Which call each transport and Riak version serves |
+| [Objects and buckets](objects.md) | Get, put, delete, metadata, bucket types, siblings, conditional requests, legacy counters |
+| [Queries](queries.md) | Secondary indexes, Query API, Riak Search, MapReduce, object folds, link walking |
+| [Operations](operations.md) | AAE folds, replication queues, riak_repl, known server issues |
 | [Data types](datatypes.md) | Counters, sets, maps, HyperLogLogs, grow-only sets |
 | [Clusters and retries](clusters.md) | Multiple nodes, balancing, retries, node ejection |
 | [Asynchronous requests](async.md) | Concurrent requests, built-in and external event loops |
@@ -38,7 +40,8 @@ field and function is documented; the build fails on undocumented symbols.
 
 ## Supported servers
 
-The library is tested against Riak KV 2.2.3 on both transports. Riak KV 2.9+
-and the community-maintained OpenRiak releases expose the same interfaces;
-MapReduce is not available on OpenRiak 4.x, grow-only sets need Riak 2.9 or
-newer, and coverage plans need a node that implements `RpbCoverageReq`.
+The library is tested against Riak KV 2.2.3 and the OpenRiak releases 3.2.6
+and 3.4.1, on both transports, with and without TLS and authentication.
+Calls that a node does not serve (Riak Search on 3.x, the AAE folds and
+replication queues on 2.2, the Query API before 3.4) return
+`RIAK_E_UNSUPPORTED`; [Features](features.md) has the full matrix.

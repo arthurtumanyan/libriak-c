@@ -25,6 +25,16 @@ riak_delete(c, "users", "u1", NULL);
 - `head` returns the metadata without the value; `basic_quorum` and
   `notfound_ok` tune how not-found answers count towards the read quorum.
 - Over Protocol Buffers, `sloppy_quorum` and `n_val` are also available.
+- `node_confirms` (Riak 2.9+) requires acknowledgements from that many
+  distinct physical nodes; `sync_on_write` (`RIAK_SYNC_BACKEND`, `_ONE`,
+  `_ALL`) asks the vnodes to flush a write to disk before acknowledging it.
+  Riak 2.2 accepts both and does not enforce them.
+- `asis` stores the object exactly as sent, without the coordinating node
+  updating its vector clock (replication tooling).
+- Over Protocol Buffers, `return_head` returns the stored object's metadata
+  and vector clock without its value, and `deletedvclock` makes a get of a
+  deleted key return `RIAK_E_NOT_FOUND` with the tombstone's vector clock in
+  `out->vclock` and `out->deleted` set.
 
 ## Metadata, secondary index entries, links
 
@@ -45,7 +55,35 @@ Object calls address a bucket type through `riak_opts::bucket_type`. The
 bucket calls have `riak_type_*` variants: `riak_type_list_buckets()`,
 `riak_type_list_keys()`, `riak_type_get_bucket_props()`,
 `riak_type_set_bucket_props()` and `riak_type_reset_bucket_props()`.
-`riak_get_type_props()` returns the properties of the type itself.
+`riak_get_type_props()` returns the properties of the type itself, and
+`riak_set_type_props()` changes those that Riak allows to change after the
+type was created:
+
+```c
+riak_set_type_props(c, "maps", "{\"props\":{\"n_val\":5}}");
+```
+
+Over HTTP the document is validated by the node; over Protocol Buffers an
+unknown property is rejected with `RIAK_E_INVALID_ARG` before sending.
+The bucket property documents also carry the Riak 2.9+ properties
+`node_confirms`, `sync_on_write` and `aae_tree_exclude`.
+
+## Legacy counters
+
+Riak 1.4 counters live in ordinary buckets with `allow_mult` set and are
+updated with `riak_counter_update()`; new code uses the counter data type
+(see [Data types](datatypes.md)) instead.
+
+```c
+int64_t value;
+riak_counter_update(c, "hits", "home", 1, NULL, &value);  /* returns the new value */
+riak_counter_get(c, "hits", "home", NULL, &value);
+```
+
+They are available on both transports, in the default bucket type only.
+An update is sent once and not retried, since repeating it would count
+twice. `riak_get_client_id()` returns the client id of a Protocol Buffers
+connection, base64 encoded.
 
 ## Siblings
 

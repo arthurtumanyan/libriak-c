@@ -12,12 +12,19 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 - Objects: get, put, delete, metadata, secondary index entries, links,
   bucket types, sibling resolution, conditional requests
 - Queries: secondary indexes (paged, streamed, split by coverage plans),
-  Riak Search, MapReduce
+  the Riak 3.4 Query API (aggregation, filters, result queues), Riak Search,
+  MapReduce, object folds with values, link walking
 - Streamed key and bucket listings, preference lists, server information
-- Data types: counters, sets, maps, HyperLogLogs, grow-only sets
+- Data types: counters, sets, maps, HyperLogLogs, grow-only sets, and the
+  Riak 1.4 counters
+- Operations: AAE folds (trees, clocks, statistics, tombstone reaping,
+  repair), nextgenrepl queues and cluster membership, riak_repl proxy gets
+- Tested against Riak KV 2.2.3, 3.2.6 and 3.4.1, with a matrix of what each
+  version serves
 - Clusters: round-robin or failover node selection, retries with backoff,
   ejection of failing nodes
-- Asynchronous requests on one thread, with hooks for external event loops
+- Asynchronous requests on one thread, with hooks for external event loops;
+  one client per thread, checked with ThreadSanitizer
 - Security: verified TLS (HTTPS or STARTTLS), password authentication,
   client certificates
 - Logging and per-request metrics callbacks
@@ -81,9 +88,11 @@ The guides are found in [`docs/`](docs/index.md):
 - [Getting started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
 - [Transports](docs/transports.md)
+- [Features by transport and Riak version](docs/features.md)
 - [Errors and ownership](docs/errors.md)
 - [Objects and buckets](docs/objects.md)
 - [Queries](docs/queries.md)
+- [Operations: AAE folds and replication](docs/operations.md)
 - [Data types](docs/datatypes.md)
 - [Clusters and retries](docs/clusters.md)
 - [Asynchronous requests](docs/async.md)

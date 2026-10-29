@@ -27,6 +27,7 @@ def main():
     cmake = open(os.path.join(include, "..", "CMakeLists.txt"), encoding="utf-8").read()
     known |= set(re.findall(r"option\((RIAK_\w+)", cmake))
     known |= {"riak_static", "riak_kv", "riak_kv_mapreduce"}
+    known |= {"RIAK_TAG"}  # build argument of tests/docker/openriak
     env_prefixes = ("RIAK_TEST_", "RIAK_DOCS_")
     failures = 0
     programs = 0

@@ -24,6 +24,13 @@ Tests that lack their requirements are reported as skipped.
 AddressSanitizer; `tests/tsan.supp` silences only the stub's own request
 recorder and the uninstrumented system OpenSSL.
 
+The stub tests check what the client sends (every request field, path and
+query parameter, and the decoded filter and query documents), not only what
+it returns. Requests that change state (queue fetches and pushes, counter
+updates, AAE reaps, erasures, repairs and replication) are checked to be
+sent once when the connection drops before the answer, while reads are
+retried. Malformed server documents are checked to give `RIAK_E_PARSE`.
+
 ## Stub server
 
 `tests/stub_riak.py` emulates the Riak HTTP API in memory: objects with
@@ -31,15 +38,21 @@ metadata and indexes, bucket types (including `allow_mult` siblings),
 conditional requests, streamed key lists, secondary indexes, Search,
 MapReduce and data types. Three nodes share one store, like a cluster. Each
 node can be switched to answer with HTTP 503, to drop connections, or to
-answer slowly, and records the last request (method, path, headers, body)
-for assertions. In `--tls` mode the nodes speak HTTPS with certificates made
+answer slowly, to answer like Riak 2.2 (`/_old`) or Riak 3.x (`/_v3`), to
+answer the newer endpoints with malformed documents (`/_malformed`), to
+drop the next requests to them without an answer (`/_drop`), and records
+the last request (method, path, headers, body, decoded AAE filter and Query
+API document) for assertions. In `--tls` mode the nodes speak HTTPS with certificates made
 by `tests/gen_certs.sh`. The module docstring lists every control endpoint.
 
 `tests/stub_pb.h` is the Protocol Buffers counterpart: a C server started in
 a thread of the test program, built on the same generated message code as
 the library. Its replies are chosen by the key or bucket type of a request
 (`missing`, `sibs`, `tomb`, `overload`, `drop`, `slow`, `big`, ...), and what
-the client sent is recorded in the `stub` structure for assertions. With
+the client sent is recorded in the `stub` and `ext` structures for
+assertions. `ext.drop_code` closes the connection on the next request with
+a given message code, and `ext.old_node` answers newer requests like
+Riak 2.2. With
 `RIAK_TEST_CERTS` set, it answers STARTTLS with the certificates of
 `tests/gen_certs.sh` and accepts the user `alice` with the password
 `secret`. Server threads outlive the test functions, so LeakSanitizer reads
@@ -47,42 +60,65 @@ the client sent is recorded in the `stub` structure for assertions. With
 
 ## Live tests
 
-The live tests run when `RIAK_TEST_URL` is set. The image in `tests/docker`
-enables the leveldb backend (secondary indexes) and Riak Search:
+The live tests run when `RIAK_TEST_URL` is set. Three node images are used:
+
+| Image | Riak KV | Built from |
+|---|---|---|
+| `tests/docker` | 2.2.3 | The basho packages; leveldb backend, Riak Search |
+| `tests/docker/openriak` | 3.4.1 (OTP 26) | The OpenRiak sources (`make rel`) |
+| `tests/docker/openriak` with `RIAK_TAG=riak-3.2.6`, `OTP=24` | 3.2.6 | The OpenRiak sources |
+
+The OpenRiak images use the leveled backend (secondary indexes), tictac AAE
+(AAE folds) and a nextgenrepl source queue `libriak_q`; building one takes
+about 15 minutes. `tests/docker/setup-node.sh` waits for the node and
+creates the bucket types the tests use; with `--security` it also installs
+the certificates of `tests/gen_certs.sh`, enables Riak security and adds the
+user `alice` (password `secret`). It works with `riak-admin` (2.x) and
+`riak admin` (3.x).
 
 ```sh
-docker build -t libriak-riak tests/docker
-docker run -d --name riak -p 8098:8098 -p 8087:8087 libriak-riak
-docker exec riak riak-admin wait-for-service riak_kv
-docker exec riak riak-admin bucket-type create libriak_multi '{"props":{"allow_mult":true}}'
-docker exec riak riak-admin bucket-type activate libriak_multi
-for t in counter set map hll; do
-  docker exec riak riak-admin bucket-type create libriak_${t}s '{"props":{"datatype":"'$t'"}}'
-  docker exec riak riak-admin bucket-type activate libriak_${t}s
-done
+docker build -t libriak-riak:3.4.1 tests/docker/openriak
+docker run -d --name riak --ulimit nofile=65536:65536 \
+    -p 8098:8098 -p 8087:8087 -p 8443:8443 libriak-riak:3.4.1
+sh tests/docker/setup-node.sh riak
 
-RIAK_TEST_URL=http://127.0.0.1:8098 RIAK_TEST_TYPE=libriak_multi \
-RIAK_TEST_FEATURES=2i,search,dt ctest --test-dir build -R live --output-on-failure
-
+F=2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,nohttppreflist,query
+RIAK_TEST_URL=http://127.0.0.1:8098 RIAK_TEST_TYPE=libriak_multi RIAK_TEST_FEATURES=$F \
+    ctest --test-dir build -R live --output-on-failure
 RIAK_TEST_URL=pb://127.0.0.1:8087 RIAK_TEST_HTTP_PORT=8098 RIAK_TEST_TYPE=libriak_multi \
-RIAK_TEST_FEATURES=2i,search,dt ctest --test-dir build -R live --output-on-failure
+    RIAK_TEST_FEATURES=$F ctest --test-dir build -R live --output-on-failure
 ```
 
 The scheme of `RIAK_TEST_URL` selects the transport: `http` and `https` for
 HTTP, `pb` and `pbs` (STARTTLS) for Protocol Buffers. `RIAK_TEST_HTTP_PORT`
-gives the HTTP port that `riak_stats()` uses over Protocol Buffers.
-Against a node with Riak security enabled, `RIAK_TEST_USER`,
+gives the HTTP port that `riak_stats()` and the Query API use over Protocol
+Buffers. Against a node set up with `--security`, `RIAK_TEST_USER`,
 `RIAK_TEST_PASSWORD` and `RIAK_TEST_CA` give the credentials and CA, and
-`RIAK_TEST_TLS_LEGACY=1` sets `tls_legacy` (needed for Riak KV 2.2). Such a
-node needs `ssl.certfile`, `ssl.keyfile`, `ssl.cacertfile` and
-`listener.https.internal` in `riak.conf`, a user with a `password` source
-and grants, and a descriptor limit well above 1024 (`docker run --ulimit
-nofile=65536:65536`).
+`RIAK_TEST_TLS_LEGACY=1` sets `tls_legacy` (needed for Riak KV 2.2 only).
+`RIAK_TEST_LOG=1` prints the library's warnings. Nodes need a descriptor
+limit well above 1024 (`--ulimit nofile=65536:65536`).
 
-`RIAK_TEST_FEATURES` enables the parts that need a prepared node: `2i`,
-`search`, `dt` (data type bucket types) and `gset` (Riak 2.9+). The `live`
-job in `.github/workflows/ci.yml` performs the same setup and runs the suite
-on both transports.
+`RIAK_TEST_FEATURES` enables the parts that the node supports:
+
+| Flag | Meaning | 2.2.3 | 3.2.6 | 3.4.1 |
+|---|---|---|---|---|
+| `2i` | Secondary indexes | yes | yes | yes |
+| `search` | Riak Search | yes | | |
+| `dt` | Data type bucket types | yes | yes | yes |
+| `gset` | Grow-only sets | | yes | yes |
+| `counters` | Legacy counters | yes | yes | yes |
+| `fold` | Object folds | yes | yes | yes |
+| `linkwalk` | Link walking (not under security) | yes | yes | yes |
+| `aae` | AAE folds | | yes | yes |
+| `nextgenrepl` | Replication queues, membership | | yes | yes |
+| `repl` | `riak_get_cluster_id()`, `riak_repl_get()` | | yes | yes |
+| `nohttppreflist` | Preference lists are PB only | | yes | yes |
+| `query` | Query API | | | yes |
+
+Features that are not enabled are checked to return `RIAK_E_UNSUPPORTED`
+where the node lacks them. The `live` job in `.github/workflows/ci.yml`
+runs every version, plain and with TLS and authentication, on both
+transports; the OpenRiak images are cached between runs.
 
 ## Fuzzing and coverage
 
@@ -111,6 +147,6 @@ CI fails when line coverage of `src/` drops below 85 %.
 
 `.github/workflows/ci.yml` runs on pushes to `master` and on pull requests:
 GCC and Clang in sanitizer and release builds, ThreadSanitizer, valgrind,
-the oldest supported distribution (Ubuntu 22.04), the live job, coverage, a
-fuzzing run, a Debian package dry run, and linting (clang-format, cppcheck, clang-tidy, actionlint,
+the oldest supported distribution (Ubuntu 22.04), the live matrix, coverage, a fuzzing run, a Debian
+package dry run, and linting (clang-format, cppcheck, clang-tidy, actionlint,
 Doxygen). CodeQL runs in `.github/workflows/codeql.yml`.

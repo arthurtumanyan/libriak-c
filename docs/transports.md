@@ -57,7 +57,14 @@ roughly 2 times faster.
 | `riak_opts::sloppy_quorum`, `n_val` | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_opts::if_none_match = "*"` | Supported | Supported |
 | `riak_get_coverage()`, `riak_index_query::cover_context` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_opts::return_head`, `deletedvclock` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_opts::node_confirms` on a delete | `RIAK_E_UNSUPPORTED` | Supported |
+| `riak_fold_objects()`, `riak_get_client_id()`, `riak_repl_push()` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_get_cluster_id()`, `riak_repl_get()` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_query_run()`, `riak_query_fetch()` | Through `http_port`, see below | Supported |
+| `riak_get_preflist()` on Riak 3.x | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_stats()` | Through `http_port`, see below | Supported |
+| `riak_link_walk()` | MapReduce link phases, then gets | Riak's link walker |
 | `riak_set_bucket_props()` | Properties known to `RpbBucketProps`; others give `RIAK_E_INVALID_ARG` | Any property |
 | `riak_client_http_status()` | Always 0 | HTTP status |
 | Server errors | `RIAK_E_SERVER` with Riak's message | `RIAK_E_HTTP` with the status |
@@ -72,10 +79,14 @@ riak_opts cas = {.if_not_modified = true, .vclock = obj.vclock};
 riak_put(c, "users", "u1", v, len, &cas, NULL, NULL);   /* RIAK_E_PRECONDITION if changed */
 ```
 
-## Statistics
+Which calls a given Riak version serves is listed in
+[Features](features.md).
 
-Riak serves node statistics only over HTTP. With the Protocol Buffers
-transport, `riak_stats()` is sent to the HTTP port given in
+## Statistics and the Query API
+
+Riak serves node statistics and the Query API only over HTTP. With the
+Protocol Buffers transport, `riak_stats()`, `riak_query_run()` and
+`riak_query_fetch()` are sent to the HTTP port given in
 `riak_config::http_port` (or `riak_node::http_port` for clusters), on the
 first node that has one; without one it returns `RIAK_E_UNSUPPORTED`.
 `riak_get_server_info()` (node name and version) works on both transports.
