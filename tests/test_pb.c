@@ -377,6 +377,9 @@ static void test_datatypes(void) {
     CHECK_EQ_INT(dt.value.counter, -5);
     riak_datatype_free(&dt);
     CHECK_EQ_INT(riak_dt_fetch(c, "counters", "b", "missing", NULL, &dt), RIAK_E_NOT_FOUND);
+    /* a bucket type that does not exist, as Riak words it for data types */
+    CHECK_EQ_INT(riak_dt_fetch(c, "no_such_type", "b", "k", NULL, &dt), RIAK_E_NOT_FOUND);
+    CHECK(strstr(riak_client_errmsg(c), "no bucket type") != NULL);
 
     riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);
     riak_dt_op_increment(op, 3);

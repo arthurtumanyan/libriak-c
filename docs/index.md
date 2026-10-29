@@ -40,8 +40,9 @@ field and function is documented; the build fails on undocumented symbols.
 
 ## Supported servers
 
-The library is tested against Riak KV 2.2.3 and the OpenRiak releases 3.2.6
-and 3.4.1, on both transports, with and without TLS and authentication.
+The library is tested against Riak KV 2.0.7, 2.1.4, 2.2.0 and 2.2.3 and the
+OpenRiak releases 3.2.6 and 3.4.1, on both transports, with and without TLS
+and authentication.
 Calls that a node does not serve (Riak Search on 3.x, the AAE folds and
 replication queues on 2.2, the Query API before 3.4) return
 `RIAK_E_UNSUPPORTED`; [Features](features.md) has the full matrix.

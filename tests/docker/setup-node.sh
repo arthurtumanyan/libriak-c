@@ -49,10 +49,12 @@ if admin services 2>/dev/null | grep -q yokozuna; then
     admin wait-for-service yokozuna >/dev/null
 fi
 create libriak_multi '{"props":{"allow_mult":true}}'
-for t in counter set map hll; do
+for t in counter set map; do
     create "libriak_${t}s" '{"props":{"datatype":"'"$t"'"}}'
 done
-# grow-only sets need Riak 2.9 or newer
+# HyperLogLogs need Riak 2.2, grow-only sets Riak 2.9
+create libriak_hlls '{"props":{"datatype":"hll"}}' 2>/dev/null ||
+    echo "no hll data type on this node" >&2
 create libriak_gsets '{"props":{"datatype":"gset"}}' 2>/dev/null ||
     echo "no gset data type on this node" >&2
 
@@ -73,14 +75,20 @@ if [ -n "$certs" ]; then
     wait_kv
     admin security add-user alice password=secret >/dev/null
     admin security add-source all 0.0.0.0/0 password >/dev/null
-    perms=riak_kv.get,riak_kv.put,riak_kv.delete,riak_kv.index,riak_kv.list_keys,riak_kv.list_buckets,riak_kv.mapreduce,riak_core.get_bucket,riak_core.set_bucket,riak_core.get_bucket_type,riak_core.set_bucket_type,riak_kv.get_preflist
-    # Search permissions exist only where Yokozuna does (Riak 2.x); an unknown
-    # permission makes Riak reject the whole grant
-    if [ -z "$v3" ]; then
-        perms=$perms,search.admin,search.query
-    fi
-    admin security grant "$perms" on any to alice | grep -q -i "granted\|^ok" ||
-        { echo "grant failed" >&2; exit 1; }
+    # one grant per permission: an unknown permission makes Riak reject the
+    # whole grant, and each version knows a different set (Search only where
+    # Yokozuna exists, riak_kv.get_preflist from Riak 2.1)
+    for perm in riak_kv.get riak_kv.put riak_kv.delete riak_kv.index riak_kv.list_keys \
+        riak_kv.list_buckets riak_kv.mapreduce riak_core.get_bucket riak_core.set_bucket \
+        riak_core.get_bucket_type riak_core.set_bucket_type riak_kv.get_preflist \
+        search.admin search.query; do
+        out=$(admin security grant "$perm" on any to alice 2>&1) || true
+        case "$out" in
+        *[Gg]ranted* | ok*) ;;
+        *"not recognized"*) echo "permission $perm not known to this node" >&2 ;;
+        *) echo "grant $perm failed: $out" >&2; exit 1 ;;
+        esac
+    done
     admin security enable >/dev/null
 fi
 echo "$container ready"

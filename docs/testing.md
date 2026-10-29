@@ -64,7 +64,7 @@ The live tests run when `RIAK_TEST_URL` is set. Three node images are used:
 
 | Image | Riak KV | Built from |
 |---|---|---|
-| `tests/docker` | 2.2.3 | The basho packages; leveldb backend, Riak Search |
+| `tests/docker` | 2.2.3 (`RIAK_IMAGE=latest`), 2.2.0, 2.1.4, 2.0.7 (`RIAK_IMAGE=ubuntu-<version>`) | The official basho images; leveldb backend, Riak Search |
 | `tests/docker/openriak` | 3.4.1 (OTP 26) | The OpenRiak sources (`make rel`) |
 | `tests/docker/openriak` with `RIAK_TAG=riak-3.2.6`, `OTP=24` | 3.2.6 | The OpenRiak sources |
 
@@ -105,20 +105,22 @@ limit well above 1024 (`--ulimit nofile=65536:65536`).
 
 `RIAK_TEST_FEATURES` enables the parts that the node supports:
 
-| Flag | Meaning | 2.2.3 | 3.2.6 | 3.4.1 |
-|---|---|---|---|---|
-| `2i` | Secondary indexes | yes | yes | yes |
-| `search` | Riak Search | yes | | |
-| `dt` | Data type bucket types | yes | yes | yes |
-| `gset` | Grow-only sets | | yes | yes |
-| `counters` | Legacy counters | yes | yes | yes |
-| `fold` | Object folds | yes | yes | yes |
-| `linkwalk` | Link walking (not under security) | yes | yes | yes |
-| `aae` | AAE folds | | yes | yes |
-| `nextgenrepl` | Replication queues, membership | | yes | yes |
-| `repl` | `riak_get_cluster_id()`, `riak_repl_get()` | | yes | yes |
-| `query` | Query API | | | yes |
-| `coverage` | Coverage plans (Riak TS only) | | | |
+| Flag | Meaning | 2.0.7 | 2.1.4 | 2.2.x | 3.2.6 | 3.4.1 |
+|---|---|---|---|---|---|---|
+| `2i` | Secondary indexes | yes | yes | yes | yes | yes |
+| `search` | Riak Search | yes | yes | yes | | |
+| `dt` | Data type bucket types | yes | yes | yes | yes | yes |
+| `gset` | Grow-only sets | | | | yes | yes |
+| `counters` | Legacy counters | yes | yes | yes | yes | yes |
+| `fold` | Object folds | yes | yes | yes | yes | yes |
+| `linkwalk` | Link walking (not under security) | yes | yes | yes | yes | yes |
+| `aae` | AAE folds | | | | yes | yes |
+| `nextgenrepl` | Replication queues, membership | | | | yes | yes |
+| `repl` | `riak_get_cluster_id()`, `riak_repl_get()` | | | | yes | yes |
+| `query` | Query API | | | | | yes |
+| `coverage` | Coverage plans (Riak TS only) | | | | | |
+| `nohll` | No HyperLogLog data type (before 2.2) | yes | yes | | | |
+| `nopreflist` | No preference lists (before 2.1) | yes | | | | |
 
 Features that are not enabled are checked to return `RIAK_E_UNSUPPORTED`
 where the node lacks them. The `live` job in `.github/workflows/ci.yml`

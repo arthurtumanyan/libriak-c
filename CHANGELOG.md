@@ -18,6 +18,9 @@
   (Riak 3.x, `search = off`) on both transports; over HTTP they returned
   `RIAK_E_NOT_FOUND`. A query on a missing index is `RIAK_E_NOT_FOUND` on
   both transports (it was `RIAK_E_SERVER` over Protocol Buffers).
+- A data type call on a bucket type that does not exist is
+  `RIAK_E_NOT_FOUND` over Protocol Buffers too ("Error no bucket type"), as
+  over HTTP and for objects; it was `RIAK_E_SERVER`.
 - `riak_get_preflist()` over HTTP returns `RIAK_E_UNSUPPORTED`: Riak 2.x's
   HTTP resource ignores the key and answers the same list for every key,
   and Riak 3.0 removed it. Protocol Buffers serves preference lists.
@@ -58,7 +61,8 @@
     (`riak_get_cluster_id()`, `riak_repl_get()`).
   The `.proto` files are refreshed from OpenRiak riak_pb (`openriak-3.4`),
   and `riak_repl.proto` is added.
-- Live tests against Riak KV 2.2.3, 3.2.6 and 3.4.1 (OpenRiak images built
+- Live tests against Riak KV 2.0.7, 2.1.4, 2.2.0, 2.2.3, 3.2.6 and 3.4.1
+  (basho images for 2.x, selected with `RIAK_IMAGE`; OpenRiak images built
   from source in `tests/docker/openriak`, node setup in
   `tests/docker/setup-node.sh`), plain and with TLS and authentication; a
   feature matrix in `docs/features.md`.

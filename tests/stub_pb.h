@@ -558,6 +558,10 @@ static int stub_links(stub_conn *c, const char *job) {
 static int stub_dt_fetch(stub_conn *c, const uint8_t *buf, size_t len) {
     DtFetchReq *q = dt_fetch_req__unpack(NULL, len, buf);
     if (q == NULL) return -1;
+    if (stub_is(q->type, "no_such_type")) {
+        dt_fetch_req__free_unpacked(q, NULL);
+        return stub_error(c, "Error no bucket type `<<\"no_such_type\">>`");
+    }
     ext.dt_fetches++;
     ext.dt_node_confirms = q->has_node_confirms ? q->node_confirms : 0;
     DtFetchResp r = DT_FETCH_RESP__INIT;

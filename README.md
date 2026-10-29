@@ -19,8 +19,8 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
   Riak 1.4 counters
 - Operations: AAE folds (trees, clocks, statistics, tombstone reaping,
   repair), nextgenrepl queues and cluster membership, riak_repl proxy gets
-- Tested against Riak KV 2.2.3, 3.2.6 and 3.4.1, with a matrix of what each
-  version serves
+- Tested against Riak KV 2.0.7, 2.1.4, 2.2.0, 2.2.3, 3.2.6 and 3.4.1, with a
+  matrix of what each version serves
 - Clusters: round-robin or failover node selection, retries with backoff,
   ejection of failing nodes
 - Asynchronous requests on one thread, with hooks for external event loops;

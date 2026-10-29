@@ -8,7 +8,11 @@ node cannot serve returns `RIAK_E_UNSUPPORTED`, with the reason in
 `riak_client_errmsg()`, and the connection stays usable.
 
 The table lists what was verified against Riak KV 2.2.3, 3.2.6 and 3.4.1
-(see [Testing](testing.md)).
+(see [Testing](testing.md)). Riak KV 2.0.7, 2.1.4 and 2.2.0 are tested as
+well and behave like 2.2.3, except that HyperLogLogs need Riak 2.2 and
+preference lists (`riak_get_preflist()`) Riak 2.1; on older nodes they are
+not available (`RIAK_E_UNSUPPORTED` for preference lists, no HyperLogLog
+bucket type can be created).
 
 | Feature | Protocol Buffers | HTTP | 2.2.3 | 3.2.6 | 3.4.1 |
 |---|---|---|---|---|---|

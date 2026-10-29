@@ -490,14 +490,27 @@ static void test_datatypes(void) {
     riak_datatype_free(&dt);
     riak_dt_op_free(m);
 
-    /* HyperLogLog */
+    /* a bucket type that does not exist: "not found" on both transports */
+    riak_dt_op *nt = riak_dt_op_new(RIAK_DT_COUNTER);
+    riak_dt_op_increment(nt, 1);
+    CHECK_EQ_INT(
+        riak_dt_update(rc, "libriak_no_such_type", bucket, "c", nt, NULL, NULL, NULL, NULL),
+        RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(riak_dt_fetch(rc, "libriak_no_such_type", bucket, "c", NULL, &dt),
+                 RIAK_E_NOT_FOUND);
+    riak_dt_op_free(nt);
+
+    /* HyperLogLog (Riak 2.2+; older nodes cannot create the bucket type) */
     riak_dt_op *h = riak_dt_op_new(RIAK_DT_HLL);
     riak_dt_op_add(h, "a");
     riak_dt_op_add(h, "b");
     riak_dt_op_add(h, "a");
-    CHECK_EQ_INT(riak_dt_update(rc, "libriak_hlls", bucket, "h", h, NULL, &rb, &dt, NULL), RIAK_OK);
-    CHECK(dt.value.type == RIAK_DT_HLL && dt.value.counter == 2);
-    riak_datatype_free(&dt);
+    if (!has_feature("nohll")) {
+        CHECK_EQ_INT(riak_dt_update(rc, "libriak_hlls", bucket, "h", h, NULL, &rb, &dt, NULL),
+                     RIAK_OK);
+        CHECK(dt.value.type == RIAK_DT_HLL && dt.value.counter == 2);
+        riak_datatype_free(&dt);
+    }
     riak_dt_op_free(h);
 
     if (has_feature("gset")) {
@@ -617,8 +630,9 @@ static void test_server_info_preflist_coverage(void) {
     CHECK_EQ_INT(riak_put(rc, bucket, "pl", "x", 1, &o, NULL, NULL), RIAK_OK);
     riak_preflist pl;
     riak_status pst = riak_get_preflist(rc, NULL, bucket, "pl", &pl);
-    if (live_transport == RIAK_TRANSPORT_HTTP) {
-        CHECK_EQ_INT(pst, RIAK_E_UNSUPPORTED); /* Protocol Buffers only */
+    if (live_transport == RIAK_TRANSPORT_HTTP || has_feature("nopreflist")) {
+        /* Protocol Buffers only, and Riak 2.1+ */
+        CHECK_EQ_INT(pst, RIAK_E_UNSUPPORTED);
     } else {
         /* n_val primaries, and a list that depends on the key */
         CHECK_EQ_INT(pst, RIAK_OK);

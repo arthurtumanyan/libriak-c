@@ -94,29 +94,49 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        riak: ["2.2.3", "3.2.6", "3.4.1"]
+        riak: ["2.0.7", "2.1.4", "2.2.0", "2.2.3", "3.2.6", "3.4.1"]
         security: [plain, tls]
         include:
-          # Riak 2.2.3 is the basho package image; 3.x is built from the
+          # Riak 2.x: the official basho images; 3.x is built from the
           # OpenRiak sources, layers cached between runs
-          - { riak: "2.2.3", features: "2i,search,dt,counters,fold,linkwalk" }
+          - riak: "2.0.7"
+            kind: basho
+            image: ubuntu-2.0.7
+            features: "2i,search,dt,counters,fold,linkwalk,nohll,nopreflist"
+          - riak: "2.1.4"
+            kind: basho
+            image: ubuntu-2.1.4
+            features: "2i,search,dt,counters,fold,linkwalk,nohll"
+          - riak: "2.2.0"
+            kind: basho
+            image: ubuntu-2.2.0
+            features: "2i,search,dt,counters,fold,linkwalk"
+          - riak: "2.2.3"
+            kind: basho
+            image: latest
+            features: "2i,search,dt,counters,fold,linkwalk"
           - riak: "3.2.6"
+            kind: openriak
             otp: "24"
             features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl"
           - riak: "3.4.1"
+            kind: openriak
             otp: "26"
             features: "2i,dt,gset,counters,fold,linkwalk,aae,nextgenrepl,repl,query"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build Riak 2.2.3 image
-        if: matrix.riak == '2.2.3'
-        run: docker build -t "libriak-riak:${{ matrix.riak }}" tests/docker
+      - name: Build Riak ${{ matrix.riak }} image (basho)
+        if: matrix.kind == 'basho'
+        env:
+          RIAK: ${{ matrix.riak }}
+          IMAGE: ${{ matrix.image }}
+        run: docker build -t "libriak-riak:$RIAK" --build-arg "RIAK_IMAGE=$IMAGE" tests/docker
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: matrix.riak != '2.2.3'
-      - name: Build Riak ${{ matrix.riak }} image
-        if: matrix.riak != '2.2.3'
+        if: matrix.kind == 'openriak'
+      - name: Build Riak ${{ matrix.riak }} image (OpenRiak)
+        if: matrix.kind == 'openriak'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: tests/docker/openriak
@@ -157,7 +177,7 @@ jobs:
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
-      # Riak 2.2.3 runs on an Erlang/OTP that only completes a handshake with
+      # Riak 2.x runs on an Erlang/OTP that only completes a handshake with
       # tls_legacy; Riak 3.x needs no such option
       - name: Live tests (HTTPS, authenticated)
         if: matrix.security == 'tls'
@@ -166,7 +186,7 @@ jobs:
           RIAK_TEST_USER: alice
           RIAK_TEST_PASSWORD: secret
           RIAK_TEST_CA: ${{ github.workspace }}/certs/ca.pem
-          RIAK_TEST_TLS_LEGACY: ${{ matrix.riak == '2.2.3' && '1' || '0' }}
+          RIAK_TEST_TLS_LEGACY: ${{ matrix.kind == 'basho' && '1' || '0' }}
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
@@ -178,7 +198,7 @@ jobs:
           RIAK_TEST_USER: alice
           RIAK_TEST_PASSWORD: secret
           RIAK_TEST_CA: ${{ github.workspace }}/certs/ca.pem
-          RIAK_TEST_TLS_LEGACY: ${{ matrix.riak == '2.2.3' && '1' || '0' }}
+          RIAK_TEST_TLS_LEGACY: ${{ matrix.kind == 'basho' && '1' || '0' }}
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
