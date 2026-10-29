@@ -1,7 +1,8 @@
 # libriak-c documentation {#mainpage}
 
-libriak-c is a C11 client library for the Riak KV HTTP API, built on libcurl
-and json-c.
+libriak-c is a C11 client library for Riak KV. It speaks Riak's Protocol
+Buffers interface (the default) and its HTTP interface, and is built on
+protobuf-c, OpenSSL, libcurl and json-c.
 
 ## Guides
 
@@ -9,13 +10,16 @@ and json-c.
 |---|---|
 | [Getting started](getting-started.md) | Building, installing, linking, a first program |
 | [Configuration](configuration.md) | Every `riak_config` field and its default |
+| [Transports](transports.md) | Protocol Buffers and HTTP, their differences, connections, coverage plans |
 | [Errors and ownership](errors.md) | Status codes, error details, memory ownership, threading |
-| [Objects and buckets](objects.md) | Get, put, delete, metadata, bucket types, siblings, conditional requests |
-| [Queries](queries.md) | Secondary indexes, Riak Search, MapReduce |
+| [Features](features.md) | Which call each transport and Riak version serves |
+| [Objects and buckets](objects.md) | Get, put, delete, metadata, bucket types, siblings, conditional requests, legacy counters |
+| [Queries](queries.md) | Secondary indexes, Query API, Riak Search, MapReduce, object folds, link walking |
+| [Operations](operations.md) | AAE folds, replication queues, riak_repl, known server issues |
 | [Data types](datatypes.md) | Counters, sets, maps, HyperLogLogs, grow-only sets |
 | [Clusters and retries](clusters.md) | Multiple nodes, balancing, retries, node ejection |
-| [Asynchronous requests](async.md) | Concurrent requests, built-in and external event loops |
-| [Security](security.md) | TLS, certificate verification, Basic auth, client certificates |
+| [Asynchronous requests](async.md) | Concurrent requests and streams, built-in and external event loops |
+| [Security](security.md) | TLS, STARTTLS, certificate verification, authentication, client certificates |
 | [Logging and metrics](observability.md) | Log and metrics callbacks |
 | [Testing](testing.md) | Test suites, stub server, live tests, fuzzing, coverage |
 | [Packaging and releases](packaging.md) | Debian/RPM packages and the release workflow |
@@ -36,6 +40,9 @@ field and function is documented; the build fails on undocumented symbols.
 
 ## Supported servers
 
-The library is tested against Riak KV 2.2.3. Riak KV 2.9+ and the
-community-maintained OpenRiak releases expose the same HTTP API; MapReduce
-is not available on OpenRiak 4.x, and grow-only sets need Riak 2.9 or newer.
+The library is tested against Riak KV 2.0.7, 2.1.4, 2.2.0 and 2.2.3 and the
+OpenRiak releases 3.2.6 and 3.4.1, on both transports, with and without TLS
+and authentication.
+Calls that a node does not serve (Riak Search on 3.x, the AAE folds and
+replication queues on 2.2, the Query API before 3.4) return
+`RIAK_E_UNSUPPORTED`; [Features](features.md) has the full matrix.

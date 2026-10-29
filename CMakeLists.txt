@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(libriak-c VERSION 2.0.0 LANGUAGES C
-        DESCRIPTION "C client for the Riak KV HTTP API")
+project(libriak-c VERSION 2.1.0 LANGUAGES C
+        DESCRIPTION "C client for Riak KV (Protocol Buffers and HTTP)")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(RIAK_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
-option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan (ON) or ThreadSanitizer (thread)" OFF)
 option(RIAK_WERROR "Treat warnings as errors" OFF)
 option(RIAK_FUZZ "Build libFuzzer targets (clang only)" OFF)
 option(RIAK_COVERAGE "Instrument for code coverage" OFF)
@@ -29,6 +29,33 @@ if(NOT TARGET json-c::json-c)
   pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c>=0.15)
   add_library(json-c::json-c ALIAS PkgConfig::JSONC)
 endif()
+find_package(OpenSSL 1.1.1 REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PROTOBUFC REQUIRED IMPORTED_TARGET libprotobuf-c>=1.3)
+find_program(PROTOC_C protoc-c REQUIRED)
+
+# C code for the Riak protocol buffer messages is generated from proto/.
+set(RIAK_PROTOS riak riak_kv riak_dt riak_search riak_yokozuna riak_repl)
+set(RIAK_PB_DIR ${PROJECT_BINARY_DIR}/pb)
+set(RIAK_PB_SOURCES)
+set(RIAK_PB_FILES)
+foreach(p ${RIAK_PROTOS})
+  list(APPEND RIAK_PB_SOURCES ${RIAK_PB_DIR}/${p}.pb-c.c)
+  list(APPEND RIAK_PB_FILES ${PROJECT_SOURCE_DIR}/proto/${p}.proto)
+endforeach()
+string(REPLACE ".pb-c.c" ".pb-c.h" RIAK_PB_HEADERS "${RIAK_PB_SOURCES}")
+add_custom_command(
+  OUTPUT ${RIAK_PB_SOURCES} ${RIAK_PB_HEADERS}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${RIAK_PB_DIR}
+  COMMAND ${PROTOC_C} --proto_path=${PROJECT_SOURCE_DIR}/proto --c_out=${RIAK_PB_DIR}
+          ${RIAK_PB_FILES}
+  DEPENDS ${RIAK_PB_FILES}
+  COMMENT "Generating protocol buffer code"
+  VERBATIM)
+add_library(riak_pbgen OBJECT ${RIAK_PB_SOURCES})
+target_include_directories(riak_pbgen PUBLIC $<BUILD_INTERFACE:${RIAK_PB_DIR}>)
+target_link_libraries(riak_pbgen PUBLIC PkgConfig::PROTOBUFC)
 
 add_library(riak_warnings INTERFACE)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -39,7 +66,10 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_definitions(riak_warnings INTERFACE
     $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
 endif()
-if(RIAK_SANITIZE)
+if(RIAK_SANITIZE STREQUAL "thread")
+  target_compile_options(riak_warnings INTERFACE -fsanitize=thread -fno-omit-frame-pointer)
+  target_link_options(riak_warnings INTERFACE -fsanitize=thread)
+elseif(RIAK_SANITIZE)
   target_compile_options(riak_warnings INTERFACE
     -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
   target_link_options(riak_warnings INTERFACE -fsanitize=address,undefined)
@@ -50,20 +80,32 @@ if(RIAK_FUZZ)
   target_compile_options(riak_warnings INTERFACE -fsanitize=fuzzer-no-link)
 endif()
 if(RIAK_COVERAGE)
-  target_compile_options(riak_warnings INTERFACE --coverage -O0)
+  # test_threads runs clients on several threads: counters are updated atomically
+  target_compile_options(riak_warnings INTERFACE --coverage -O0 -fprofile-update=atomic)
   target_link_options(riak_warnings INTERFACE --coverage)
 endif()
 
 set(RIAK_SOURCES
+  src/aae.c
   src/async.c
+  src/async_pb.c
+  src/async_ops.c
   src/bucket.c
   src/client.c
+  src/cluster.c
   src/datatype.c
+  src/ext.c
   src/http.c
   src/kv.c
   src/multipart.c
   src/parse.c
+  src/pb.c
+  src/pb_dt.c
+  src/pb_kv.c
+  src/pb_query.c
+  src/pbconn.c
   src/query.c
+  src/query_api.c
   src/util.c)
 
 # Object library shared by the shared/static targets and the unit tests,
@@ -73,22 +115,39 @@ target_include_directories(riak_objects PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 target_compile_definitions(riak_objects PRIVATE RIAK_BUILDING _POSIX_C_SOURCE=200809L)
-target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c
-                      PRIVATE $<BUILD_INTERFACE:riak_warnings>)
+target_link_libraries(riak_objects PUBLIC CURL::libcurl json-c::json-c OpenSSL::SSL ZLIB::ZLIB
+                      riak_pbgen PRIVATE $<BUILD_INTERFACE:riak_warnings>)
 
-add_library(riak SHARED $<TARGET_OBJECTS:riak_objects>)
-add_library(riak_static STATIC $<TARGET_OBJECTS:riak_objects>)
+add_library(riak SHARED $<TARGET_OBJECTS:riak_objects> $<TARGET_OBJECTS:riak_pbgen>)
+add_library(riak_static STATIC $<TARGET_OBJECTS:riak_objects> $<TARGET_OBJECTS:riak_pbgen>)
 foreach(t riak riak_static)
   target_include_directories(${t} PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c
-                        $<BUILD_INTERFACE:riak_warnings>)
+  target_link_libraries(${t} PRIVATE CURL::libcurl json-c::json-c OpenSSL::SSL ZLIB::ZLIB
+                        PkgConfig::PROTOBUFC $<BUILD_INTERFACE:riak_warnings>)
   set_target_properties(${t} PROPERTIES OUTPUT_NAME riak-c)
 endforeach()
 target_compile_definitions(riak INTERFACE RIAK_SHARED)
 set_target_properties(riak PROPERTIES
   VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+
+# Binary compatibility with 2.0.0: symbol versions and the 2.0 entry points
+# (src/compat_v2.c). They need ELF symbol versioning, so other platforms build
+# without them and programs there are rebuilt against each release.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|DragonFly" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set(RIAK_SYMBOL_VERSIONS_DEFAULT ON)
+else()
+  set(RIAK_SYMBOL_VERSIONS_DEFAULT OFF)
+endif()
+option(RIAK_SYMBOL_VERSIONS "Version the shared library's symbols (ELF), with 2.0 compatibility"
+       ${RIAK_SYMBOL_VERSIONS_DEFAULT})
+if(RIAK_SYMBOL_VERSIONS)
+  target_sources(riak PRIVATE src/compat_v2.c)
+  target_link_options(riak PRIVATE
+    "LINKER:--version-script=${PROJECT_SOURCE_DIR}/cmake/libriak-c.map")
+  set_property(TARGET riak APPEND PROPERTY LINK_DEPENDS ${PROJECT_SOURCE_DIR}/cmake/libriak-c.map)
+endif()
 add_library(riak::riak ALIAS riak)
 add_library(riak::riak_static ALIAS riak_static)
 

@@ -1,0 +1,93 @@
+From 3b39bbb3430b3c1a13eb143ac71f1fcf8dbe00e1 Mon Sep 17 00:00:00 2001
+From: Arthur Tumanyan <arthurtumanyan@gmail.com>
+Date: Thu, 29 Oct 2026 11:02:43 +0400
+Subject: [PATCH] Encode and decode gset values in DtUpdateResp
+
+DtUpdateResp carries a grow-only set in gset_value (field 7), but
+riak_pb_dt_codec:encode_update_response/5 and decode_update_response/3 had
+no gset clause. A DtUpdateReq for a gset with return_body = true therefore
+failed with function_clause in the PB handler, which logged "Error
+processing incoming message" and closed the client's connection.
+
+Both functions now handle gset like set. Tests cover the encoding, the
+decoding (with and without a key) and a round trip through the wire format.
+
+(cherry picked from commit 89b0ad62e7e4478edcf02a779f419d41c1f77c48)
+---
+ src/riak_pb_dt_codec.erl        |  4 ++++
+ test/riak_pb_dt_codec_tests.erl | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+
+diff --git a/src/riak_pb_dt_codec.erl b/src/riak_pb_dt_codec.erl
+index 9965ec2..fa03006 100644
+--- a/src/riak_pb_dt_codec.erl
++++ b/src/riak_pb_dt_codec.erl
+@@ -548,6 +548,8 @@ decode_update_response(#dtupdateresp{hll_value=Hll, context=Ctx}=Resp, hll,
+     maybe_wrap_key({hll, Hll, Ctx}, Resp);
+ decode_update_response(#dtupdateresp{set_value=S, context=Ctx}=Resp, set, true) ->
+     maybe_wrap_key({set, S, Ctx}, Resp);
++decode_update_response(#dtupdateresp{gset_value=S, context=Ctx}=Resp, gset, true) ->
++    maybe_wrap_key({gset, S, Ctx}, Resp);
+ decode_update_response(#dtupdateresp{map_value=M, context=Ctx}=Resp, map, true) ->
+     maybe_wrap_key({map, [ decode_map_entry(F) || F <- M ], Ctx}, Resp).
+ 
+@@ -567,6 +569,8 @@ encode_update_response(counter, Value, Key, Context, _Mods) ->
+     #dtupdateresp{key=Key, context=Context, counter_value=Value};
+ encode_update_response(set, Value, Key, Context, _Mods) ->
+     #dtupdateresp{key=Key, context=Context, set_value=Value};
++encode_update_response(gset, Value, Key, Context, _Mods) ->
++    #dtupdateresp{key=Key, context=Context, gset_value=Value};
+ encode_update_response(hll, Value, Key, Context, _Mods) ->
+     #dtupdateresp{key=Key, context=Context, hll_value=Value};
+ encode_update_response(map, Value, Key, Context, Mods) when is_list(Value) ->
+diff --git a/test/riak_pb_dt_codec_tests.erl b/test/riak_pb_dt_codec_tests.erl
+index 26ff255..043ba48 100644
+--- a/test/riak_pb_dt_codec_tests.erl
++++ b/test/riak_pb_dt_codec_tests.erl
+@@ -30,6 +30,7 @@ operation_type/1,
+ decode_fetch_response/1,
+ encode_fetch_response/4,
+ encode_update_request/4,
++encode_update_response/4,
+ decode_update_response/3
+ ]).
+ 
+@@ -55,6 +56,35 @@ decode_update_response_test() ->
+   ),
+   ?assertEqual({set, ?SET_VALUE, undefined_context}, Res).
+ 
++decode_update_response_gset_test() ->
++  Res = decode_update_response(
++    #dtupdateresp{gset_value = ?SET_VALUE, context = ?CONTEXT}, gset, true
++  ),
++  ?assertEqual({gset, ?SET_VALUE, ?CONTEXT}, Res).
++
++decode_update_response_gset_key_test() ->
++  Res = decode_update_response(
++    #dtupdateresp{key = <<"key">>, gset_value = ?SET_VALUE, context = ?CONTEXT},
++    gset, true
++  ),
++  ?assertEqual({<<"key">>, {gset, ?SET_VALUE, ?CONTEXT}}, Res).
++
++encode_update_response_gset_test() ->
++  Resp = encode_update_response(gset, ?SET_VALUE, <<"key">>, ?CONTEXT),
++  ?assertMatch(#dtupdateresp{key = <<"key">>, context = ?CONTEXT,
++                             gset_value = ?SET_VALUE}, Resp).
++
++encode_update_response_gset_wire_test() ->
++  %% the value travels in DtUpdateResp.gset_value over the wire
++  Resp = encode_update_response(gset, ?SET_VALUE, undefined, <<"ctx">>),
++  Bin = iolist_to_binary(riak_pb_codec:encode(Resp)),
++  [Code | Payload] = binary_to_list(Bin),
++  Decoded = riak_pb_codec:decode(Code, list_to_binary(Payload)),
++  ?assertMatch(#dtupdateresp{context = <<"ctx">>, gset_value = ?SET_VALUE},
++               Decoded),
++  ?assertEqual({gset, ?SET_VALUE, <<"ctx">>},
++               decode_update_response(Decoded, gset, true)).
++
+ encode_fetch_response_gset_test() ->
+   Resp = encode_fetch_response(gset, ?SET_VALUE, ?CONTEXT, []),
+   ?assertMatch(#dtfetchresp{context= ?CONTEXT, type= 'GSET', value= #dtvalue{gset_value= ?SET_VALUE}}, Resp).
+-- 
+2.43.0
+

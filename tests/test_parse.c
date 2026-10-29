@@ -217,6 +217,24 @@ static void test_mapred_chunk(void) {
     }
 }
 
+static void test_server_info_json(void) {
+    char *node = NULL, *version = NULL;
+    const char *ok = "{\"nodename\":\"riak@n1\",\"riak_kv_version\":\"3.2.0\",\"x\":1}";
+    CHECK_EQ_INT(riak_parse_server_info(ok, strlen(ok), &node, &version), RIAK_OK);
+    CHECK_EQ_STR(node, "riak@n1");
+    CHECK_EQ_STR(version, "3.2.0");
+    free(node);
+    free(version);
+    node = version = NULL;
+    const char *bad[] = {"{}", "[]", "{\"nodename\":1}", "{\"nodename\":\"n\"}", "{"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        CHECK(riak_parse_server_info(bad[i], strlen(bad[i]), &node, &version) != RIAK_OK);
+        free(node);
+        free(version);
+        node = version = NULL;
+    }
+}
+
 int main(void) {
     RUN(test_array);
     RUN(test_empty_array);
@@ -228,5 +246,6 @@ int main(void) {
     RUN(test_index_json);
     RUN(test_search_json);
     RUN(test_mapred_chunk);
+    RUN(test_server_info_json);
     return CHECK_DONE();
 }

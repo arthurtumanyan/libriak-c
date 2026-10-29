@@ -1,0 +1,93 @@
+From 370d30c103047e3d6a9d63c7fa81e742f0e50dfc Mon Sep 17 00:00:00 2001
+From: Arthur Tumanyan <arthurtumanyan@gmail.com>
+Date: Thu, 29 Oct 2026 11:08:24 +0400
+Subject: [PATCH] Accept empty terms batches when max_results is set
+
+riak_kv_vnode:finish_fold/3 flushes the query buffer when a vnode's fold
+completes, so a vnode with no further matches sends an empty batch. A query
+with an integer max_results accumulates terms (accumulation_type/2), for
+both the terms and raw_keys options, and both handle_info/2 clauses for it
+took hd(Results) of that batch: once the server held max_results results
+(or kept them in the ETS table) the empty batch raised badarg, the query
+server died, and the HTTP request failed with 503 {"error":"timeout"}
+instead of returning the page.
+
+An empty batch is now acknowledged without touching the results. Tests
+send an empty batch to a server holding max_results results, in the list
+accumulator and in the ETS table.
+---
+ src/riak_kv_query_server.erl | 52 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/src/riak_kv_query_server.erl b/src/riak_kv_query_server.erl
+index b40053d6..bc2511b6 100644
+--- a/src/riak_kv_query_server.erl
++++ b/src/riak_kv_query_server.erl
+@@ -246,6 +246,19 @@ handle_info(
+         State#state{
+             vnode_monitor = update_monitor(Vnode, State#state.vnode_monitor)}
+     };
++handle_info(
++    {{ReqID, Vnode}, {From, _B, {terms, []}}},
++    #state{req_id = ReqID, max_results = MR} = State)
++        when is_integer(MR) ->
++    % A vnode flushes its buffer when its fold completes, so a batch may be
++    % empty.  It adds nothing, and gives no last result to compare with the
++    % current candidates, so it is only acknowledged.
++    riak_kv_vnode:ack_keys(From),
++    {
++        noreply,
++        State#state{
++            vnode_monitor = update_monitor(Vnode, State#state.vnode_monitor)}
++    };
+ handle_info(
+     {{ReqID, Vnode}, {From, _B, {AccOpt, Results}}}, 
+     #state{req_id = ReqID, result_table = none, max_results = MR} = State)
+@@ -723,4 +736,43 @@ buffer_size_test() ->
+     ?assertMatch({16, 8}, calculate_buffer_size(171, 1000)),
+     ?assertMatch({29, 14}, calculate_buffer_size(171, 10000)).
+ 
++%% A vnode flushes its buffer when its fold finishes, so a vnode without
++%% further matches sends an empty batch. With max_results reached (in the
++%% list accumulator or the ETS table) such a batch must be acknowledged and
++%% leave the results unchanged.
++empty_terms_batch_state(ResultTable, Acc) ->
++    #state{
++        req_id = empty_batch_req,
++        vnode_monitor = #{{0, node()} => 0, {1, node()} => 0},
++        acc = Acc,
++        max_results = 2,
++        result_table = ResultTable
++    }.
++
++empty_terms_batch(State) ->
++    Ref = make_ref(),
++    Vnode = {1, node()},
++    Msg = {{empty_batch_req, Vnode}, {{self(), Ref}, <<"B">>, {terms, []}}},
++    {noreply, UpdState} = handle_info(Msg, State),
++    Acked = receive {Ref, ok} -> true after 1000 -> false end,
++    ?assert(Acked),
++    ?assertMatch(#{Vnode := 1}, UpdState#state.vnode_monitor),
++    UpdState.
++
++empty_terms_batch_list_test() ->
++    Results = [{{<<"t1">>, <<"k1">>}}, {{<<"t2">>, <<"k2">>}}],
++    UpdState =
++        empty_terms_batch(
++            empty_terms_batch_state(none, #list_acc{results = Results})),
++    ?assertMatch(#list_acc{results = Results}, UpdState#state.acc),
++    ?assertMatch(none, UpdState#state.result_table).
++
++empty_terms_batch_table_test() ->
++    Table = ets:new(query_results, [?DBTYPE_KEYS, private]),
++    true = ets:insert(Table, [{{<<"t1">>, <<"k1">>}}, {{<<"t2">>, <<"k2">>}}]),
++    UpdState = empty_terms_batch(empty_terms_batch_state(Table, #list_acc{})),
++    ?assertMatch(Table, UpdState#state.result_table),
++    ?assertMatch(2, ets:info(Table, size)),
++    ets:delete(Table).
++
+ -endif.
+\ No newline at end of file
+-- 
+2.43.0
+

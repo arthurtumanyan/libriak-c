@@ -2,7 +2,7 @@ find_package(Python3 COMPONENTS Interpreter)
 
 foreach(name util parse multipart datatype api)
   add_executable(test_${name} test_${name}.c)
-  target_link_libraries(test_${name} PRIVATE riak_objects riak_warnings)
+  target_link_libraries(test_${name} PRIVATE riak_objects riak_pbgen riak_warnings)
   add_test(NAME ${name} COMMAND test_${name})
 endforeach()
 
@@ -30,7 +30,9 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_docs.py
             ${CMAKE_C_COMPILER} ${PROJECT_SOURCE_DIR}/include $<TARGET_FILE:riak>
             ${PROJECT_SOURCE_DIR}/README.md ${RIAK_DOC_FILES})
-  if(RIAK_SANITIZE)
+  if(RIAK_SANITIZE STREQUAL "thread")
+    set_tests_properties(docs PROPERTIES ENVIRONMENT "CHECK_DOCS_FLAGS=-fsanitize=thread")
+  elseif(RIAK_SANITIZE)
     set_tests_properties(docs PROPERTIES
       ENVIRONMENT "CHECK_DOCS_FLAGS=-fsanitize=address,undefined")
   endif()
@@ -50,14 +52,71 @@ if(Python3_Interpreter_FOUND AND OPENSSL_EXECUTABLE)
                        ENVIRONMENT RIAK_TEST_CERTS=${RIAK_TEST_CERTS})
 endif()
 
+find_package(Threads REQUIRED)
+add_executable(test_pb test_pb.c)
+target_link_libraries(test_pb PRIVATE riak riak_pbgen OpenSSL::SSL ZLIB::ZLIB Threads::Threads
+                      riak_warnings)
+target_compile_definitions(test_pb PRIVATE _POSIX_C_SOURCE=200809L)
+add_test(NAME pb COMMAND test_pb)
+set_tests_properties(pb PROPERTIES TIMEOUT 60)
+set(RIAK_PB_TEST_ENV LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp)
+if(Python3_Interpreter_FOUND AND OPENSSL_EXECUTABLE)
+  list(APPEND RIAK_PB_TEST_ENV RIAK_TEST_CERTS=${RIAK_TEST_CERTS})
+  set_tests_properties(pb PROPERTIES FIXTURES_REQUIRED certs)
+endif()
+list(APPEND RIAK_PB_TEST_ENV TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp)
+set_tests_properties(pb PROPERTIES ENVIRONMENT "${RIAK_PB_TEST_ENV}")
+
+add_executable(test_threads test_threads.c)
+target_link_libraries(test_threads PRIVATE riak riak_pbgen OpenSSL::SSL ZLIB::ZLIB Threads::Threads
+                      riak_warnings)
+target_compile_definitions(test_threads PRIVATE _POSIX_C_SOURCE=200809L)
+set(RIAK_THREADS_ENV LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp
+    TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp:halt_on_error=1)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME threads
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py
+            $<TARGET_FILE:test_threads>)
+  set_tests_properties(threads PROPERTIES SKIP_RETURN_CODE 77)
+else()
+  add_test(NAME threads COMMAND test_threads)
+endif()
+set_tests_properties(threads PROPERTIES TIMEOUT 120 ENVIRONMENT "${RIAK_THREADS_ENV}")
+
+# The 2.0 entry points, called directly against the HTTP stub
+add_executable(test_compat test_compat.c ${PROJECT_SOURCE_DIR}/src/compat_v2.c)
+target_link_libraries(test_compat PRIVATE riak_objects riak_pbgen riak_warnings)
+target_compile_definitions(test_compat PRIVATE RIAK_COMPAT_NO_SYMVER)
+target_include_directories(test_compat PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME compat
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py
+            $<TARGET_FILE:test_compat>)
+  set_tests_properties(compat PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+
+# Binary compatibility: every 2.0.0 function stays exported under LIBRIAK_2.0
+if(RIAK_SYMBOL_VERSIONS AND CMAKE_OBJDUMP)
+  add_test(NAME abi_symbols
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/abi/check_symbols.sh $<TARGET_FILE:riak>
+            ${CMAKE_CURRENT_SOURCE_DIR}/abi/libriak-c-2.0.0.symbols)
+endif()
+
 add_executable(test_live test_live.c)
 target_link_libraries(test_live PRIVATE riak riak_warnings)
 add_test(NAME live COMMAND test_live)
-set_tests_properties(live PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+# Riak checks the password of every authenticated HTTP request, which costs
+# it a fraction of a second of CPU per request; over HTTPS with
+# authentication the suite runs for minutes on a CI runner
+set_tests_properties(live PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
 if(RIAK_FUZZ)
   add_executable(fuzz_parse fuzz_parse.c)
   target_compile_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_parse PRIVATE -fsanitize=fuzzer)
-  target_link_libraries(fuzz_parse PRIVATE riak_objects riak_warnings)
+  target_link_libraries(fuzz_parse PRIVATE riak_objects riak_pbgen riak_warnings)
+  add_executable(fuzz_pb fuzz_pb.c)
+  target_compile_options(fuzz_pb PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_pb PRIVATE -fsanitize=fuzzer)
+  target_link_libraries(fuzz_pb PRIVATE riak_objects riak_pbgen riak_warnings)
 endif()

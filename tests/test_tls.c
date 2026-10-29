@@ -29,6 +29,7 @@ static char *cert(const char *name) {
 static riak_config tls_config(unsigned port) {
     riak_config cfg;
     riak_config_init(&cfg);
+    cfg.transport = RIAK_TRANSPORT_HTTP;
     cfg.port = port;
     cfg.tls = true;
     cfg.ca_file = cert("ca.pem");
@@ -84,6 +85,7 @@ static void test_basic_auth(void) {
     /* credentials are never sent without TLS */
     riak_config plain;
     riak_config_init(&plain);
+    plain.transport = RIAK_TRANSPORT_HTTP;
     plain.port = ports[0];
     plain.username = "riak";
     plain.password = "s3cret";

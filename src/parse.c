@@ -21,6 +21,7 @@ struct riak_keystream {
     riak_strlist list;
     size_t cap;
     bool pending; /* an object has started but not finished */
+    const char *field;
 };
 
 /* Every string of obj[field] is appended to out. */
@@ -83,10 +84,15 @@ riak_status riak_parse_string_array(const char *json, size_t len, const char *fi
 }
 
 riak_keystream *riak_keystream_new(void) {
+    return riak_keystream_new_field("keys");
+}
+
+riak_keystream *riak_keystream_new_field(const char *field) {
     riak_keystream *ks = calloc(1, sizeof *ks);
     if (ks == NULL) {
         return NULL;
     }
+    ks->field = field;
     ks->tok = json_tokener_new();
     if (ks->tok == NULL) {
         free(ks);
@@ -126,7 +132,7 @@ riak_status riak_keystream_feed(riak_keystream *ks, const char *data, size_t len
         size_t used = json_tokener_get_parse_end(ks->tok);
         json_tokener_reset(ks->tok);
         ks->pending = false;
-        riak_status st = collect(obj, "keys", &ks->list, &ks->cap);
+        riak_status st = collect(obj, ks->field, &ks->list, &ks->cap);
         json_object_put(obj);
         if (st != RIAK_OK) {
             return st;
@@ -149,6 +155,12 @@ riak_status riak_keystream_finish(riak_keystream *ks, riak_strlist *out) {
     memset(&ks->list, 0, sizeof ks->list);
     ks->cap = 0;
     return RIAK_OK;
+}
+
+void riak_keystream_take(riak_keystream *ks, riak_strlist *out) {
+    *out = ks->list;
+    memset(&ks->list, 0, sizeof ks->list);
+    ks->cap = 0;
 }
 
 void riak_keystream_free(riak_keystream *ks) {
@@ -392,4 +404,28 @@ void riak_search_result_free(riak_search_result *res) {
     free(res->docs);
     free(res->raw);
     memset(res, 0, sizeof *res);
+}
+
+static riak_status string_member(json_object *obj, const char *name, char **out) {
+    json_object *v;
+    if (!json_object_object_get_ex(obj, name, &v) || !json_object_is_type(v, json_type_string)) {
+        return RIAK_E_PARSE;
+    }
+    *out = riak_strdup(json_object_get_string(v));
+    return *out ? RIAK_OK : RIAK_E_NOMEM;
+}
+
+riak_status riak_parse_server_info(const char *json, size_t len, char **node, char **version) {
+    riak_status st;
+    json_object *obj = parse_doc(json, len, &st);
+    if (obj == NULL) {
+        return st;
+    }
+    st = RIAK_E_PARSE;
+    if (json_object_is_type(obj, json_type_object) &&
+        (st = string_member(obj, "nodename", node)) == RIAK_OK) {
+        st = string_member(obj, "riak_kv_version", version);
+    }
+    json_object_put(obj);
+    return st;
 }

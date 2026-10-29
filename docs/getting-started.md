@@ -5,18 +5,23 @@
 - CMake 3.20 or newer and a C11 compiler (GCC or Clang)
 - libcurl 7.66 or newer
 - json-c 0.15 or newer
+- protobuf-c 1.3 or newer, with the `protoc-c` compiler
+- OpenSSL 1.1.1 or newer
+- zlib (AAE tree branches)
 - Python 3 and OpenSSL for the test suite (optional)
 
 On Debian and Ubuntu the dependencies are installed with:
 
 ```sh
-sudo apt install cmake libcurl4-openssl-dev libjson-c-dev
+sudo apt install cmake libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev \
+    protobuf-c-compiler libssl-dev zlib1g-dev
 ```
 
 On Fedora and EL:
 
 ```sh
-sudo dnf install cmake gcc libcurl-devel json-c-devel
+sudo dnf install cmake gcc libcurl-devel json-c-devel protobuf-c-devel \
+    protobuf-c-compiler openssl-devel zlib-devel
 ```
 
 ## Building and installing
@@ -40,7 +45,7 @@ Build options:
 | `RIAK_SANITIZE` | OFF | AddressSanitizer and UndefinedBehaviorSanitizer |
 | `RIAK_WERROR` | OFF | Warnings are treated as errors |
 | `RIAK_COVERAGE` | OFF | gcov instrumentation |
-| `RIAK_FUZZ` | OFF | libFuzzer target (Clang only) |
+| `RIAK_FUZZ` | OFF | libFuzzer targets (Clang only) |
 
 Prebuilt `.deb` and `.rpm` packages are attached to the GitHub releases, see
 [Packaging and releases](packaging.md).
@@ -70,7 +75,7 @@ int main(void) {
     riak_global_init();
 
     riak_config cfg;
-    riak_config_init(&cfg);              /* 127.0.0.1:8098 */
+    riak_config_init(&cfg);              /* Protocol Buffers, 127.0.0.1:8087 */
     riak_client *c;
     if (riak_client_new(&cfg, &c) != RIAK_OK)
         return 1;
@@ -95,7 +100,9 @@ int main(void) {
 A local Riak node for experiments is started with Docker:
 
 ```sh
-docker run -d -p 8098:8098 basho/riak-kv
+docker run -d -p 8087:8087 -p 8098:8098 basho/riak-kv
 ```
 
 Complete programs are found in `examples/basic.c` and `examples/async.c`.
+The transports and their differences are described in
+[Transports](transports.md).

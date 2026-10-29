@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "multipart.h"
+#include "pb.h"
 
 static const riak_opts no_opts;
 
@@ -38,10 +39,49 @@ static int add_quorums(riak_buf *url, const riak_opts *o, bool r, bool w, bool r
     if (rw && riak_url_append_quorum(url, "rw", o->rw) != 0) {
         return -1;
     }
-    return 0;
+    return riak_url_append_quorum(url, "node_confirms", o->node_confirms);
+}
+
+/* Put-only query parameters. */
+static int add_write_flags(riak_buf *url, const riak_opts *o) {
+    static const char *const sync[] = {NULL, "backend", "one", "all"};
+    if ((unsigned)o->sync_on_write > RIAK_SYNC_ALL) {
+        return -1;
+    }
+    if (sync[o->sync_on_write] &&
+        riak_url_append_query(url, "sync_on_write", sync[o->sync_on_write]) != 0) {
+        return -1;
+    }
+    return o->asis ? riak_url_append_query(url, "asis", "true") : 0;
 }
 
 enum op { OP_GET, OP_GET_SIBLINGS, OP_PUT, OP_DELETE };
+
+/* Options only the Protocol Buffers transport can express. */
+static riak_status http_unsupported(riak_client *c, const riak_opts *o) {
+    const char *what = o->sloppy_quorum     ? "sloppy_quorum"
+                       : o->n_val           ? "n_val"
+                       : o->if_modified     ? "if_modified"
+                       : o->if_not_modified ? "if_not_modified"
+                       : o->return_head     ? "return_head"
+                       : o->deletedvclock   ? "deletedvclock"
+                                            : NULL;
+    if (what) {
+        return riak_set_error(c, RIAK_E_UNSUPPORTED, "%s needs the Protocol Buffers transport",
+                              what);
+    }
+    return RIAK_OK;
+}
+
+static int add_read_flags(riak_buf *url, const riak_opts *o) {
+    if (o->basic_quorum && riak_url_append_query(url, "basic_quorum", "true") != 0) {
+        return -1;
+    }
+    if (o->notfound_ok && riak_url_append_query(url, "notfound_ok", "true") != 0) {
+        return -1;
+    }
+    return 0;
+}
 
 static riak_status object_headers(riak_client *c, const riak_opts *o, enum op op,
                                   struct curl_slist **h) {
@@ -105,11 +145,13 @@ static riak_status prepare_fetch(riak_client *c, const char *bucket, const char 
     riak_status st;
     if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
         (st = riak_check_name(c, key, "key")) != RIAK_OK ||
-        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
+        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK) ||
+        (st = http_unsupported(c, o)) != RIAK_OK) {
         return st;
     }
     if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
-        add_quorums(&p->url, o, true, false, false) != 0 || add_timeout(&p->url, o) != 0) {
+        add_quorums(&p->url, o, true, false, false) != 0 || add_timeout(&p->url, o) != 0 ||
+        add_read_flags(&p->url, o) != 0) {
         st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
     } else {
         st = object_headers(c, o, op, &p->headers);
@@ -118,7 +160,10 @@ static riak_status prepare_fetch(riak_client *c, const char *bucket, const char 
         riak_prepared_free(p);
         return st;
     }
-    p->req = (riak_request){.method = "GET", .url = p->url.data, .headers = p->headers};
+    /* HEAD returns the metadata only; siblings still need the multipart body */
+    p->req = (riak_request){.method = o->head && op == OP_GET ? "HEAD" : "GET",
+                            .url = p->url.data,
+                            .headers = p->headers};
     return RIAK_OK;
 }
 
@@ -182,23 +227,36 @@ static riak_status to_sibling_set(riak_client *c, riak_response *resp, riak_obje
     return RIAK_OK;
 }
 
+riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const char *key,
+                                     const riak_opts *o, riak_prepared *p) {
+    return prepare_fetch(c, bucket, key, o, OP_GET_SIBLINGS, p);
+}
+
+riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out) {
+    memset(out, 0, sizeof *out);
+    riak_status st = (resp->status == 200 || resp->status == 300) ? to_sibling_set(c, resp, out)
+                                                                  : riak_http_error(c, resp);
+    if (st != RIAK_OK) {
+        riak_object_set_free(out);
+    }
+    return st;
+}
+
 riak_status riak_get_siblings(riak_client *client, const char *bucket, const char *key,
                               const riak_opts *opts, riak_object_set *out) {
     if (client == NULL || out == NULL) {
         return RIAK_E_INVALID_ARG;
     }
     memset(out, 0, sizeof *out);
+    if (riak_is_pb(client)) {
+        return riak_pb_get_siblings(client, bucket, key, opts ? opts : &no_opts, out);
+    }
     riak_response resp = {0};
     riak_prepared p;
-    riak_status st =
-        prepare_fetch(client, bucket, key, opts ? opts : &no_opts, OP_GET_SIBLINGS, &p);
+    riak_status st = riak_kv_prepare_siblings(client, bucket, key, opts ? opts : &no_opts, &p);
     st = run(client, st, &p, &resp);
     if (st == RIAK_OK) {
-        st = (resp.status == 200 || resp.status == 300) ? to_sibling_set(client, &resp, out)
-                                                        : riak_http_error(client, &resp);
-    }
-    if (st != RIAK_OK) {
-        riak_object_set_free(out);
+        st = riak_kv_finish_siblings(client, &resp, out);
     }
     riak_response_free(&resp);
     return st;
@@ -239,6 +297,9 @@ riak_status riak_get(riak_client *client, const char *bucket, const char *key,
     }
     memset(out, 0, sizeof *out);
     const riak_opts *o = opts ? opts : &no_opts;
+    if (riak_is_pb(client)) {
+        return riak_pb_get(client, bucket, key, o, out);
+    }
     riak_response resp = {0};
     riak_prepared p;
     riak_status st = run(client, riak_kv_prepare_get(client, bucket, key, o, &p), &p, &resp);
@@ -270,12 +331,14 @@ riak_status riak_kv_prepare_put(riak_client *c, const char *bucket, const char *
     riak_status st;
     if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
         (key != NULL && (st = riak_check_name(c, key, "key")) != RIAK_OK) ||
-        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
+        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK) ||
+        (st = http_unsupported(c, o)) != RIAK_OK) {
         return st;
     }
     if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
         add_quorums(&p->url, o, false, true, false) != 0 || add_timeout(&p->url, o) != 0 ||
-        (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0)) {
+        (o->return_body && riak_url_append_query(&p->url, "returnbody", "true") != 0) ||
+        add_write_flags(&p->url, o) != 0) {
         st = riak_set_error(c, RIAK_E_INVALID_ARG, "invalid quorum or out of memory");
     } else if ((st = object_headers(c, o, OP_PUT, &p->headers)) == RIAK_OK && copy_body) {
         p->body = malloc(len ? len : 1);
@@ -328,6 +391,9 @@ riak_status riak_put(riak_client *client, const char *bucket, const char *key, c
         return RIAK_E_INVALID_ARG;
     }
     const riak_opts *o = opts ? opts : &no_opts;
+    if (riak_is_pb(client)) {
+        return riak_pb_put(client, bucket, key, value, len, o, out, created_key);
+    }
     riak_response resp = {0};
     riak_prepared p;
     riak_status st =
@@ -345,7 +411,8 @@ riak_status riak_kv_prepare_delete(riak_client *c, const char *bucket, const cha
     riak_status st;
     if ((st = riak_check_name(c, bucket, "bucket")) != RIAK_OK ||
         (st = riak_check_name(c, key, "key")) != RIAK_OK ||
-        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK)) {
+        (o->bucket_type && (st = riak_check_name(c, o->bucket_type, "bucket type")) != RIAK_OK) ||
+        (st = http_unsupported(c, o)) != RIAK_OK) {
         return st;
     }
     if (riak_url_bucket(&p->url, c, o->bucket_type, bucket, "keys", key) != 0 ||
@@ -370,6 +437,9 @@ riak_status riak_delete(riak_client *client, const char *bucket, const char *key
                         const riak_opts *opts) {
     if (client == NULL) {
         return RIAK_E_INVALID_ARG;
+    }
+    if (riak_is_pb(client)) {
+        return riak_pb_delete(client, bucket, key, opts ? opts : &no_opts);
     }
     riak_response resp = {0};
     riak_prepared p;

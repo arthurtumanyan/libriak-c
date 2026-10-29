@@ -13,10 +13,17 @@ The runtime package holds the shared library and documentation; the
 development package holds the header, the static library, the `.so` link,
 the CMake package and the pkg-config file. Runtime dependencies are derived
 by `dpkg-shlibdeps` and RPM autoreq; the development packages depend on the
-libcurl and json-c development packages.
+libcurl, json-c, protobuf-c, OpenSSL and zlib development packages.
 
-Package versions carry the distribution (`2.0.0-1~ubuntu24.04`,
-`2.0.0-1.fc44`), so packages for different distributions do not collide.
+The runtime package of every 2.x release is named after the library's
+major version (`libriak-c2`, `libriak-c.so.2`): a 2.1 package replaces 2.0,
+and programs built against 2.0.0 keep working with it (see
+[Migrating](migration.md)).
+
+Package versions carry the distribution (`2.1.0-1~ubuntu24.04`,
+`2.1.0-1.fc42`), so packages for different distributions do not collide.
+They are built and install-tested on Ubuntu 22.04 and 24.04, Debian 12,
+Fedora and AlmaLinux 10.
 
 Packages are built locally with:
 
@@ -27,6 +34,23 @@ packaging/build-packages.sh DEB      # or RPM; output in dist/
 `packaging/smoke-test.sh` compiles `examples/basic.c` against the installed
 packages through pkg-config and through the CMake package, shared and static.
 
+## Prebuilt packages
+
+Prebuilt x86_64 packages of each release are kept in the repository under
+`packages/<version>/<distribution>/`, together with a `SHA256SUMS` file:
+
+```sh
+cd packages/2.1.0 && sha256sum -c SHA256SUMS
+sudo apt install ./ubuntu-24.04/libriak-c2_2.1.0-1~ubuntu24.04_amd64.deb \
+                 ./ubuntu-24.04/libriak-c-dev_2.1.0-1~ubuntu24.04_amd64.deb
+sudo dnf install ./fedora-42/libriak-c-2.1.0-1.fc42.x86_64.rpm \
+                 ./fedora-42/libriak-c-devel-2.1.0-1.fc42.x86_64.rpm
+```
+
+The 2.1.0 packages are provided for Ubuntu 22.04 and 24.04, Debian 12,
+Fedora 42 and AlmaLinux 10. Each set was installed into a clean container
+of its distribution and passed `packaging/smoke-test.sh`.
+
 ## Releases
 
 A release is made by updating `project(VERSION ...)` in `CMakeLists.txt`,
@@ -34,8 +58,8 @@ the version macros in `include/riak/riak.h`, `PROJECT_NUMBER` in
 `docs/Doxyfile` and the `CHANGELOG.md` heading, and pushing a matching tag:
 
 ```sh
-git tag -s v2.0.0 -m "libriak-c 2.0.0"
-git push origin v2.0.0
+git tag -s v2.1.0 -m "libriak-c 2.1.0"
+git push origin v2.1.0
 ```
 
 `.github/workflows/release.yml` then checks that the tag matches the project

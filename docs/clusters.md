@@ -25,17 +25,19 @@ A failed attempt is retried on the next node after a backoff, up to
 doubles with each retry up to `retry_max_ms`, and is spread with "equal
 jitter" (half fixed, half random).
 
-| Failure | GET, PUT, DELETE | POST |
+| Failure | Repeatable requests | Other requests |
 |---|---|---|
 | Connection refused, DNS failure (request never sent) | retried | retried |
 | Transport error after sending (reset, timeout) | retried | not retried |
-| HTTP 503 | retried | not retried |
-| Any other HTTP status | not retried | not retried |
-| TLS errors | not retried | not retried |
+| HTTP 503, or an overload or timeout error over Protocol Buffers | retried | not retried |
+| Any other HTTP status or server error | not retried | not retried |
+| TLS and authentication errors | not retried | not retried |
 
-POST requests (generated keys, data type updates such as counter
-increments, MapReduce) are not repeated once they may have reached a node,
-so nothing is applied twice. Streamed responses (key listing, streamed index
+Repeatable requests are reads, puts and deletes of a named key, listings and
+queries (HTTP GET, PUT and DELETE). Puts with a generated key, data type
+updates such as counter increments and MapReduce (HTTP POST) are not
+repeated once they may have reached a node, so nothing is applied twice.
+The rules are the same on both transports. Streamed responses (key listing, streamed index
 queries, streamed MapReduce) are not restarted once data was delivered.
 
 Setting `max_retries = 0` disables retries.

@@ -34,7 +34,10 @@
  * riak_global_init() is called once before any other thread is started. A
  * ::riak_client is not shared between threads at the same time; one client
  * per thread is used instead. A ::riak_async handle runs many requests
- * concurrently on a single thread.
+ * concurrently on a single thread. A callback of a streaming call (names,
+ * keys, objects, MapReduce results) does not use the client running it:
+ * such a call returns ::RIAK_E_INVALID_ARG, and riak_client_free() called
+ * from one is ignored (and logged) instead of freeing the client in use.
  */
 
 #ifndef RIAK_RIAK_H
@@ -66,7 +69,7 @@ extern "C" {
  *  @{ */
 
 #define RIAK_VERSION_MAJOR 2 /**< Major version; changes on incompatible API changes. */
-#define RIAK_VERSION_MINOR 0 /**< Minor version; changes when features are added. */
+#define RIAK_VERSION_MINOR 1 /**< Minor version; changes when features are added. */
 #define RIAK_VERSION_PATCH 0 /**< Patch version; changes on fixes only. */
 
 /** Result of every library call. */
@@ -83,7 +86,9 @@ typedef enum {
     RIAK_E_PARSE,        /**< The response body could not be parsed. */
     RIAK_E_NOT_MODIFIED, /**< HTTP 304: a conditional get found the object unchanged. */
     RIAK_E_UNAUTHORIZED, /**< HTTP 401 or 403: authentication or permission failure. */
-    RIAK_E_CANCELLED     /**< An async request was dropped by riak_async_free(). */
+    RIAK_E_CANCELLED,    /**< An async request was dropped by riak_async_free(). */
+    RIAK_E_UNSUPPORTED,  /**< The operation or option is not available on the transport or node. */
+    RIAK_E_SERVER        /**< Protocol Buffers: the server returned an error message. */
 } riak_status;
 
 /** Severity passed to a ::riak_log_fn. */
@@ -102,22 +107,30 @@ typedef enum {
  */
 typedef void (*riak_log_fn)(riak_log_level level, const char *message, void *ctx);
 
-/** Measurements of one HTTP attempt, reported through riak_config::metrics_fn. */
+/** Wire protocol used to talk to Riak, see riak_config::transport. */
+typedef enum {
+    RIAK_TRANSPORT_PB = 0, /**< Protocol Buffers (default port 8087). */
+    RIAK_TRANSPORT_HTTP    /**< HTTP (default port 8098). */
+} riak_transport;
+
+/** Measurements of one attempt, reported through riak_config::metrics_fn. */
 typedef struct {
-    const char *method;    /**< "GET", "PUT", "POST" or "DELETE". */
-    const char *path;      /**< Request path and query, without scheme and host. */
-    const char *host;      /**< Node the attempt was sent to. */
-    unsigned port;         /**< Port of that node. */
-    unsigned attempt;      /**< 0 for the first try, 1 for the first retry, and so on. */
-    riak_status status;    /**< ::RIAK_OK when a response arrived, whatever its HTTP code. */
-    long http_status;      /**< HTTP status, 0 when no response was received. */
-    double duration_ms;    /**< Time from sending to completion. */
-    size_t bytes_received; /**< Size of the response body. */
-    bool will_retry;       /**< Whether another attempt follows. */
+    const char *method;       /**< HTTP method, or the request message name ("RpbGetReq"). */
+    const char *path;         /**< Request path and query, without scheme and host; for
+                                   Protocol Buffers the equivalent HTTP resource path. */
+    const char *host;         /**< Node the attempt was sent to. */
+    unsigned port;            /**< Port of that node. */
+    unsigned attempt;         /**< 0 for the first try, 1 for the first retry, and so on. */
+    riak_status status;       /**< ::RIAK_OK when a response arrived, whatever its HTTP code. */
+    long http_status;         /**< HTTP status, 0 when no response was received. */
+    double duration_ms;       /**< Time from sending to completion. */
+    size_t bytes_received;    /**< Size of the response body. */
+    bool will_retry;          /**< Whether another attempt follows. */
+    riak_transport transport; /**< Transport of the attempt. */
 } riak_request_metrics;
 
 /**
- * Metrics callback, called once for every HTTP attempt.
+ * Metrics callback, called once for every attempt.
  * @param m Measurements; valid only during the call.
  * @param ctx riak_config::metrics_ctx.
  */
@@ -137,8 +150,9 @@ typedef struct riak_client riak_client;
 
 /** One node of a cluster, see riak_config::nodes. */
 typedef struct {
-    const char *host; /**< Host name or IP address (IPv6 literals are accepted). */
-    unsigned port;    /**< HTTP port; 0 selects 8098. */
+    const char *host;   /**< Host name or IP address (IPv6 literals are accepted). */
+    unsigned port;      /**< Port; 0 selects 8087 (Protocol Buffers) or 8098 (HTTP). */
+    unsigned http_port; /**< Protocol Buffers: HTTP port used by riak_stats(); 0: none. */
 } riak_node;
 
 /** Node selection strategy of a multi-node client. */
@@ -153,15 +167,21 @@ typedef enum {
  * copied by riak_client_new(); the structure may be discarded afterwards.
  */
 typedef struct {
-    const char *host;        /**< Node address; default "127.0.0.1". Ignored when #nodes is set. */
-    unsigned port;           /**< Node HTTP port; default 8098. Ignored when #nodes is set. */
-    bool tls;                /**< HTTPS is used. */
+    riak_transport transport; /**< Wire protocol; default ::RIAK_TRANSPORT_PB. */
+    const char *host;         /**< Node address; default "127.0.0.1". Ignored when #nodes is set. */
+    /** Node port; 0 (the default) selects 8087 for Protocol Buffers and 8098
+     *  for HTTP. Ignored when #nodes is set. */
+    unsigned port;
+    unsigned http_port;      /**< Protocol Buffers: HTTP port for riak_stats(); 0: none. */
+    bool tls;                /**< HTTPS, or STARTTLS on a Protocol Buffers connection. */
     bool tls_verify;         /**< Peer certificate and host name are verified; default true. */
     const char *ca_file;     /**< CA bundle (PEM) used for verification; NULL: system store. */
     long connect_timeout_ms; /**< Connection timeout; 0: libcurl default. */
     long timeout_ms;         /**< Whole-request timeout; 0: no limit. */
-    const char *client_id;   /**< Sent as X-Riak-ClientId when set. */
-    size_t max_body_bytes;   /**< Response size limit; 0 selects 64 MiB. */
+    const char *client_id;   /**< Sent as X-Riak-ClientId, or with RpbSetClientIdReq. */
+    size_t max_body_bytes;   /**< Response size limit (per message on streams); 0: 64 MiB. */
+    /** Async Protocol Buffers requests: connections opened per node; 0 selects 8. */
+    unsigned pb_max_connections_per_node;
 
     /** Cluster nodes. When #n_nodes is greater than 0 they replace #host and #port. */
     const riak_node *nodes;
@@ -181,16 +201,24 @@ typedef struct {
     unsigned fail_threshold; /**< Consecutive failures after which a node is ejected; default 3. */
     long eject_ms;           /**< Time an ejected node is skipped; default 5000. */
 
-    const char *username; /**< Riak security user (HTTP Basic); refused unless #tls is set. */
+    const char *username; /**< Riak security user; refused unless #tls is set. */
     const char *password; /**< Password of #username; wiped from memory when the client is freed. */
     const char *tls_cert_file;    /**< Client certificate (PEM) for certificate authentication. */
     const char *tls_key_file;     /**< Private key (PEM) of #tls_cert_file. */
     const char *tls_key_password; /**< Passphrase of an encrypted #tls_key_file. */
+    /**
+     * Interoperability with nodes on an old Erlang/OTP TLS stack (Riak KV 2.2
+     * and older), which reject OpenSSL 3 clients: TLS 1.2 at most, no RSA-PSS
+     * or EdDSA signature algorithms, legacy renegotiation accepted and no DHE
+     * key exchange (such nodes then use RSA key exchange, without forward
+     * secrecy). Off by default; meant only for such nodes.
+     */
+    bool tls_legacy;
 
     riak_log_fn log_fn;         /**< Log callback, run on the thread issuing the request. */
     riak_log_level log_level;   /**< Minimum level passed to #log_fn; default ::RIAK_LOG_WARN. */
     void *log_ctx;              /**< Passed to #log_fn. */
-    riak_metrics_fn metrics_fn; /**< Metrics callback, called after every HTTP attempt. */
+    riak_metrics_fn metrics_fn; /**< Metrics callback, called after every attempt. */
     void *metrics_ctx;          /**< Passed to #metrics_fn. */
 } riak_config;
 
@@ -249,6 +277,14 @@ typedef struct {
  */
 typedef size_t (*riak_resolver_fn)(const riak_object *siblings, size_t count, void *ctx);
 
+/** Disk synchronization of a write, see riak_opts::sync_on_write. */
+typedef enum {
+    RIAK_SYNC_DEFAULT = 0, /**< The bucket's setting. */
+    RIAK_SYNC_BACKEND,     /**< The backend's own policy. */
+    RIAK_SYNC_ONE,         /**< The coordinating vnode flushes before acknowledging. */
+    RIAK_SYNC_ALL          /**< Every vnode flushes before acknowledging. */
+} riak_sync;
+
 /** Per-request options for object operations; a zero-initialized structure
  *  (or NULL) selects the server defaults. */
 typedef struct {
@@ -277,6 +313,29 @@ typedef struct {
      *  clock covering all of them, so writing it back resolves the conflict. */
     riak_resolver_fn resolver;
     void *resolver_ctx; /**< Passed to #resolver. */
+    bool head;          /**< Get: only metadata is returned; riak_object::data is empty. */
+    bool basic_quorum;  /**< Get: a not-found answer is returned once a quorum agrees. */
+    bool notfound_ok;   /**< Get: a not-found answer counts towards the read quorum. */
+    bool sloppy_quorum; /**< Protocol Buffers: fallback vnodes count towards quorums. */
+    unsigned n_val;     /**< Protocol Buffers: replica count for this request; 0: bucket's. */
+    /** Protocol Buffers get: ::RIAK_E_NOT_MODIFIED is returned when the stored
+     *  object still has the vector clock #vclock. */
+    bool if_modified;
+    /** Protocol Buffers put: ::RIAK_E_PRECONDITION is returned unless the
+     *  stored object still has the vector clock #vclock. */
+    bool if_not_modified;
+    /** Distinct physical nodes that must acknowledge a write, or serve a read
+     *  (Riak 2.9+); takes the same values as #w. */
+    int node_confirms;
+    riak_sync sync_on_write; /**< Put: flush to disk before acknowledging (Riak 3.0+). */
+    bool return_head;        /**< Protocol Buffers put: the stored metadata, without the value. */
+    /** Protocol Buffers get: for a deleted key the result is still
+     *  ::RIAK_E_NOT_FOUND, but riak_object::vclock holds the tombstone's
+     *  vector clock and riak_object::deleted is set. */
+    bool deletedvclock;
+    /** Put: the object is stored as given, without a new vector clock entry
+     *  (used by replication). */
+    bool asis;
 } riak_opts;
 
 /** NULL-terminated string list; released with riak_strlist_free(). */
@@ -318,7 +377,8 @@ RIAK_API void riak_config_init(riak_config *cfg);
 RIAK_API riak_status riak_client_new(const riak_config *cfg, riak_client **out);
 
 /**
- * Frees a client; NULL is accepted. Stored secrets are wiped.
+ * Frees a client; NULL is accepted. Stored secrets are wiped. A call from a
+ * callback of a request on this client is ignored, since the client is in use.
  * @param client Client to free; NULL is accepted.
  */
 RIAK_API void riak_client_free(riak_client *client);
@@ -516,11 +576,130 @@ RIAK_API riak_status riak_type_reset_bucket_props(riak_client *client, const cha
 RIAK_API riak_status riak_get_type_props(riak_client *client, const char *type, char **json);
 
 /**
- * Node statistics (/stats) as a JSON object.
+ * Node statistics (/stats) as a JSON object. Statistics are served only over
+ * HTTP: with the Protocol Buffers transport the request goes to the first
+ * node with an HTTP port (riak_config::http_port, riak_node::http_port).
  * @param client Client handle.
  * @param json Receives the document; released with riak_free().
+ * @return ::RIAK_OK, or ::RIAK_E_UNSUPPORTED over Protocol Buffers without an HTTP port.
  */
 RIAK_API riak_status riak_stats(riak_client *client, char **json);
+
+/** Node name and version reported by riak_server_info(); released with riak_server_info_free(). */
+typedef struct {
+    char *node;    /**< Erlang node name, e.g. "riak@127.0.0.1". */
+    char *version; /**< Riak version. */
+} riak_server_info;
+
+/**
+ * Name and version of the node that answers.
+ * @param client Client handle.
+ * @param out Receives the information; released with riak_server_info_free().
+ */
+RIAK_API riak_status riak_get_server_info(riak_client *client, riak_server_info *out);
+
+/**
+ * Frees a ::riak_server_info; NULL is accepted.
+ * @param info Information to clear.
+ */
+RIAK_API void riak_server_info_free(riak_server_info *info);
+
+/** One vnode of a preference list. */
+typedef struct {
+    long long partition; /**< Partition index. */
+    char *node;          /**< Node that owns the vnode. */
+    bool primary;        /**< The vnode is a primary, not a fallback. */
+} riak_preflist_item;
+
+/** Preference list of a key; released with riak_preflist_free(). */
+typedef struct {
+    riak_preflist_item *items; /**< The vnodes. */
+    size_t count;              /**< Number of entries in #items. */
+} riak_preflist;
+
+/**
+ * Preference list (the vnodes that hold the replicas) of a key; Protocol
+ * Buffers only, ::RIAK_E_UNSUPPORTED over HTTP (Riak's HTTP resource answered
+ * the same list for every key and was removed in Riak 3.0).
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param out Receives the list; released with riak_preflist_free().
+ */
+RIAK_API riak_status riak_get_preflist(riak_client *client, const char *type, const char *bucket,
+                                       const char *key, riak_preflist *out);
+
+/**
+ * Frees a ::riak_preflist; NULL is accepted.
+ * @param list List to clear.
+ */
+RIAK_API void riak_preflist_free(riak_preflist *list);
+
+/**
+ * Callback of riak_list_keys_stream() and riak_list_buckets_stream().
+ * @param name A key or bucket name; valid only during the call.
+ * @param len Length of @p name.
+ * @param ctx Context passed to the listing call.
+ * @return true to continue, false to stop the listing.
+ */
+typedef bool (*riak_name_cb)(const char *name, size_t len, void *ctx);
+
+/**
+ * Lists the keys of a bucket, passing each to @p cb as it arrives (expensive:
+ * every key in the cluster is visited).
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param cb Called with each key.
+ * @param ctx Passed unchanged to the callback.
+ */
+RIAK_API riak_status riak_list_keys_stream(riak_client *client, const char *type,
+                                           const char *bucket, riak_name_cb cb, void *ctx);
+
+/**
+ * Lists the buckets of a bucket type, passing each to @p cb as it arrives.
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param cb Called with each bucket name.
+ * @param ctx Passed unchanged to the callback.
+ */
+RIAK_API riak_status riak_list_buckets_stream(riak_client *client, const char *type,
+                                              riak_name_cb cb, void *ctx);
+
+/** One entry of a coverage plan. */
+typedef struct {
+    char *host;          /**< Address of the node to query. */
+    unsigned port;       /**< Protocol Buffers port of that node. */
+    char *description;   /**< Human-readable key space description. */
+    char *cover_context; /**< Opaque context (base64) for riak_index_query::cover_context. */
+} riak_coverage_entry;
+
+/** Coverage plan of a bucket; released with riak_coverage_free(). */
+typedef struct {
+    riak_coverage_entry *entries; /**< The entries. */
+    size_t count;                 /**< Number of entries. */
+} riak_coverage_plan;
+
+/**
+ * Coverage plan for parallel secondary index queries (Protocol Buffers only).
+ * Each entry is queried with riak_index_query::cover_context set.
+ * @param client Client handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param min_partitions Minimum number of entries; 0 selects the server default.
+ * @param out Receives the plan; released with riak_coverage_free().
+ * @return ::RIAK_OK, or ::RIAK_E_UNSUPPORTED over HTTP or when the node does not
+ *         implement coverage requests.
+ */
+RIAK_API riak_status riak_get_coverage(riak_client *client, const char *type, const char *bucket,
+                                       unsigned min_partitions, riak_coverage_plan *out);
+
+/**
+ * Frees a ::riak_coverage_plan; NULL is accepted.
+ * @param plan Plan to clear.
+ */
+RIAK_API void riak_coverage_free(riak_coverage_plan *plan);
 
 /** @} */
 
@@ -540,6 +719,11 @@ typedef struct {
     const char *term_regex;     /**< Range queries: terms are filtered by this regex. */
     const char *bucket_type;    /**< Bucket type; NULL selects the default type. */
     unsigned server_timeout_ms; /**< Riak-side timeout; 0 selects the server default. */
+    /** Protocol Buffers: limits the query to one entry of riak_coverage(). */
+    const char *cover_context;
+    /** Results of a query without #max_results are sorted (paged queries
+     *  always are). */
+    bool pagination_sort;
 } riak_index_query;
 
 /** One page of index results; released with riak_index_result_free(). */
@@ -767,6 +951,7 @@ typedef struct {
     bool return_body;           /**< Update: the new value is returned. */
     bool no_context;            /**< Fetch: the context is omitted. */
     unsigned server_timeout_ms; /**< Riak-side timeout; 0 selects the server default. */
+    int node_confirms;          /**< Distinct physical nodes that must acknowledge (Riak 2.9+). */
 } riak_dt_opts;
 
 /**
@@ -899,6 +1084,559 @@ RIAK_API riak_status riak_dt_update(riak_client *client, const char *type, const
 
 /** @} */
 
+/** @defgroup extended Counters, folds, Query API, link walking, replication
+ *  Calls that a node may not offer: an operation the transport or the
+ *  node's Riak version does not support returns ::RIAK_E_UNSUPPORTED.
+ *  @{ */
+
+/**
+ * Sets properties of a bucket type, as a JSON document `{"props":{...}}`.
+ * @param client Client handle.
+ * @param type Bucket type name.
+ * @param json Properties to change.
+ */
+RIAK_API riak_status riak_set_type_props(riak_client *client, const char *type, const char *json);
+
+/**
+ * Client id the node associates with this connection (Protocol Buffers;
+ * deprecated by Riak since 1.4).
+ * @param client Client handle.
+ * @param id Receives the id; released with riak_free().
+ */
+RIAK_API riak_status riak_get_client_id(riak_client *client, char **id);
+
+/**
+ * Adds @p amount to a Riak 1.4 counter, a counter kept in an `allow_mult`
+ * bucket without a bucket type (data type counters are preferred).
+ * @param client Client handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param amount Amount added; negative values decrement.
+ * @param opts Quorums (w, dw, pw, node_confirms); NULL selects the defaults.
+ * @param value Receives the new value; NULL when it is not needed.
+ */
+RIAK_API riak_status riak_counter_update(riak_client *client, const char *bucket, const char *key,
+                                         int64_t amount, const riak_opts *opts, int64_t *value);
+
+/**
+ * Value of a Riak 1.4 counter.
+ * @param client Client handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Quorums (r, pr, basic_quorum, notfound_ok, node_confirms); NULL selects the defaults.
+ * @param value Receives the value.
+ * @return ::RIAK_OK, ::RIAK_E_NOT_FOUND for an absent counter, or another error.
+ */
+RIAK_API riak_status riak_counter_get(riak_client *client, const char *bucket, const char *key,
+                                      const riak_opts *opts, int64_t *value);
+
+/** A key range of riak_fold_objects(). */
+typedef struct {
+    const char *start_key;      /**< First key of the range; required. */
+    const char *end_key;        /**< Last key; NULL: to the end of the bucket. */
+    bool start_exclusive;       /**< #start_key itself is excluded. */
+    bool end_inclusive;         /**< #end_key itself is included. */
+    unsigned max_results;       /**< Page size; 0 returns all objects. */
+    const char *continuation;   /**< Continuation of the previous page. */
+    const char *bucket_type;    /**< Bucket type; NULL selects "default". */
+    unsigned server_timeout_ms; /**< Riak-side timeout; 0 selects the server default. */
+    const char *cover_context;  /**< Limits the fold to one coverage plan entry. */
+} riak_fold_query;
+
+/**
+ * Callback of riak_fold_objects().
+ * @param key Key of the object.
+ * @param obj The object; it may be kept by copying the structure and
+ *            clearing it, otherwise it is freed when the callback returns.
+ * @param ctx Context passed to riak_fold_objects().
+ * @return true to continue, false to stop.
+ */
+typedef bool (*riak_object_cb)(const char *key, riak_object *obj, void *ctx);
+
+/**
+ * Folds over the objects of a key range, values included (Protocol Buffers;
+ * the "CS bucket" fold of Riak).
+ * @param client Client handle.
+ * @param bucket Bucket name.
+ * @param q The range.
+ * @param cb Called with each object, in key order.
+ * @param ctx Passed unchanged to the callback.
+ * @param continuation Receives the continuation of a paged fold (released
+ *        with riak_free()); may be NULL.
+ */
+RIAK_API riak_status riak_fold_objects(riak_client *client, const char *bucket,
+                                       const riak_fold_query *q, riak_object_cb cb, void *ctx,
+                                       char **continuation);
+
+/** One step of riak_link_walk(). */
+typedef struct {
+    const char *bucket; /**< Follow only links to this bucket; NULL: any. */
+    const char *tag;    /**< Follow only links with this riaktag; NULL: any. */
+    bool keep;          /**< The objects reached by this step are returned. */
+} riak_link_step;
+
+/** An object reached by a link walk. */
+typedef struct {
+    char *bucket;       /**< Bucket of the object. */
+    char *key;          /**< Key of the object. */
+    riak_object object; /**< The object. */
+} riak_linked_object;
+
+/** Objects of one kept step. */
+typedef struct {
+    riak_linked_object *items; /**< The objects. */
+    size_t count;              /**< Number of objects. */
+} riak_link_phase;
+
+/** Result of riak_link_walk(); released with riak_link_result_free(). */
+typedef struct {
+    riak_link_phase *phases; /**< One entry per step with riak_link_step::keep set. */
+    size_t n_phases;         /**< Number of entries. */
+} riak_link_result;
+
+/**
+ * Follows links from an object. The last step is always kept. Over HTTP the
+ * link walker of the node is used; over Protocol Buffers the walk runs as a
+ * MapReduce job with link phases and the kept objects are fetched.
+ * @param client Client handle.
+ * @param bucket Bucket of the starting object.
+ * @param key Key of the starting object.
+ * @param steps The steps; at least one.
+ * @param n_steps Number of steps.
+ * @param out Receives the objects; released with riak_link_result_free().
+ * @return ::RIAK_OK, or ::RIAK_E_UNSUPPORTED on a node with Riak security
+ *         enabled (Riak refuses link walking there), or another error.
+ */
+RIAK_API riak_status riak_link_walk(riak_client *client, const char *bucket, const char *key,
+                                    const riak_link_step *steps, size_t n_steps,
+                                    riak_link_result *out);
+
+/**
+ * Frees a ::riak_link_result; NULL is accepted.
+ * @param res Result to clear.
+ */
+RIAK_API void riak_link_result_free(riak_link_result *res);
+
+/** One index query of a ::riak_query (Riak 3.4+). */
+typedef struct {
+    int aggregation_tag;    /**< Referenced as `$tag` by riak_query::aggregation_expression. */
+    const char *index_name; /**< Binary index, e.g. "people_bin". */
+    const char *start_term; /**< Start of the term range. */
+    const char *end_term;   /**< End of the term range. */
+    const char *evaluation_expression; /**< Projects attributes from the term. */
+    const char *filter_expression;     /**< Filters on the projected attributes. */
+    const char *regular_expression;    /**< Filters terms; excludes the expressions above. */
+} riak_query_part;
+
+/** A Query API request (Riak 3.4+), see the Riak documentation for the
+ *  expression syntax. */
+typedef struct {
+    const riak_query_part *parts;       /**< The index queries; at least one. */
+    size_t n_parts;                     /**< Number of entries in #parts. */
+    const char *aggregation_expression; /**< e.g. "$1 INTERSECT $2"; NULL for one query. */
+    const char *accumulation_option;    /**< "keys" (default), "raw_keys", "terms", "count", ... */
+    const char *accumulation_term;      /**< Attribute accumulated by the term options. */
+    const riak_kv_pair *substitutions;  /**< Values substituted for `:name` in expressions. */
+    size_t n_substitutions;             /**< Number of entries in #substitutions. */
+    unsigned max_results;               /**< Page size ("terms" and "raw_keys" only). */
+    const char *continuation;           /**< Continuation of the previous page. */
+    unsigned timeout_s;                 /**< Riak-side timeout in seconds; 0: default. */
+    unsigned inactivity_timeout_s;      /**< Queue options: queue lifetime without fetches. */
+    const char *bucket_type;            /**< Bucket type; NULL selects "default". */
+} riak_query;
+
+/** Result of a Query API request; released with riak_query_result_free(). */
+typedef struct {
+    char *raw; /**< The complete JSON response. */
+    char *
+        *keys; /**< Keys of "keys" and "raw_keys" results, and of term results; NULL-terminated. */
+    char **terms;       /**< Terms parallel to #keys for term results, otherwise NULL. */
+    size_t count;       /**< Entries in #keys. */
+    long long total;    /**< Count of "count" and "raw_count" results; -1 otherwise. */
+    char *continuation; /**< Continuation of the next page; NULL on the last one. */
+    char *result_queue; /**< Queue reference of "queue_*" options; NULL otherwise. */
+    bool complete;      /**< riak_query_fetch(): the query has finished. */
+} riak_query_result;
+
+/**
+ * Runs a Query API request (Riak 3.4+). The Query API is served over HTTP
+ * only; with the Protocol Buffers transport it goes to the HTTP port
+ * (riak_config::http_port), as riak_stats() does.
+ * @param client Client handle.
+ * @param bucket Bucket name.
+ * @param q The request.
+ * @param out Receives the result; released with riak_query_result_free().
+ */
+RIAK_API riak_status riak_query_run(riak_client *client, const char *bucket, const riak_query *q,
+                                    riak_query_result *out);
+
+/**
+ * Fetches the next batch of a queued query (accumulation option
+ * "queue_raw_keys" or "queue_raw_terms", Riak 3.4.1+).
+ * @param client Client handle.
+ * @param bucket_type Bucket type of the query; NULL selects "default".
+ * @param bucket Bucket of the query.
+ * @param result_queue riak_query_result::result_queue of the query.
+ * @param max_results Batch size; 0 selects the server default.
+ * @param out Receives the batch; riak_query_result::complete is set once
+ *            the query has finished.
+ */
+RIAK_API riak_status riak_query_fetch(riak_client *client, const char *bucket_type,
+                                      const char *bucket, const char *result_queue,
+                                      unsigned max_results, riak_query_result *out);
+
+/**
+ * Frees a ::riak_query_result; NULL is accepted.
+ * @param res Result to clear.
+ */
+RIAK_API void riak_query_result_free(riak_query_result *res);
+
+/** Size of an AAE tree. */
+typedef enum {
+    RIAK_AAE_XXSMALL = 0, /**< Extra extra small (16 branches). */
+    RIAK_AAE_XSMALL,      /**< Extra small. */
+    RIAK_AAE_SMALL,       /**< Small. */
+    RIAK_AAE_MEDIUM,      /**< Medium. */
+    RIAK_AAE_LARGE,       /**< Large (the cached n_val trees). */
+    RIAK_AAE_XLARGE       /**< Extra large. */
+} riak_aae_tree_size;
+
+/** Selection of an AAE range fold (Riak 2.9+, tictac AAE active). */
+typedef struct {
+    const char *bucket_type;  /**< Bucket type; NULL selects "default". */
+    const char *bucket;       /**< Bucket; required. */
+    const char *start_key;    /**< Key range start; NULL with #end_key NULL: every key. */
+    const char *end_key;      /**< Key range end (inclusive). */
+    const uint32_t *segments; /**< Segment filter; NULL: every segment. */
+    size_t n_segments;        /**< Number of entries in #segments. */
+    riak_aae_tree_size segment_tree_size; /**< Tree size the segment ids refer to. */
+    uint32_t modified_start; /**< Last-modified range start (Unix seconds); with #modified_end. */
+    uint32_t modified_end;   /**< Last-modified range end; 0 (with start 0): no range. */
+    /** riak_aae_merge_range(): clocks are hashed again with #hash_iv as
+     *  initialisation vector, instead of using the stored hashes (avoids
+     *  collisions when comparing clusters). */
+    bool use_hash_iv;
+    uint32_t hash_iv; /**< Initialisation vector for #use_hash_iv. */
+} riak_aae_filter;
+
+/** One level-two segment block of an AAE tree, uncompressed. */
+typedef struct {
+    uint32_t id;   /**< Branch id. */
+    uint8_t *data; /**< Segment hashes. */
+    size_t len;    /**< Length of #data. */
+} riak_aae_branch;
+
+/** An AAE tree or part of one; released with riak_aae_tree_free(). */
+typedef struct {
+    riak_aae_tree_size size;   /**< Size of the tree. */
+    uint8_t *level1;           /**< Level-one hashes; NULL for branch results. */
+    size_t level1_len;         /**< Length of #level1. */
+    riak_aae_branch *branches; /**< Level-two blocks. */
+    size_t n_branches;         /**< Number of entries in #branches. */
+} riak_aae_tree;
+
+/** A key with its vector clock, as returned by clock folds. */
+typedef struct {
+    char *bucket_type; /**< Bucket type; NULL for the default type. */
+    char *bucket;      /**< Bucket. */
+    char *key;         /**< Key. */
+    char *vclock;      /**< Vector clock, base64 as in riak_object::vclock. */
+} riak_aae_key_clock;
+
+/** Keys and clocks; released with riak_aae_keys_free(). */
+typedef struct {
+    riak_aae_key_clock *items; /**< The keys. */
+    size_t count;              /**< Number of keys. */
+} riak_aae_keys;
+
+/** A key and the number reported for it by riak_aae_find_keys(). */
+typedef struct {
+    char *key;      /**< Key. */
+    uint64_t value; /**< Sibling count or object size. */
+} riak_aae_key_count;
+
+/** Result of riak_aae_find_keys(); released with riak_aae_key_counts_free(). */
+typedef struct {
+    riak_aae_key_count *items; /**< The keys. */
+    size_t count;              /**< Number of keys. */
+} riak_aae_key_counts;
+
+/** One bucket of a histogram in ::riak_aae_stats. */
+typedef struct {
+    uint32_t order; /**< Order of magnitude (sizes) or sibling count. */
+    uint64_t count; /**< Objects in this bucket. */
+} riak_aae_histogram;
+
+/** Result of riak_aae_object_stats(); released with riak_aae_stats_free(). */
+typedef struct {
+    uint64_t total_count;         /**< Objects in the range. */
+    uint64_t total_size;          /**< Their total size in bytes. */
+    riak_aae_histogram *sizes;    /**< Objects per order of magnitude of size. */
+    size_t n_sizes;               /**< Entries in #sizes. */
+    riak_aae_histogram *siblings; /**< Objects per sibling count. */
+    size_t n_siblings;            /**< Entries in #siblings. */
+} riak_aae_stats;
+
+/** What riak_aae_find_keys() reports. */
+typedef enum {
+    RIAK_AAE_SIBLING_COUNT = 0, /**< Keys with more siblings than the limit. */
+    RIAK_AAE_OBJECT_SIZE        /**< Keys larger than the limit (bytes). */
+} riak_aae_find;
+
+/** How riak_aae_reap_tombs() and riak_aae_erase_keys() act. */
+typedef enum {
+    RIAK_AAE_COUNT = 0, /**< Nothing is changed; the matching keys are counted. */
+    RIAK_AAE_LOCAL,     /**< Each node's own reaper/eraser queue does the work. */
+    RIAK_AAE_JOB        /**< A dedicated worker on the coordinating node (see job id). */
+} riak_aae_change;
+
+/** Bucket listed by riak_aae_list_buckets(). */
+typedef struct {
+    char *bucket_type; /**< Bucket type; NULL for the default type. */
+    char *bucket;      /**< Bucket. */
+} riak_aae_bucket;
+
+/** Result of riak_aae_list_buckets(); released with riak_aae_buckets_free(). */
+typedef struct {
+    riak_aae_bucket *items; /**< The buckets. */
+    size_t count;           /**< Number of buckets. */
+} riak_aae_buckets;
+
+/**
+ * Root (level one) of the cached AAE tree of an n_val (Riak 2.9+).
+ * @param client Client handle.
+ * @param n_val The n_val.
+ * @param out Receives the tree; released with riak_aae_tree_free().
+ */
+RIAK_API riak_status riak_aae_merge_root(riak_client *client, unsigned n_val, riak_aae_tree *out);
+/**
+ * Branches (level two) of the cached AAE tree of an n_val.
+ * @param client Client handle.
+ * @param n_val The n_val.
+ * @param ids Branch ids.
+ * @param n_ids Number of ids.
+ * @param out Receives the branches; released with riak_aae_tree_free().
+ */
+RIAK_API riak_status riak_aae_merge_branches(riak_client *client, unsigned n_val,
+                                             const uint32_t *ids, size_t n_ids, riak_aae_tree *out);
+/**
+ * Keys and clocks in segments of the cached AAE tree of an n_val.
+ * @param client Client handle.
+ * @param n_val The n_val.
+ * @param segments Segment ids.
+ * @param n_segments Number of ids.
+ * @param out Receives the keys; released with riak_aae_keys_free().
+ */
+RIAK_API riak_status riak_aae_fetch_clocks_nval(riak_client *client, unsigned n_val,
+                                                const uint32_t *segments, size_t n_segments,
+                                                riak_aae_keys *out);
+/**
+ * AAE tree of a range, built on demand.
+ * @param client Client handle.
+ * @param f The range.
+ * @param size Size of the tree to build.
+ * @param out Receives the tree; released with riak_aae_tree_free().
+ */
+RIAK_API riak_status riak_aae_merge_range(riak_client *client, const riak_aae_filter *f,
+                                          riak_aae_tree_size size, riak_aae_tree *out);
+/**
+ * Keys and clocks of a range.
+ * @param client Client handle.
+ * @param f The range.
+ * @param out Receives the keys; released with riak_aae_keys_free().
+ */
+RIAK_API riak_status riak_aae_fetch_clocks_range(riak_client *client, const riak_aae_filter *f,
+                                                 riak_aae_keys *out);
+/**
+ * Keys of a range with more siblings, or larger, than @p limit.
+ * @param client Client handle.
+ * @param f The range.
+ * @param what Siblings or size.
+ * @param limit The threshold.
+ * @param out Receives the keys; released with riak_aae_key_counts_free().
+ */
+RIAK_API riak_status riak_aae_find_keys(riak_client *client, const riak_aae_filter *f,
+                                        riak_aae_find what, uint32_t limit,
+                                        riak_aae_key_counts *out);
+/**
+ * Object count, total size and size and sibling histograms of a range.
+ * @param client Client handle.
+ * @param f The range.
+ * @param out Receives the statistics; released with riak_aae_stats_free().
+ */
+RIAK_API riak_status riak_aae_object_stats(riak_client *client, const riak_aae_filter *f,
+                                           riak_aae_stats *out);
+/**
+ * Tombstones of a range, with their clocks.
+ * @param client Client handle.
+ * @param f The range.
+ * @param out Receives the keys; released with riak_aae_keys_free().
+ */
+RIAK_API riak_status riak_aae_find_tombs(riak_client *client, const riak_aae_filter *f,
+                                         riak_aae_keys *out);
+/**
+ * Reaps the tombstones of a range.
+ * @param client Client handle.
+ * @param f The range.
+ * @param how Count only, local queues, or a dedicated job.
+ * @param job_id Job id for ::RIAK_AAE_JOB.
+ * @param count Receives the number of tombstones counted or dispatched.
+ */
+RIAK_API riak_status riak_aae_reap_tombs(riak_client *client, const riak_aae_filter *f,
+                                         riak_aae_change how, uint32_t job_id, uint64_t *count);
+/**
+ * Deletes the keys of a range.
+ * @param client Client handle.
+ * @param f The range.
+ * @param how Count only, local queues, or a dedicated job.
+ * @param job_id Job id for ::RIAK_AAE_JOB.
+ * @param count Receives the number of keys counted or dispatched.
+ */
+RIAK_API riak_status riak_aae_erase_keys(riak_client *client, const riak_aae_filter *f,
+                                         riak_aae_change how, uint32_t job_id, uint64_t *count);
+/**
+ * Prompts read repair of the keys of a range.
+ * @param client Client handle.
+ * @param f The range.
+ * @param count Receives the number of keys dispatched.
+ */
+RIAK_API riak_status riak_aae_repair_keys(riak_client *client, const riak_aae_filter *f,
+                                          uint64_t *count);
+/**
+ * Queues the keys of a range for replication on a nextgenrepl queue.
+ * @param client Client handle.
+ * @param f The range.
+ * @param queue Queue name.
+ * @param count Receives the number of keys queued.
+ */
+RIAK_API riak_status riak_aae_repl_keys(riak_client *client, const riak_aae_filter *f,
+                                        const char *queue, uint64_t *count);
+/**
+ * Buckets with objects of an n_val, found through AAE (cheaper than
+ * riak_list_buckets()).
+ * @param client Client handle.
+ * @param n_val The n_val.
+ * @param out Receives the buckets; released with riak_aae_buckets_free().
+ */
+RIAK_API riak_status riak_aae_list_buckets(riak_client *client, unsigned n_val,
+                                           riak_aae_buckets *out);
+
+/** Frees a ::riak_aae_tree; NULL is accepted. @param t Tree to clear. */
+RIAK_API void riak_aae_tree_free(riak_aae_tree *t);
+/** Frees a ::riak_aae_keys; NULL is accepted. @param k Keys to clear. */
+RIAK_API void riak_aae_keys_free(riak_aae_keys *k);
+/** Frees a ::riak_aae_key_counts; NULL is accepted. @param k Keys to clear. */
+RIAK_API void riak_aae_key_counts_free(riak_aae_key_counts *k);
+/** Frees a ::riak_aae_stats; NULL is accepted. @param s Statistics to clear. */
+RIAK_API void riak_aae_stats_free(riak_aae_stats *s);
+/** Frees a ::riak_aae_buckets; NULL is accepted. @param b Buckets to clear. */
+RIAK_API void riak_aae_buckets_free(riak_aae_buckets *b);
+
+/** Result of riak_repl_fetch(); released with riak_repl_fetch_result_free(). */
+typedef struct {
+    bool queue_empty;      /**< Nothing was waiting on the queue. */
+    bool deleted;          /**< The change is a deletion. */
+    uint8_t *object;       /**< The replicated object in Riak's internal encoding. */
+    size_t object_len;     /**< Length of #object. */
+    char *deleted_vclock;  /**< Vector clock of a deletion (base64); NULL otherwise. */
+    bool has_crc;          /**< #crc is set. */
+    uint32_t crc;          /**< CRC32 of #object. */
+    uint32_t segment_id;   /**< AAE segment of the key. */
+    uint32_t segment_hash; /**< Hash of the key within the segment. */
+} riak_repl_fetch_result;
+
+/**
+ * Takes the next change from a nextgenrepl queue (Riak 2.9+).
+ * @param client Client handle.
+ * @param queue Queue name.
+ * @param out Receives the change; released with riak_repl_fetch_result_free().
+ * @return ::RIAK_OK (riak_repl_fetch_result::queue_empty when nothing waits),
+ *         ::RIAK_E_NOT_FOUND when the queued key no longer exists (the entry
+ *         is taken off the queue; the next call continues), or another error.
+ */
+RIAK_API riak_status riak_repl_fetch(riak_client *client, const char *queue,
+                                     riak_repl_fetch_result *out);
+/**
+ * Frees a ::riak_repl_fetch_result; NULL is accepted.
+ * @param r Result to clear.
+ */
+RIAK_API void riak_repl_fetch_result_free(riak_repl_fetch_result *r);
+
+/** A key to queue with riak_repl_push(). */
+typedef struct {
+    const char *bucket_type; /**< Bucket type; NULL for the default type. */
+    const char *bucket;      /**< Bucket. */
+    const char *key;         /**< Key. */
+    const char *vclock;      /**< Vector clock (base64) of the version to replicate. */
+} riak_repl_key;
+
+/** Queue lengths reported by riak_repl_push(). */
+typedef struct {
+    bool queue_exists;        /**< The queue is defined on the node. */
+    uint32_t fold_length;     /**< Entries waiting from full-sync folds. */
+    uint32_t fsync_length;    /**< Entries waiting from full-sync. */
+    uint32_t realtime_length; /**< Entries waiting from real-time changes. */
+} riak_repl_push_result;
+
+/**
+ * Pushes keys onto a nextgenrepl queue (Protocol Buffers, Riak 2.9+).
+ * @param client Client handle.
+ * @param queue Queue name.
+ * @param keys The keys.
+ * @param n_keys Number of keys.
+ * @param out Receives the queue lengths; may be NULL.
+ */
+RIAK_API riak_status riak_repl_push(riak_client *client, const char *queue,
+                                    const riak_repl_key *keys, size_t n_keys,
+                                    riak_repl_push_result *out);
+
+/** A cluster member reported by riak_cluster_membership(). */
+typedef struct {
+    char *ip;      /**< Address. */
+    unsigned port; /**< Port. */
+} riak_member;
+
+/** Result of riak_cluster_membership(); released with riak_members_free(). */
+typedef struct {
+    riak_member *items; /**< The members that are up. */
+    size_t count;       /**< Number of members. */
+} riak_members;
+
+/**
+ * Nodes of the cluster that are up, as used by nextgenrepl sinks (Riak 3.0+).
+ * @param client Client handle.
+ * @param out Receives the members; released with riak_members_free().
+ */
+RIAK_API riak_status riak_cluster_membership(riak_client *client, riak_members *out);
+/**
+ * Frees a ::riak_members; NULL is accepted.
+ * @param m Members to clear.
+ */
+RIAK_API void riak_members_free(riak_members *m);
+
+/**
+ * Id of the cluster for riak_repl (Protocol Buffers).
+ * @param client Client handle.
+ * @param id Receives the id; released with riak_free().
+ */
+RIAK_API riak_status riak_get_cluster_id(riak_client *client, char **id);
+
+/**
+ * Get proxied by riak_repl for a cluster that receives replication from
+ * @p cluster_id (Protocol Buffers; the default bucket type only).
+ * @param client Client handle.
+ * @param cluster_id Id of the source cluster.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts r, pr, basic_quorum, notfound_ok, head, deletedvclock,
+ *        sloppy_quorum, n_val, if_modified + vclock; NULL selects the defaults.
+ * @param out Receives the object.
+ */
+RIAK_API riak_status riak_repl_get(riak_client *client, const char *cluster_id, const char *bucket,
+                                   const char *key, const riak_opts *opts, riak_object *out);
+
+/** @} */
+
 /** @defgroup async Asynchronous requests
  *  An async handle owns its own client (nodes, retries, hooks) and runs many
  *  requests concurrently on one thread. Callbacks run inside riak_async_run(),
@@ -909,19 +1647,53 @@ RIAK_API riak_status riak_dt_update(riak_client *client, const char *type, const
 /** Opaque async handle; created by riak_async_new(). */
 typedef struct riak_async riak_async;
 
-/** Outcome of an async request, passed to its ::riak_async_cb. */
+/** The request an ::riak_async_result belongs to. */
+typedef enum {
+    RIAK_ASYNC_PING = 0,         /**< riak_async_ping() */
+    RIAK_ASYNC_GET,              /**< riak_async_get(): #riak_async_result::object */
+    RIAK_ASYNC_PUT,              /**< riak_async_put(): object, created_key */
+    RIAK_ASYNC_DELETE,           /**< riak_async_delete() */
+    RIAK_ASYNC_GET_SIBLINGS,     /**< riak_async_get_siblings(): siblings */
+    RIAK_ASYNC_DT_FETCH,         /**< riak_async_dt_fetch(): datatype */
+    RIAK_ASYNC_DT_UPDATE,        /**< riak_async_dt_update(): datatype, created_key */
+    RIAK_ASYNC_COUNTER_GET,      /**< riak_async_counter_get(): counter */
+    RIAK_ASYNC_COUNTER_UPDATE,   /**< riak_async_counter_update(): counter */
+    RIAK_ASYNC_INDEX_QUERY,      /**< riak_async_index_query(): index */
+    RIAK_ASYNC_INDEX_STREAM,     /**< riak_async_index_query_stream(): continuation */
+    RIAK_ASYNC_SEARCH,           /**< riak_async_search(): search */
+    RIAK_ASYNC_MAPRED,           /**< riak_async_mapred(): json */
+    RIAK_ASYNC_MAPRED_STREAM,    /**< riak_async_mapred_stream() */
+    RIAK_ASYNC_GET_BUCKET_PROPS, /**< riak_async_get_bucket_props(): json */
+    RIAK_ASYNC_SET_BUCKET_PROPS, /**< riak_async_set_bucket_props() */
+    RIAK_ASYNC_LIST_KEYS,        /**< riak_async_list_keys_stream() */
+    RIAK_ASYNC_LIST_BUCKETS      /**< riak_async_list_buckets_stream() */
+} riak_async_kind;
+
+/**
+ * Outcome of an async request, passed to its ::riak_async_cb. The members
+ * that carry results are set according to #kind; the others are zero.
+ */
 typedef struct {
-    riak_status status; /**< Result of the request. */
-    long http_status;   /**< HTTP status; 0 when no response was received. */
-    const char *errmsg; /**< Error detail; valid only during the callback. */
-    riak_object object; /**< Get, and put with return_body: the object. */
-    char *created_key;  /**< Put with a NULL key: the generated key. */
+    riak_status status;        /**< Result of the request. */
+    long http_status;          /**< HTTP status; 0 when no response was received. */
+    const char *errmsg;        /**< Error detail; valid only during the callback. */
+    riak_object object;        /**< Get, and put with return_body: the object. */
+    char *created_key;         /**< Put or data type update with a NULL key: the generated key. */
+    riak_async_kind kind;      /**< The request this result belongs to. */
+    riak_object_set siblings;  /**< riak_async_get_siblings(): the siblings. */
+    riak_datatype datatype;    /**< Data type fetch, and update with return_body. */
+    riak_index_result index;   /**< riak_async_index_query(): one page of matches. */
+    riak_search_result search; /**< riak_async_search(): the documents. */
+    char *json;                /**< MapReduce result array, or bucket properties. */
+    int64_t counter;           /**< Legacy counter value. */
+    char *continuation;        /**< riak_async_index_query_stream(): next page, or NULL. */
 } riak_async_result;
 
 /**
- * Completion callback. riak_async_result::object and
- * riak_async_result::created_key may be kept by copying them and clearing the
- * originals; whatever remains is freed when the callback returns.
+ * Completion callback. The result members (#riak_async_result::object,
+ * siblings, datatype, index, search, json, created_key, continuation) may be
+ * kept by copying them and clearing the originals; whatever remains is freed
+ * when the callback returns.
  */
 typedef void (*riak_async_cb)(riak_async_result *res, void *ctx);
 
@@ -992,6 +1764,180 @@ RIAK_API riak_status riak_async_put(riak_async *a, const char *bucket, const cha
  */
 RIAK_API riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key,
                                        const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_get_siblings(); the result is riak_async_result::siblings.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options as for riak_get_siblings(); NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_get_siblings(riak_async *a, const char *bucket, const char *key,
+                                             const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_dt_fetch(); the result is riak_async_result::datatype.
+ * @param a Async handle.
+ * @param type Bucket type of the data type.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_dt_fetch(riak_async *a, const char *type, const char *bucket,
+                                         const char *key, const riak_dt_opts *opts,
+                                         riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_dt_update(); with return_body the value is
+ * riak_async_result::datatype, with a NULL key the key is
+ * riak_async_result::created_key. The operation is encoded on submission and
+ * may be freed afterwards.
+ * @param a Async handle.
+ * @param type Bucket type of the data type.
+ * @param bucket Bucket name.
+ * @param key Key; NULL lets Riak generate one.
+ * @param op Operation.
+ * @param context Context of a previous fetch, or NULL.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_dt_update(riak_async *a, const char *type, const char *bucket,
+                                          const char *key, const riak_dt_op *op,
+                                          const char *context, const riak_dt_opts *opts,
+                                          riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_counter_get(); the value is riak_async_result::counter.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_counter_get(riak_async *a, const char *bucket, const char *key,
+                                            const riak_opts *opts, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_counter_update(); the new value is riak_async_result::counter.
+ * Sent once: a lost answer is reported, not repeated.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param key Key.
+ * @param amount Increment (negative to decrement).
+ * @param opts Options; NULL selects the defaults.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_counter_update(riak_async *a, const char *bucket, const char *key,
+                                               int64_t amount, const riak_opts *opts,
+                                               riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_index_query_run(); the page is riak_async_result::index.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param q Query.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_index_query(riak_async *a, const char *bucket,
+                                            const riak_index_query *q, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_index_query_stream(): each match goes to item as it arrives,
+ * inside riak_async_run() or the loop hooks; returning false stops the
+ * stream. The continuation of a paged query is
+ * riak_async_result::continuation.
+ * @param a Async handle.
+ * @param bucket Bucket name.
+ * @param q Query.
+ * @param item Called for every match.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_index_query_stream(riak_async *a, const char *bucket,
+                                                   const riak_index_query *q, riak_index_cb item,
+                                                   void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_search(); the documents are riak_async_result::search.
+ * @param a Async handle.
+ * @param index Search index.
+ * @param q Query.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_search(riak_async *a, const char *index, const riak_search_query *q,
+                                       riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_mapred(); the result array is riak_async_result::json.
+ * @param a Async handle.
+ * @param job MapReduce job (JSON).
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_mapred(riak_async *a, const char *job, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_mapred_stream(): each phase result goes to item as it
+ * arrives; returning false stops the stream.
+ * @param a Async handle.
+ * @param job MapReduce job (JSON).
+ * @param item Called for every phase result.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_mapred_stream(riak_async *a, const char *job, riak_mapred_cb item,
+                                              void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_type_get_bucket_props(); the document is
+ * riak_async_result::json.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_get_bucket_props(riak_async *a, const char *type,
+                                                 const char *bucket, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_type_set_bucket_props().
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param json Properties document `{"props":{...}}`.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_set_bucket_props(riak_async *a, const char *type,
+                                                 const char *bucket, const char *json,
+                                                 riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_list_keys_stream(): each key goes to item as it arrives;
+ * returning false stops the listing.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param bucket Bucket name.
+ * @param item Called for every key.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_list_keys_stream(riak_async *a, const char *type,
+                                                 const char *bucket, riak_name_cb item,
+                                                 void *item_ctx, riak_async_cb cb, void *ctx);
+/**
+ * Submits riak_list_buckets_stream(): each bucket name goes to item as it
+ * arrives; returning false stops the listing.
+ * @param a Async handle.
+ * @param type Bucket type; NULL selects "default".
+ * @param item Called for every bucket.
+ * @param item_ctx Passed to item.
+ * @param cb Completion callback.
+ * @param ctx Passed to cb.
+ */
+RIAK_API riak_status riak_async_list_buckets_stream(riak_async *a, const char *type,
+                                                    riak_name_cb item, void *item_ctx,
+                                                    riak_async_cb cb, void *ctx);
 
 /**
  * Built-in event loop: requests are processed until none is pending or

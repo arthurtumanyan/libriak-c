@@ -37,8 +37,19 @@ struct riak_client {
     char *cert_file, *key_file, *key_password;
     riak_config cfg; /* string members point at the copies above */
     long http_status;
+    bool busy; /* a blocking request is running: callbacks cannot start another */
     char errmsg[512];
+    struct riak_pb_state *pb; /* Protocol Buffers transport state */
 };
+
+/* A callback (a streamed name, key, object or MapReduce result) that calls
+ * back into the client running it would reuse the connection and buffers of
+ * the request in progress; such a call is refused instead. */
+#define RIAK_CLIENT_BUSY_MSG "the client is busy: a callback cannot use the client running it"
+
+static inline bool riak_is_pb(const riak_client *c) {
+    return c->cfg.transport == RIAK_TRANSPORT_PB;
+}
 
 /* Data sink for a response body; return false to abort the transfer with
  * the status stored in *abort_status. */
@@ -54,6 +65,7 @@ typedef struct {
     void *sink_ctx;
     bool unbounded; /* sink does not accumulate: skip the max_body_bytes cap */
     size_t pin;     /* 0: choose a node and retry; i + 1: only node i, no retries */
+    bool no_retry;  /* not repeated after it may have reached a node, whatever the method */
 } riak_request;
 
 typedef struct {
@@ -65,7 +77,19 @@ typedef struct {
 /* Monotonic clock in milliseconds. */
 long long riak_now_ms(void);
 
-riak_status riak_set_error(riak_client *c, riak_status st, const char *fmt, ...) RIAK_PRINTF(3, 4);
+/* The client's error message is set; always 0. */
+int riak_format_error(riak_client *c, const char *fmt, ...) RIAK_PRINTF(2, 3);
+
+static inline riak_status riak_error_status(riak_status st, int recorded) {
+    (void)recorded;
+    return st;
+}
+
+/* The error message is recorded and `st` returned. A macro rather than a
+ * function, so the compiler and static analysis see which status an error
+ * path returns. `st` is evaluated twice: only constants and plain variables
+ * are passed. */
+#define riak_set_error(c, st, ...) riak_error_status((st), riak_format_error((c), __VA_ARGS__))
 void riak_clear_error(riak_client *c);
 
 /* "<base>[types/<type>/]buckets/<bucket>[/<suffix>[/<key>]]", escaped. */
@@ -116,6 +140,89 @@ riak_status riak_kv_prepare_delete(riak_client *c, const char *bucket, const cha
 riak_status riak_kv_finish_delete(riak_client *c, riak_response *resp);
 riak_status riak_prepare_ping(riak_client *c, riak_prepared *p);
 riak_status riak_finish_ping(riak_client *c, riak_response *resp);
+riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const char *key,
+                                     const riak_opts *o, riak_prepared *p);
+riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out);
+riak_status riak_dt_http_prepare_fetch(riak_client *c, const char *type, const char *bucket,
+                                       const char *key, const riak_dt_opts *o, riak_prepared *p);
+riak_status riak_dt_http_finish_fetch(riak_client *c, riak_response *resp, riak_datatype *out);
+riak_status riak_dt_http_prepare_update(riak_client *c, const char *type, const char *bucket,
+                                        const char *key, const riak_dt_op *op, const char *context,
+                                        const riak_dt_opts *o, riak_prepared *p);
+/* generated_key: the request had no key and the server chose one */
+riak_status riak_dt_http_finish_update(riak_client *c, riak_response *resp, bool generated_key,
+                                       riak_datatype *out, char **created_key);
+riak_status riak_counter_http_prepare(riak_client *c, const char *bucket, const char *key,
+                                      bool update, int64_t amount, const riak_opts *o,
+                                      bool want_value, riak_prepared *p);
+riak_status riak_counter_http_finish(riak_client *c, riak_response *resp, int64_t *value);
+
+/* Body of a 200 response (kind as for riak_get_body()), taken out of resp. */
+riak_status riak_body_take(riak_client *c, riak_response *resp, int kind, char **body);
+
+/* Streams: a 200 multipart/mixed body split into JSON parts as it arrives;
+ * fn returning false stops the stream. */
+typedef bool (*riak_chunk_fn)(void *ctx, const char *json, size_t len, riak_status *err);
+typedef struct {
+    riak_client *c;
+    riak_response *resp; /* the response being received */
+    struct riak_mpstream *mp;
+    riak_chunk_fn fn;
+    void *ctx;
+    bool stopped; /* fn asked to stop: the rest is ignored */
+} riak_http_stream;
+bool riak_http_stream_sink(void *ctx, const char *data, size_t len, riak_status *err);
+/* req delivers its body to s. */
+void riak_http_stream_attach(riak_http_stream *s, riak_request *req);
+/* The outcome of the request (st) once it ended; frees the parser. */
+riak_status riak_http_stream_end(riak_http_stream *s, riak_status st);
+
+riak_status riak_index_http_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
+                                    bool stream, riak_prepared *p);
+riak_status riak_index_http_finish(riak_client *c, riak_response *resp, bool want_terms,
+                                   riak_index_result *out);
+typedef struct {
+    riak_index_cb cb;
+    void *ctx;
+    char **continuation;
+} riak_index_stream;
+/* Matches collected into a result page (riak_index_query_run()). */
+typedef struct {
+    riak_strlist keys, terms;
+    size_t kcap, tcap;
+    bool want_terms;
+    bool nomem;
+} riak_index_acc;
+bool riak_index_acc_add(const char *key, const char *term, void *ctx);
+riak_status riak_index_acc_take(riak_index_acc *acc, riak_index_result *out);
+bool riak_index_chunk(void *ctx, const char *json, size_t len, riak_status *err);
+riak_status riak_search_http_prepare(riak_client *c, const char *index, const riak_search_query *q,
+                                     riak_prepared *p);
+riak_status riak_search_http_finish(riak_client *c, riak_response *resp, riak_search_result *out);
+riak_status riak_mapred_http_prepare(riak_client *c, const char *job, bool chunked,
+                                     riak_prepared *p);
+riak_status riak_mapred_http_finish(riak_client *c, riak_response *resp, char **result);
+typedef struct {
+    riak_mapred_cb cb;
+    void *ctx;
+} riak_mapred_stream_ctx;
+bool riak_mapred_chunk(void *ctx, const char *json, size_t len, riak_status *err);
+/* GET (json NULL) or PUT of a bucket's properties. */
+riak_status riak_props_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                    const char *json, riak_prepared *p);
+riak_status riak_props_http_finish_set(riak_client *c, riak_response *resp);
+/* Streamed listings: the keys of bucket, or the buckets when it is NULL. */
+typedef struct {
+    struct riak_keystream *ks;
+    riak_name_cb cb;
+    void *ctx;
+    bool stopped;
+} riak_name_stream;
+riak_status riak_list_http_prepare(riak_client *c, const char *type, const char *bucket,
+                                   riak_name_stream *s, riak_prepared *p);
+/* The outcome of the listing (st) once it ended; frees the parser. */
+riak_status riak_list_http_end(riak_client *c, riak_name_stream *s, riak_status st,
+                               riak_response *resp);
 
 /* ---- one attempt on one easy handle (shared by sync and async) ---- */
 
@@ -146,15 +253,63 @@ riak_status riak_attempt_setup(riak_attempt *a, riak_client *c, CURL *h, size_t 
 /* The outcome of a finished transfer is collected: status, error message, node
  * health, metrics and log; *retry says what a further attempt may do. */
 riak_status riak_attempt_finish(riak_attempt *a, CURLcode rc, enum riak_retry *retry);
+/* Appended to handshake failures that an old Erlang/OTP TLS server causes. */
+#define LEGACY_HINT " (nodes on an old Erlang/OTP, such as Riak KV 2.2, need tls_legacy)"
+
+/* The settings of riak_config::tls_legacy are applied to an OpenSSL SSL_CTX
+ * (passed as void * so this header needs no OpenSSL include); 0 on success. */
+int riak_tls_legacy_ctx(void *ssl_ctx);
+
+/* HTTP-only requests (statistics, Query API): *pin is 0 over HTTP, or under
+ * Protocol Buffers the first node with an HTTP port (+1); RIAK_E_UNSUPPORTED
+ * when no node has one. */
+riak_status riak_http_target(riak_client *c, const char *what, size_t *pin);
+
+/* A request to an endpoint of newer Riak releases failed with Webmachine's
+ * own 404 page (no resource matches the path, as opposed to Riak's plain
+ * "not found"): RIAK_E_UNSUPPORTED is recorded, naming `what`. Otherwise the
+ * status is mapped by riak_http_error(). */
+riak_status riak_http_error_or_unsupported(riak_client *c, const riak_response *resp,
+                                           const char *what);
+/* The response is Webmachine's own 404 page: no resource matches the path. */
+bool riak_http_no_resource(const riak_response *resp);
+
+/* Whether an HTTP request may be repeated (GET, PUT, DELETE). */
+bool riak_request_idempotent(const riak_request *req);
+
+/* ---- cluster behavior shared by every transport (cluster.c) ---- */
+
 /* Whether another attempt is allowed after one that returned `retry`. */
-bool riak_retry_allowed(const riak_client *c, const riak_request *req, enum riak_retry retry,
+bool riak_retry_allowed(const riak_client *c, bool idempotent, enum riak_retry retry,
                         unsigned attempts_done);
 /* Next node (SIZE_MAX: first attempt of a request). */
 size_t riak_pick_node(riak_client *c, size_t after);
 /* Backoff before attempt number `attempt` + 1, in milliseconds. */
 long long riak_backoff_ms(riak_client *c, unsigned attempt);
+/* The health of a node is updated after an attempt; failures may eject it. */
+void riak_node_result(riak_client *c, size_t node, bool ok);
 /* Prefix the current error message with the node of the last attempt. */
 void riak_error_add_node(riak_client *c, riak_status st);
+void riak_sleep_ms(long long ms);
+
+/* Outcome of one attempt, passed to riak_attempt_report(). */
+typedef struct {
+    const char *method; /* HTTP method or protocol message name */
+    const char *path;
+    size_t node;
+    unsigned attempt;
+    riak_status status;
+    long http_status;
+    long long started_ms;
+    size_t received;
+    enum riak_retry retry;
+    bool will_retry;
+    const char *failure; /* logged when status is RIAK_OK but the attempt failed */
+    riak_transport transport;
+} riak_attempt_info;
+
+/* The metrics callback is run and a failed attempt is logged. */
+void riak_attempt_report(riak_client *c, const riak_attempt_info *info);
 
 void riak_log(riak_client *c, riak_log_level level, const char *fmt, ...) RIAK_PRINTF(3, 4);
 void riak_response_free(riak_response *resp);
