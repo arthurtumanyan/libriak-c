@@ -73,6 +73,67 @@ static const rc_cmd commands[] = {
      "  -t, --type TYPE     restore into this bucket type instead of the backup's\n"
      "  -b, --bucket NAME   restore into this bucket instead of the backup's\n"
      "  -n, --dry-run       only report what would be written\n"},
+    {"index", rc_cmd_index, "[options] BUCKET INDEX VALUE | BUCKET INDEX MIN MAX",
+     "Secondary index query (exact match or range). Matches are streamed as JSON\n"
+     "Lines: a key string, or {\"key\", \"term\"} with --terms. With --max one\n"
+     "page is printed as {\"results\": [...], \"continuation\": ...}.",
+     "  -t, --type TYPE        bucket type\n"
+     "      --max N            page size\n"
+     "      --continuation C   continuation of the previous page\n"
+     "      --terms            range queries: the matching terms too\n"
+     "      --regex RE         range queries: terms filtered by RE\n"
+     "      --sort             sorted results without --max\n"
+     "      --timeout MS       server-side timeout\n"
+     "      --cover CONTEXT    one coverage plan entry (see coverage)\n"},
+    {"query", rc_cmd_query, "[options] BUCKET INDEX | --request FILE BUCKET",
+     "Query API request (Riak 3.4+). One index query is given with flags, any\n"
+     "request with a JSON document: {\"parts\": [{\"index\", \"start\", \"end\",\n"
+     "\"eval\", \"filter\", \"regex\", \"tag\"}], \"aggregation\", \"accumulate\",\n"
+     "\"term\", \"substitutions\": {...}, \"max_results\", \"continuation\",\n"
+     "\"timeout\"}. The response is printed as returned; queue accumulations\n"
+     "(queue_raw_keys, queue_raw_terms) are fetched to the end as JSON Lines.",
+     "  -t, --type TYPE        bucket type\n"
+     "      --request FILE     request document (- for stdin)\n"
+     "      --start T, --end T term range of the index query\n"
+     "      --eval EXPR        evaluation expression\n"
+     "      --filter EXPR      filter expression\n"
+     "      --regex RE         regular expression on the terms\n"
+     "      --accumulate OPT   keys (default), raw_keys, terms, count, raw_count, ...\n"
+     "      --term NAME        attribute accumulated by the term options\n"
+     "      --sub NAME=VALUE   substitution for :NAME (repeatable)\n"
+     "      --max N            page or batch size\n"
+     "      --continuation C   continuation of the previous page\n"
+     "      --timeout S        server-side timeout in seconds\n"},
+    {"mapred", rc_cmd_mapred, "[--collect] [FILE]",
+     "Runs a MapReduce job (JSON, from FILE or stdin). Phase results are streamed\n"
+     "as JSON Lines {\"phase\": N, \"data\": ...}; --collect prints the whole result.",
+     NULL},
+    {"coverage", rc_cmd_coverage, "[-t TYPE] [--min N] BUCKET",
+     "Coverage plan of a bucket (Protocol Buffers), for parallel index queries.", NULL},
+    {"preflist", rc_cmd_preflist, "[-t TYPE] BUCKET KEY",
+     "Preference list (vnodes holding the replicas) of a key (Protocol Buffers).", NULL},
+    {"dt", rc_cmd_dt, "-t TYPE ACTION ...",
+     "Data types (CRDTs) in a bucket type with a datatype property.\n"
+     "  dt get BUCKET KEY               value and context as JSON\n"
+     "  dt incr|decr BUCKET KEY [N]     counter\n"
+     "  dt add|remove BUCKET KEY ELEM...  set, grow-only set, HyperLogLog\n"
+     "  dt update BUCKET [KEY|-] [FILE] operation document (stdin by default);\n"
+     "                                  without KEY a key is generated\n"
+     "Operation documents: a number for counters, {\"add\": [...], \"remove\":\n"
+     "[...]} for sets, {\"<field>_<type>\": operation, \"remove\": [\"<field>_<type>\"]}\n"
+     "for maps (counter: number, register: string, flag: boolean, set and map:\n"
+     "nested operation).",
+     "  -t, --type TYPE      bucket type (required)\n"
+     "      --context CTX    causal context for removals (fetched when absent)\n"
+     "      --return-body    prints the new value\n"},
+    {"counter", rc_cmd_counter, "get|incr|decr BUCKET KEY [N]",
+     "Riak 1.4 counters (allow_mult buckets of the default type).", NULL},
+    {"props", rc_cmd_props, "[-t TYPE] ACTION NAME [JSON|-]",
+     "Bucket and bucket type properties, as {\"props\": {...}} documents.\n"
+     "  props get BUCKET | props set BUCKET [JSON|-] | props reset BUCKET\n"
+     "  props type-get TYPE | props type-set TYPE [JSON|-]\n"
+     "Bucket types themselves are created and activated with riak admin.",
+     NULL},
 };
 
 const rc_cmd *rc_find_cmd(const char *name) {

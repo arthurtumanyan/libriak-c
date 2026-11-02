@@ -225,26 +225,6 @@ static bool method_unavailable(riak_status st) {
            st == RIAK_E_NOT_FOUND;
 }
 
-static char *bucket_datatype(riak_client *c, const char *type, const char *bucket,
-                             riak_status *st) {
-    char *json = NULL;
-    *st = riak_type_get_bucket_props(c, type, bucket, &json);
-    if (*st != RIAK_OK) {
-        return NULL;
-    }
-    json_object *o = json_tokener_parse(json);
-    riak_free(json);
-    json_object *props, *dt;
-    char *name = NULL;
-    if (o && json_object_object_get_ex(o, "props", &props) &&
-        json_object_object_get_ex(props, "datatype", &dt) &&
-        json_object_is_type(dt, json_type_string)) {
-        name = strdup(json_object_get_string(dt));
-    }
-    json_object_put(o);
-    return name;
-}
-
 int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
     static const struct option opts[] = {{"type", required_argument, NULL, 't'},
                                          {"output", required_argument, NULL, 'o'},
@@ -287,7 +267,7 @@ int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
     }
     bk_ctx b = {.x = x, .bucket = argv[optind]};
     riak_status st;
-    char *datatype = bucket_datatype(c, x->type, b.bucket, &st);
+    char *datatype = rc_bucket_datatype(c, x->type, b.bucket, &st);
     if (st != RIAK_OK) {
         return rc_fail(c, "bucket properties", st);
     }

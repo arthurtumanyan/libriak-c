@@ -1,7 +1,10 @@
 add_executable(riakctl
   args.c
   cmd_backup.c
+  cmd_dt.c
   cmd_kv.c
+  cmd_props.c
+  cmd_query.c
   conn.c
   main.c
   out.c)

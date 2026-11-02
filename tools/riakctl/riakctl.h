@@ -109,6 +109,18 @@ int rc_cmd_delete(rc_ctx *x, int argc, char **argv);
 int rc_cmd_list(rc_ctx *x, int argc, char **argv);
 int rc_cmd_backup(rc_ctx *x, int argc, char **argv);
 int rc_cmd_restore(rc_ctx *x, int argc, char **argv);
+int rc_cmd_index(rc_ctx *x, int argc, char **argv);
+int rc_cmd_query(rc_ctx *x, int argc, char **argv);
+int rc_cmd_mapred(rc_ctx *x, int argc, char **argv);
+int rc_cmd_coverage(rc_ctx *x, int argc, char **argv);
+int rc_cmd_preflist(rc_ctx *x, int argc, char **argv);
+int rc_cmd_dt(rc_ctx *x, int argc, char **argv);
+int rc_cmd_counter(rc_ctx *x, int argc, char **argv);
+int rc_cmd_props(rc_ctx *x, int argc, char **argv);
+
+/* cmd_dt.c: the datatype property of a bucket (or, with bucket NULL, of a
+ * bucket type); NULL when it has none or on failure (*st is set). */
+char *rc_bucket_datatype(riak_client *c, const char *type, const char *bucket, riak_status *st);
 
 const rc_cmd *rc_find_cmd(const char *name);
 
