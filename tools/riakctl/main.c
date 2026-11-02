@@ -134,6 +134,50 @@ static const rc_cmd commands[] = {
      "  props type-get TYPE | props type-set TYPE [JSON|-]\n"
      "Bucket types themselves are created and activated with riak admin.",
      NULL},
+    {"search", rc_cmd_search, "ACTION ...",
+     "Riak Search (Solr): queries, indexes and schemas (Riak 2.x only).\n"
+     "  search query INDEX QUERY        matching documents as JSON\n"
+     "  search index-list | index-get NAME | index-create NAME | index-delete NAME\n"
+     "  search schema-get NAME | schema-put NAME [FILE]  (XML, stdin by default)",
+     "      --filter FQ, --sort S, --fields F, --df FIELD, --op AND|OR\n"
+     "      --start N, --rows N   paging\n"
+     "      --raw                 the Solr response as returned\n"
+     "      --schema NAME         index-create: schema (default _yz_default)\n"
+     "      --n-val N             index-create: replica count\n"},
+    {"aae", rc_cmd_aae, "[options] ACTION ...",
+     "AAE folds (Riak 2.9+, tictac AAE). On the cached n_val trees:\n"
+     "  aae root NVAL | aae branches NVAL ID... | aae clocks NVAL SEGMENT...\n"
+     "  aae buckets NVAL                 buckets holding objects of that n_val\n"
+     "On a bucket range (the filter options below):\n"
+     "  aae tree BUCKET [--size S]       range tree\n"
+     "  aae keys BUCKET                  keys and vector clocks (JSON Lines)\n"
+     "  aae find BUCKET --siblings N | --object-size BYTES\n"
+     "  aae stats BUCKET                 object count, size and sibling histograms\n"
+     "  aae tombs BUCKET                 tombstones\n"
+     "  aae reap BUCKET | aae erase BUCKET  count only, unless --local or --job ID\n"
+     "  aae repair BUCKET                read repair of the range\n"
+     "  aae repl BUCKET QUEUE            queues the range for nextgenrepl\n"
+     "  aae compare BUCKET --peer URL | --peer-bucket NAME\n"
+     "                                   keys whose clocks differ (JSON Lines)",
+     "  -t, --type TYPE           bucket type\n"
+     "      --start-key K, --end-key K  key range\n"
+     "      --segments A,B,...    segment filter, ids of --tree-size\n"
+     "      --tree-size S         xxsmall, xsmall, small, medium, large, xlarge\n"
+     "      --modified-start T, --modified-end T  last-modified range (Unix seconds)\n"
+     "      --hash-iv N           tree: clocks rehashed with this IV\n"
+     "      --size S              tree and compare: tree size (default small)\n"
+     "      --local | --job ID    reap and erase: actually change data\n"
+     "      --peer URL            compare: the other cluster (same credentials)\n"
+     "      --peer-bucket NAME    compare: the other bucket\n"},
+    {"repl", rc_cmd_repl, "ACTION ...",
+     "Replication. nextgenrepl queues (Riak 2.9+):\n"
+     "  repl fetch QUEUE [--max N]   takes changes off the queue (JSON Lines)\n"
+     "  repl push QUEUE              queues keys read from stdin as JSON Lines\n"
+     "                               {\"type\", \"bucket\", \"key\", \"vclock\"}\n"
+     "                               (the output of aae keys)\n"
+     "  repl members                 cluster members (Riak 3.0+)\n"
+     "riak_repl: repl cluster-id | repl get CLUSTER_ID BUCKET KEY",
+     NULL},
 };
 
 const rc_cmd *rc_find_cmd(const char *name) {

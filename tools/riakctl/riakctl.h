@@ -117,6 +117,9 @@ int rc_cmd_preflist(rc_ctx *x, int argc, char **argv);
 int rc_cmd_dt(rc_ctx *x, int argc, char **argv);
 int rc_cmd_counter(rc_ctx *x, int argc, char **argv);
 int rc_cmd_props(rc_ctx *x, int argc, char **argv);
+int rc_cmd_search(rc_ctx *x, int argc, char **argv);
+int rc_cmd_aae(rc_ctx *x, int argc, char **argv);
+int rc_cmd_repl(rc_ctx *x, int argc, char **argv);
 
 /* cmd_dt.c: the datatype property of a bucket (or, with bucket NULL, of a
  * bucket type); NULL when it has none or on failure (*st is set). */
