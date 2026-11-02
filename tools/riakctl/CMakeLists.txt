@@ -1,4 +1,6 @@
-add_executable(riakctl
+# The sources except entry.c form a static library, linked by the riakctl
+# binary and by tests/test_riakctl.c.
+add_library(riakctl_core STATIC
   args.c
   cmd_aae.c
   cmd_backup.c
@@ -11,8 +13,16 @@ add_executable(riakctl
   conn.c
   main.c
   out.c)
-target_compile_definitions(riakctl PRIVATE _POSIX_C_SOURCE=200809L)
-target_link_libraries(riakctl PRIVATE riak json-c::json-c riak_warnings)
+target_include_directories(riakctl_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(riakctl_core PUBLIC _POSIX_C_SOURCE=200809L)
+target_link_libraries(riakctl_core PUBLIC riak json-c::json-c PRIVATE riak_warnings)
+# stricter than the library: implicit conversions are errors with RIAK_WERROR
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(riakctl_core PRIVATE -Wconversion -Wsign-conversion)
+endif()
+
+add_executable(riakctl entry.c)
+target_link_libraries(riakctl PRIVATE riakctl_core riak_warnings)
 install(TARGETS riakctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
 configure_file(riakctl.1.in ${CMAKE_CURRENT_BINARY_DIR}/riakctl.1 @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/riakctl.1

@@ -3,7 +3,8 @@
  SPDX-License-Identifier: GPL-3.0-or-later
 
  riakctl: command-line client for Riak KV built on libriak-c.
- Global options and environment variables, command dispatch and help.
+ Global options and environment variables, command dispatch and help;
+ main() itself is in entry.c, so that the tests can link everything else.
  */
 
 #include <stdlib.h>
@@ -423,7 +424,7 @@ static int run(rc_ctx *x, int argc, char **argv) {
     return cmd->fn(x, sub_argc, sub_argv);
 }
 
-int main(int argc, char **argv) {
+int rc_main(int argc, char **argv) {
     if (riak_global_init() != RIAK_OK) {
         fprintf(stderr, "riakctl: cannot initialize libcurl\n");
         return RC_ERROR;

@@ -123,6 +123,12 @@ endif()
 
 # riakctl: against the stub (no Riak needed) and, with RIAK_TEST_URL, the
 # demo workflow of examples/cli against a live node
+if(TARGET riakctl)
+  add_executable(test_riakctl test_riakctl.c)
+  target_link_libraries(test_riakctl PRIVATE riakctl_core riak_warnings)
+  add_test(NAME riakctl_unit COMMAND test_riakctl)
+  set_tests_properties(riakctl_unit PROPERTIES TIMEOUT 60)
+endif()
 if(TARGET riakctl AND Python3_Interpreter_FOUND)
   add_test(NAME riakctl_cli
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py

@@ -127,4 +127,7 @@ char *rc_bucket_datatype(riak_client *c, const char *type, const char *bucket, r
 
 const rc_cmd *rc_find_cmd(const char *name);
 
+/* main.c: the whole program; main() in entry.c calls it. */
+int rc_main(int argc, char **argv);
+
 #endif
