@@ -410,6 +410,9 @@ static int run(rc_ctx *x, int argc, char **argv) {
         fprintf(stderr, "riakctl: --user needs a password (RIAK_PASSWORD or --password-file)\n");
         return RC_USAGE;
     }
+    if (!cfg->tls_verify && cfg->tls) {
+        rc_warn("--insecure: the server certificate is not verified");
+    }
     if (cfg->tls_cert_file && cfg->tls_key_file == NULL) {
         cfg->tls_key_file = cfg->tls_cert_file;
     }

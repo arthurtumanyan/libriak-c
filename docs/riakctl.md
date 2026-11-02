@@ -71,8 +71,21 @@ and options take precedence over the environment:
 | `--pretty`, `--compact` | | JSON layout; indented by default on a terminal |
 | `-v`, `--verbose` | | Client log on stderr (every request) |
 
-Passwords are not accepted as options, so they do not show up in process
-listings or shell history:
+Security measures:
+
+- Passwords are not accepted as options, so they do not show up in process
+  listings or shell history. `--password-file` reads the first line of a
+  file and warns when the file can be read by other users; the password is
+  wiped from memory when riakctl exits. `RIAK_PASSWORD` is visible to
+  processes of the same user (`/proc/PID/environ`); the file is preferred.
+- Credentials are only sent over TLS (`pbs://`, `https://`); the
+  combination of a user with `pb://` or `http://` is refused.
+- Server certificates are verified against `--ca` or the system store;
+  `--insecure` disables this and prints a warning.
+- `backup -o FILE` creates the file with mode 0600 (and sets that mode on
+  an existing file), since a backup holds the whole bucket.
+
+
 
 ```sh
 export RIAK_URL=pbs://riak1:8087 RIAK_USER=ops RIAK_CA=/etc/riak/ca.pem

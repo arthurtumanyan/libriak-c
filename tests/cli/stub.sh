@@ -54,6 +54,15 @@ RIAK_PASSWORD=x expect 2 "$R" --user alice ping
 expect 2 "$R" put --w many b k
 expect 2 "$R" dt get b k
 
+# a password file readable by others is reported; the password is used
+printf 'secret\nsecond line\n' >"$work/pw"
+chmod 644 "$work/pw"
+expect 2 "$R" -u "http://127.0.0.1:${RIAK_TEST_PORT}" --user alice --password-file "$work/pw" ping
+check "password file permissions reported" grep -q 'can be read by other users' "$work/err"
+chmod 600 "$work/pw"
+expect 2 "$R" -u "http://127.0.0.1:${RIAK_TEST_PORT}" --user alice --password-file "$work/pw" ping
+check "no warning for a private password file" sh -c "! grep -q 'can be read by other users' '$work/err'"
+
 # ping: all three nodes, then one closed port
 expect 0 "$R" --compact ping
 check "three nodes up" [ "$(jq .up "$work/out")" -eq 3 ]
@@ -93,6 +102,7 @@ for i in 1 2 3; do
     printf 'v%s' "$i" | "$R" put -i "n_int=$i" -m "m=$i" src "k$i" || { echo "FAIL: put k$i" >&2; failures=$((failures + 1)); }
 done
 expect 0 "$R" backup --method keys -o "$work/b.jsonl" src
+check "backup file only readable by its owner" [ "$(stat -c %a "$work/b.jsonl")" = 600 ]
 check "backup trailer" [ "$(tail -n 1 "$work/b.jsonl" | jq .count)" -eq 3 ]
 expect 0 "$R" --compact restore -b dst "$work/b.jsonl"
 check "restored" [ "$(jq .restored "$work/out")" -eq 3 ]

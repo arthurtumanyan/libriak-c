@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "riakctl.h"
 
@@ -190,12 +191,21 @@ riak_client *rc_client(rc_ctx *x) {
 }
 
 char *rc_read_password_file(const char *path) {
+    struct stat sb;
+    if (stat(path, &sb) == 0 &&
+        ((unsigned)sb.st_mode & ((unsigned)S_IRWXG | (unsigned)S_IRWXO)) != 0) {
+        rc_warn("%s can be read by other users (chmod 600 is advised)", path);
+    }
     size_t len;
     char *s = rc_read_file(path, &len);
     if (s == NULL) {
         return NULL;
     }
-    /* the first line is the password */
-    s[strcspn(s, "\r\n")] = '\0';
+    /* the first line is the password; the rest of the file is wiped */
+    size_t end = strcspn(s, "\r\n");
+    volatile char *p = s + end;
+    for (size_t i = end; i < len; i++) {
+        *p++ = '\0';
+    }
     return s;
 }

@@ -11,11 +11,14 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "riakctl.h"
 
@@ -280,11 +283,20 @@ int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
     riak_server_info si = {0};
     riak_get_server_info(c, &si);
 
-    if (output && freopen(output, "w", stdout) == NULL) {
+    /* a backup holds the whole bucket: only its owner may read it */
+    int fd = output ? open(output, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    if (output &&
+        (fd < 0 || fchmod(fd, 0600) != 0 || fflush(stdout) != 0 || dup2(fd, STDOUT_FILENO) < 0)) {
         fprintf(stderr, "riakctl: %s: %s\n", output, strerror(errno));
+        if (fd >= 0) {
+            (void)close(fd);
+        }
         free(datatype);
         riak_server_info_free(&si);
         return RC_ERROR;
+    }
+    if (fd >= 0) {
+        (void)close(fd); /* stdout holds it now */
     }
     char created[32];
     time_t now = time(NULL);
