@@ -1,0 +1,215 @@
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH RIAKCTL 1 "2026-11-02" "libriak-c @PROJECT_VERSION@" "User Commands"
+.SH NAME
+riakctl \- command-line client for Riak KV
+.SH SYNOPSIS
+.B riakctl
+.RI [ "global options" ]
+.I command
+.RI [ options ]
+.RI [ arguments ]
+.SH DESCRIPTION
+.B riakctl
+reaches Riak KV nodes over the network, through Protocol Buffers or HTTP,
+with TLS and Riak security, and makes their data and operational
+interfaces available to shell scripts: objects, listings, secondary
+indexes, the Query API, MapReduce, data types, bucket properties, Riak
+Search, AAE folds, nextgenrepl queues, statistics, and backups
+and restores. It is built on libriak-c and works with Riak KV 2.0 to 3.4.
+.PP
+Results are printed as JSON; listings, folds and streams as JSON Lines
+(one value per line), suited to
+.BR jq (1).
+Single JSON documents are indented when standard output is a terminal.
+Errors are reported on standard error and through the exit status.
+.PP
+Node operations (cluster membership changes, bucket type creation,
+security users and grants, transfers) are not available remotely in Riak;
+they remain with
+.BR "riak admin" .
+.SH GLOBAL OPTIONS
+Environment variables are given in brackets; options take precedence.
+.TP
+.BI "\-u, \-\-url " URLS
+Nodes, as
+.BR pb:// ,
+.B pbs://
+(Protocol Buffers with STARTTLS),
+.B http://
+or
+.B https://
+.IR host [: port ]
+entries separated by commas; all entries share one scheme and IPv6
+addresses are written in brackets [RIAK_URL]. Default:
+.BR pb://127.0.0.1:8087 .
+.TP
+.BI \-\-http\-port " PORT"
+HTTP port used for statistics and the Query API over Protocol Buffers
+[RIAK_HTTP_PORT]; default 8098 for pb://, none for pbs://.
+.TP
+.BI \-\-user " NAME"
+Riak security user [RIAK_USER]; needs pbs:// or https://.
+.TP
+.BI \-\-password\-file " FILE"
+File whose first line is the password. RIAK_PASSWORD holds the password
+itself. Passwords are not accepted on the command line.
+.TP
+.BI \-\-ca " FILE"
+CA bundle (PEM) for certificate verification [RIAK_CA].
+.TP
+.BI \-\-cert " FILE" ", \-\-key " FILE
+Client certificate and key (PEM) [RIAK_CERT, RIAK_KEY].
+.TP
+.B \-\-insecure
+The server certificate is not verified.
+.TP
+.B \-\-tls\-legacy
+Interoperability with the TLS stack of Riak 2.x [RIAK_TLS_LEGACY=1].
+.TP
+.BI \-\-timeout " MS" ", \-\-connect\-timeout " MS
+Whole-request timeout (default none) and connection timeout (default 5000).
+.TP
+.BI \-\-retries " N"
+Additional attempts after a failure (default 2).
+.TP
+.BI "\-t, \-\-type " TYPE
+Bucket type for the commands that take one; also accepted after the
+command name.
+.TP
+.BR \-\-pretty ", " \-\-compact
+Indented or single-line JSON documents.
+.TP
+.B \-v, \-\-verbose
+Client log on standard error.
+.TP
+.BR \-V ", " \-\-version ", " \-h ", " \-\-help
+.SH COMMANDS
+.B riakctl help
+.I command
+describes the options of each command.
+.TP
+.BR ping " [" \-\-all ]
+Pings every node; fails unless one (with \-\-all: every one) answers.
+.TP
+.B info
+Node name and version, client node health, cluster members.
+.TP
+.BR stats " [" \fINAME\fR | \fIPREFIX\fB*\fR ...]
+Node statistics, optionally only the named entries.
+.TP
+.BI get " BUCKET KEY"
+The value as stored; \-\-json for the object with its metadata, \-\-all for
+every sibling, \-\-head for the metadata only.
+.TP
+.BI put " BUCKET " \fR[\fIKEY\fR]
+Stores standard input, \-\-value or \-\-file, with \-\-content\-type,
+\-\-meta, \-\-index, \-\-link, \-\-vclock and \-\-create; without a key one is
+generated.
+.TP
+.BI delete " BUCKET KEY"
+.TP
+.BR list " buckets | keys " \fIBUCKET
+Bucket or key listing (expensive), \-\-plain for plain lines.
+.TP
+.BI backup " BUCKET"
+Writes the bucket to standard output or \-o FILE; see BACKUPS.
+.TP
+.BR restore " [" \fIFILE\fR]
+Restores a backup; see BACKUPS.
+.TP
+.BI index " BUCKET INDEX VALUE" "\fR | \fP" "BUCKET INDEX MIN MAX"
+Secondary index query; streamed, or one page with \-\-max and
+\-\-continuation.
+.TP
+.BI query " BUCKET INDEX"
+Query API request (Riak 3.4+) from flags or \-\-request FILE.
+.TP
+.BR mapred " [" \-\-collect "] [" \fIFILE\fR]
+MapReduce job; phase results streamed, or collected.
+.TP
+.BI coverage " BUCKET" "\fR, \fPpreflist" " BUCKET KEY"
+Coverage plan and preference list (Protocol Buffers).
+.TP
+.BI "dt get" "\fR|\fPincr\fR|\fPdecr\fR|\fPadd\fR|\fPremove\fR|\fPupdate ..."
+Data types in a bucket type with a datatype property.
+.TP
+.BI "counter get" "\fR|\fPincr\fR|\fPdecr BUCKET KEY \fR[\fIN\fR]"
+Riak 1.4 counters.
+.TP
+.BI "props get" "\fR|\fPset\fR|\fPreset BUCKET\fR, \fPprops type\-get" "\fR|\fPtype\-set TYPE"
+Bucket and bucket type properties.
+.TP
+.B search query\fR|\fPindex\-list\fR|\fPindex\-get\fR|\fPindex\-create\fR|\fPindex\-delete\fR|\fPschema\-get\fR|\fPschema\-put
+Riak Search (Riak 2.x).
+.TP
+.B aae root\fR|\fPbranches\fR|\fPclocks\fR|\fPbuckets\fR|\fPtree\fR|\fPkeys\fR|\fPfind\fR|\fPstats\fR|\fPtombs\fR|\fPreap\fR|\fPerase\fR|\fPrepair\fR|\fPrepl\fR|\fPcompare
+AAE folds (Riak 2.9+ with tictac AAE). Reap and erase only count unless
+\-\-local or \-\-job is given. compare lists the keys whose vector clocks
+differ between two clusters (\-\-peer URL) or two buckets (\-\-peer\-bucket).
+.TP
+.B repl fetch\fR|\fPpush\fR|\fPmembers\fR|\fPcluster\-id\fR|\fPget
+nextgenrepl queues and riak_repl.
+.SH BACKUPS
+A backup is a JSON Lines file: a header
+.RB ( {"format":"riakctl\-backup","version":1,...} ),
+one line per key with its vector clock and every sibling (value, content
+type, metadata, secondary indexes, links, last-modified time), or with
+the value of a data type, and a trailer
+.RB ( {"end":true,"count": N } ).
+A file without the trailer is incomplete, and restore reports it.
+Tombstones are not saved. Keys are enumerated by an object fold, an AAE
+clock fold or a key listing
+.RB ( \-\-method ),
+the first available being used by default.
+.PP
+A restore is idempotent: keys that already hold every sibling of the
+backup are left alone. A single sibling is written "as is", keeping the
+backed-up vector clock; Riak then keeps a newer version already stored,
+as replication does. Several siblings are written one by one and become
+siblings again in allow_mult buckets. Counters are restored through the
+difference to the stored value, sets by adding elements, maps field by
+field; HyperLogLogs cannot be restored.
+.SH EXIT STATUS
+.TP
+.B 0
+success
+.TP
+.B 1
+other error (server error, malformed response, failed restore entries)
+.TP
+.B 2
+usage error or invalid configuration
+.TP
+.B 3
+not found
+.TP
+.B 4
+the object has siblings (get \-\-all shows them)
+.TP
+.B 5
+precondition failed (put \-\-create on an existing key)
+.TP
+.B 6
+authentication or permission failure
+.TP
+.B 7
+no node reachable (connection, DNS, timeout or TLS failure)
+.TP
+.B 8
+not supported by the node's Riak version or by the transport
+.SH EXAMPLES
+.nf
+riakctl \-u pbs://riak1:8087,pbs://riak2:8087 \-\-user ops \e
+        \-\-password\-file ~/.riak\-pass \-\-ca ca.pem ping
+echo '{"name":"alice"}' | riakctl put \-c application/json \e
+        \-i email_bin=alice@example.com users alice
+riakctl index users email_bin a z \-\-terms | jq \-r .key
+riakctl backup \-o users.jsonl users && riakctl restore users.jsonl
+riakctl aae keys users | riakctl repl push q1
+echo '{"visits_counter":1}' | riakctl \-t maps dt update profiles alice
+.fi
+.SH SEE ALSO
+.BR jq (1),
+.BR riak (1).
+The libriak-c documentation, docs/riakctl.md, and the demo scripts in
+examples/cli describe the commands and workflows in detail.

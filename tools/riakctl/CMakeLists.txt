@@ -14,3 +14,6 @@ add_executable(riakctl
 target_compile_definitions(riakctl PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(riakctl PRIVATE riak json-c::json-c riak_warnings)
 install(TARGETS riakctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
+configure_file(riakctl.1.in ${CMAKE_CURRENT_BINARY_DIR}/riakctl.1 @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/riakctl.1
+  DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 COMPONENT tools)
