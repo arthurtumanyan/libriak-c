@@ -313,12 +313,15 @@ riakctl aae erase --job 7 --start-key a --end-key b users
 delete data.
 
 `aae compare` compares a bucket on two clusters (`--peer URL`, with the
-same credentials) or two buckets (`--peer-bucket NAME`), as nextgenrepl's
-full sync does: the range trees are compared first, and only the keys of
-differing segments are fetched with their clocks. Each difference is a
-line `{"key", "status", "vclock", "peer_vclock"}` with the status
-`differs`, `missing_on_peer` or `missing_locally`, and a summary goes to
-stderr:
+same credentials) as nextgenrepl's full sync does: the range trees are
+compared first, and only the keys of differing segments are fetched with
+their clocks. Since a key's segment depends on its bucket too, two
+different buckets (`--peer-bucket NAME`, on the same or the peer cluster)
+are compared key by key instead, from the complete key and clock lists of
+both (memory grows with the number of keys). Each difference is a line
+`{"key", "status", "vclock", "peer_vclock"}` with the status `differs`,
+`missing_on_peer` or `missing_locally`; a deleted key whose tombstone is
+still kept shows as `differs`. A summary goes to stderr:
 
 ```sh
 riakctl -u pb://dc1-riak:8087 aae compare orders --peer pb://dc2-riak:8087
@@ -352,6 +355,7 @@ riakctl backup -o users.jsonl users
 riakctl -t maps backup profiles > profiles.jsonl
 riakctl restore --dry-run users.jsonl
 riakctl restore users.jsonl
+riakctl restore --jobs 16 users.jsonl
 riakctl restore --bucket users_copy users.jsonl
 ```
 
@@ -385,6 +389,13 @@ one is used:
 | `aae` | AAE key and clock fold, then one fetch per key | Riak 2.9+ with tictac AAE |
 | `keys` | Key listing, then one fetch per key on a second connection | Any node (expensive on large clusters) |
 
+Measured against a local single-node OpenRiak 3.4 (Protocol Buffers,
+1 KiB values with metadata and two indexes): the fold backs up about
+10,000 objects per second in under 20 MB of memory; the `aae` and `keys`
+methods about 4,000 to 5,000. A restore writes about 1,200 objects per
+second with one job and 5,600 to 6,700 with 16 jobs, in about 11 MB
+(55 MB with 256 KiB values in flight).
+
 Data type buckets use `aae` or `keys`. A backup reads a live bucket; it is
 not a point-in-time snapshot, and writes made while it runs may or may not
 be included.
@@ -396,26 +407,44 @@ be included.
   indexes and links) is counted as `unchanged` and not written. Running a
   restore twice writes nothing the second time.
 - A single sibling is written "as is" with the backed-up vector clock, as
-  replication does: on a key that does not exist the restored object has
-  exactly the original clock. When the key holds a newer version (its
-  clock descends the backup's), Riak keeps the newer version; concurrent
+  replication does: on a key that does not exist the object is stored with
+  the original clock. When the key holds a newer version (its clock
+  descends the backup's), Riak keeps the newer version; concurrent
   versions become siblings in `allow_mult` buckets.
 - A key deleted shortly before still has a tombstone whose clock descends
-  the backup's, which would make Riak drop the "as is" write. The write is
-  therefore checked, and the object is written again as an update of the
-  tombstone; its clock then includes the deletion.
+  the backup's, which would make Riak drop the "as is" write. Over Protocol
+  Buffers the tombstone is looked up first and the object is written as an
+  update of it (its clock then includes the deletion). Over HTTP, where a
+  tombstone cannot be read, the "as is" write is read back and repeated as
+  a normal write when the tombstone won.
+- Riak itself may extend the clocks of objects written "as is" afterwards
+  (read repair and anti-entropy between the replicas): on OpenRiak 3.4,
+  for about 4% of 20,000 restored objects the clock read back later
+  carried an additional entry. Values, metadata, indexes and siblings are
+  not affected.
 - Several siblings are written one by one, without vector clocks, so they
   become siblings again; only siblings missing on the key are written. Their
   clocks are new (Riak takes one value per write). In a bucket without
   `allow_mult` the last write wins and one sibling remains.
+- A bucket whose `allow_mult` property is false cannot hold siblings, so
+  of a key backed up with siblings only the one Riak's last write wins
+  keeps is written: the sibling with the latest last-modified time (the
+  last one when the times are equal or missing). Such keys are counted as
+  `collapsed`, a warning names the bucket, and a second restore finds them
+  unchanged.
+- `--jobs N` (default 4, at most 64) restores with N worker threads, each
+  with its own connection; one thread reads the file and hands lines to
+  the workers through a bounded queue, so memory does not grow with the
+  size of the backup. Keys are independent, so the order does not matter.
 - Counters are restored by adding the difference to the stored value, sets
   and grow-only sets by adding missing elements (elements added since the
   backup stay), maps field by field. HyperLogLogs cannot be restored: only
   their estimate is readable; they are reported as `skipped`.
 - `--bucket` and `--type` restore into another bucket or bucket type.
 - The result is printed as `{"bucket", "type", "restored", "unchanged",
-  "skipped", "failed", "complete"}`; the exit code is 1 when an entry failed
-  or the trailer is missing, and 7 when no node answers any more.
+  "skipped", "failed", "collapsed", "complete"}` (`collapsed` only when
+  non-zero); the exit code is 1 when an entry failed or the trailer is
+  missing, and 7 when no node answers any more (every worker stops).
 
 ### Limitations
 

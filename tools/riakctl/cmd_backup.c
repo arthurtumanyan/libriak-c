@@ -11,6 +11,7 @@
  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -354,13 +355,15 @@ int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
 
 /* ---- restore ------------------------------------------------------------ */
 
+/* State of one restore worker; each has its own client. */
 typedef struct {
-    rc_ctx *x;
     riak_client *c;
     const char *type;
     const char *bucket;
     bool dry_run;
-    unsigned long long restored, unchanged, skipped, failed;
+    bool allow_mult; /* the target bucket keeps siblings */
+    unsigned long long restored, unchanged, skipped, failed, collapsed;
+    struct rs_shared *sh;
 } rs_ctx;
 
 /* A sibling of a backup entry, decoded. */
@@ -373,6 +376,7 @@ typedef struct {
     riak_kv_pair *indexes;
     size_t n_indexes;
     const char *links;
+    const char *last_modified;
 } rs_sib;
 
 static void sib_free(rs_sib *s) {
@@ -387,11 +391,16 @@ static bool sib_decode(json_object *o, rs_sib *s) {
         return false;
     }
     json_object *v;
+    /* written with the client's default when absent, so compared with it */
+    s->content_type = "application/octet-stream";
     if (json_object_object_get_ex(o, "content_type", &v)) {
         s->content_type = json_object_get_string(v);
     }
     if (json_object_object_get_ex(o, "links", &v)) {
         s->links = json_object_get_string(v);
+    }
+    if (json_object_object_get_ex(o, "last_modified", &v)) {
+        s->last_modified = json_object_get_string(v);
     }
     if (json_object_object_get_ex(o, "meta", &v) && json_object_is_type(v, json_type_object)) {
         s->meta = calloc((size_t)json_object_object_length(v) + 1, sizeof *s->meta);
@@ -488,17 +497,73 @@ static bool present(rs_ctx *r, const char *key, const rs_sib *s) {
     return found;
 }
 
-/* Vector clock of the tombstone of a deleted key, NULL when unknown. */
-static char *tombstone_vclock(rs_ctx *r, const char *key) {
+/* Vector clock of the tombstone of an absent key. *known is false when the
+ * transport cannot tell (HTTP); otherwise NULL means there is no tombstone. */
+static char *tombstone_vclock(rs_ctx *r, const char *key, bool *known) {
     riak_opts o = {0};
     o.bucket_type = r->type;
     o.deletedvclock = true;
     o.head = true;
     riak_object obj = {0};
-    riak_get(r->c, r->bucket, key, &o, &obj);
+    riak_status st = riak_get(r->c, r->bucket, key, &o, &obj);
+    *known = st == RIAK_OK || st == RIAK_E_NOT_FOUND;
     char *v = obj.vclock ? strdup(obj.vclock) : NULL;
     riak_object_free(&obj);
     return v;
+}
+
+/* Reads a number followed by sep (or by the end when sep is 0). */
+static bool date_field(const char **p, long lo, long hi, char sep, long *out) {
+    char *end;
+    errno = 0;
+    long v = strtol(*p, &end, 10);
+    if (end == *p || errno || v < lo || v > hi || *end != sep) {
+        return false;
+    }
+    *out = v;
+    *p = sep ? end + 1 : end;
+    return true;
+}
+
+/* An HTTP date ("Mon, 02 Nov 2026 17:54:26 GMT") as a number that sorts
+ * like the time; -1 when it cannot be read. */
+static long long date_key(const char *d) {
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    const char *p = d ? strchr(d, ',') : NULL;
+    long day, year, h, m, sec;
+    if (p == NULL || p[1] != ' ') {
+        return -1;
+    }
+    p += 2;
+    if (!date_field(&p, 1, 31, ' ', &day) || strlen(p) < 4 || p[3] != ' ') {
+        return -1;
+    }
+    long month = -1;
+    for (long i = 0; i < 12; i++) {
+        if (strncmp(p, months + i * 3, 3) == 0) {
+            month = i;
+        }
+    }
+    p += 4;
+    if (month < 0 || !date_field(&p, 0, 9999, ' ', &year) || !date_field(&p, 0, 23, ':', &h) ||
+        !date_field(&p, 0, 59, ':', &m) || !date_field(&p, 0, 60, ' ', &sec)) {
+        return -1;
+    }
+    return ((((year * 12LL + month) * 31 + day) * 24 + h) * 60 + m) * 60 + sec;
+}
+
+/* The sibling a bucket without allow_mult keeps: the last modified one. */
+static size_t newest_sibling(const rs_sib *s, size_t n) {
+    size_t best = n - 1;
+    long long best_key = date_key(s[best].last_modified);
+    for (size_t i = 0; i < n; i++) {
+        long long k = date_key(s[i].last_modified);
+        if (k > best_key) {
+            best = i;
+            best_key = k;
+        }
+    }
+    return best;
 }
 
 /* Restores one object; returns false after a failure. */
@@ -527,6 +592,17 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
             rc_warn("restore: key %s: invalid sibling %zu", key, i);
         }
     }
+    size_t n_all = n; /* decoded siblings, all freed at the end */
+    if (ok && n > 1 && !r->allow_mult) {
+        /* the bucket cannot hold siblings: only the one Riak's last write
+         * wins would keep is written, so the result is stable */
+        size_t k = newest_sibling(s, n);
+        rs_sib t = s[0];
+        s[0] = s[k];
+        s[k] = t;
+        n = 1;
+        r->collapsed++;
+    }
     riak_object_set cur = {0};
     riak_opts go = {0};
     go.bucket_type = r->type;
@@ -548,19 +624,26 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
     } else if (ok && r->dry_run) {
         r->restored++;
     } else if (ok && n == 1) {
-        /* stored as given, with the backup's vector clock (as replication
-         * does); a node without "asis" support takes a normal update */
-        st = put_sib(r, key, &s[0], vclock, vclock != NULL);
-        if (st != RIAK_OK && st != RIAK_E_TRANSPORT && st != RIAK_E_UNAUTHORIZED) {
-            st = put_sib(r, key, &s[0], cur.vclock, false);
-        } else if (st == RIAK_OK && cur.count == 0 && !present(r, key, &s[0])) {
-            /* the tombstone of a recent delete descends the backup's clock
-             * and wins over an "asis" write: the object is written again
-             * as an update of the tombstone */
-            char *tomb = tombstone_vclock(r, key);
+        /* The tombstone of a recent delete descends the backup's clock and
+         * would win over an "asis" write: on a deleted key the object is
+         * written as an update of the tombstone. Over HTTP the tombstone
+         * cannot be seen, so the "asis" write is checked afterwards. */
+        bool known = true;
+        char *tomb = cur.count == 0 ? tombstone_vclock(r, key, &known) : NULL;
+        if (tomb) {
             st = put_sib(r, key, &s[0], tomb, false);
-            free(tomb);
+        } else {
+            /* stored as given, with the backup's vector clock (as
+             * replication does); a node without "asis" support takes a
+             * normal update */
+            st = put_sib(r, key, &s[0], vclock, vclock != NULL);
+            if (st != RIAK_OK && st != RIAK_E_TRANSPORT && st != RIAK_E_UNAUTHORIZED) {
+                st = put_sib(r, key, &s[0], cur.vclock, false);
+            } else if (st == RIAK_OK && !known && !present(r, key, &s[0])) {
+                st = put_sib(r, key, &s[0], NULL, false);
+            }
         }
+        free(tomb);
         ok = st == RIAK_OK;
         if (!ok) {
             rc_fail(r->c, key, st);
@@ -570,7 +653,8 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         /* one sibling per put; each write without a vector clock becomes a
          * sibling of what is stored (in allow_mult buckets). On a deleted
          * key the first write replaces the tombstone. */
-        char *tomb = cur.count == 0 ? tombstone_vclock(r, key) : NULL;
+        bool known = true;
+        char *tomb = cur.count == 0 ? tombstone_vclock(r, key, &known) : NULL;
         for (size_t i = 0; ok && i < n; i++) {
             if (missing[i]) {
                 st = put_sib(r, key, &s[i], tomb, false);
@@ -586,7 +670,7 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         r->restored += ok;
     }
     riak_object_set_free(&cur);
-    for (size_t i = 0; s && i < n; i++) {
+    for (size_t i = 0; s && i < n_all; i++) {
         sib_free(&s[i]);
     }
     free(s);
@@ -772,15 +856,179 @@ static bool restore_datatype(rs_ctx *r, const char *key, json_object *e) {
     return ok;
 }
 
+/* allow_mult of the target bucket; true when unknown, so that nothing is
+ * dropped. */
+static bool bucket_allow_mult(riak_client *c, const char *type, const char *bucket) {
+    char *json = NULL;
+    riak_status st = riak_type_get_bucket_props(c, type, bucket, &json);
+    if (st != RIAK_OK) {
+        rc_warn("restore: bucket properties not readable (%s); siblings are written as they are",
+                riak_strerror(st));
+        return true;
+    }
+    json_object *o = json_tokener_parse(json);
+    riak_free(json);
+    json_object *props, *am;
+    bool allow = true;
+    if (o && json_object_object_get_ex(o, "props", &props) &&
+        json_object_object_get_ex(props, "allow_mult", &am)) {
+        allow = json_object_get_boolean(am);
+    }
+    json_object_put(o);
+    return allow;
+}
+
+/* A line of the backup handed to a worker. */
+typedef struct {
+    char *line;
+    unsigned long long lineno;
+} rs_item;
+
+/* Lines flow from the reading thread to the workers through a bounded
+ * queue; the first failure that ends the restore stops everyone. */
+typedef struct rs_shared {
+    pthread_mutex_t lock;
+    pthread_cond_t can_get, can_put;
+    rs_item *items;
+    size_t cap, head, count;
+    bool closed;   /* no more lines will come */
+    bool stop;     /* the restore is abandoned */
+    bool complete; /* the trailer was seen */
+    int rc;        /* first fatal exit code */
+    const char *path;
+} rs_shared;
+
+static void rs_abort(rs_shared *sh, int rc) {
+    pthread_mutex_lock(&sh->lock);
+    if (sh->rc == RC_OK) {
+        sh->rc = rc;
+    }
+    sh->stop = true;
+    pthread_cond_broadcast(&sh->can_get);
+    pthread_cond_broadcast(&sh->can_put);
+    pthread_mutex_unlock(&sh->lock);
+}
+
+/* Restores one line; returns an exit code that ends the restore, or RC_OK. */
+static int restore_line(rs_ctx *r, const rs_item *it) {
+    char what[64];
+    snprintf(what, sizeof what, "%s line %llu", r->sh->path, it->lineno);
+    json_object *e = rc_parse_json(it->line, what);
+    if (e == NULL) {
+        return RC_ERROR;
+    }
+    json_object *v;
+    int rc = RC_OK;
+    if (json_object_object_get_ex(e, "end", &v)) {
+        pthread_mutex_lock(&r->sh->lock);
+        r->sh->complete = true;
+        pthread_mutex_unlock(&r->sh->lock);
+    } else if (!json_object_object_get_ex(e, "key", &v)) {
+        rc_warn("%s: no key, entry skipped", what);
+        r->skipped++;
+    } else {
+        const char *key = json_object_get_string(v);
+        bool ok = json_object_object_get_ex(e, "datatype", NULL) ? restore_datatype(r, key, e)
+                                                                 : restore_object(r, key, e);
+        r->failed += !ok;
+        if (!ok && riak_client_check_nodes(r->c) == 0) {
+            rc_warn("restore: no node answers, stopping");
+            rc = RC_UNREACHABLE;
+        }
+    }
+    json_object_put(e);
+    return rc;
+}
+
+static void *restore_worker(void *arg) {
+    rs_ctx *r = arg;
+    rs_shared *sh = r->sh;
+    for (;;) {
+        pthread_mutex_lock(&sh->lock);
+        while (sh->count == 0 && !sh->closed && !sh->stop) {
+            pthread_cond_wait(&sh->can_get, &sh->lock);
+        }
+        if (sh->count == 0 || sh->stop) {
+            pthread_mutex_unlock(&sh->lock);
+            return NULL;
+        }
+        rs_item it = sh->items[sh->head];
+        sh->head = (sh->head + 1) % sh->cap;
+        sh->count--;
+        pthread_cond_signal(&sh->can_put);
+        pthread_mutex_unlock(&sh->lock);
+        int rc = restore_line(r, &it);
+        free(it.line);
+        if (rc != RC_OK) {
+            rs_abort(sh, rc);
+            return NULL;
+        }
+    }
+}
+
+/* Queues a line (taking ownership); false once the restore is abandoned. */
+static bool rs_put(rs_shared *sh, char *line, unsigned long long lineno) {
+    pthread_mutex_lock(&sh->lock);
+    while (sh->count == sh->cap && !sh->stop) {
+        pthread_cond_wait(&sh->can_put, &sh->lock);
+    }
+    bool ok = !sh->stop;
+    if (ok) {
+        sh->items[(sh->head + sh->count) % sh->cap] = (rs_item){line, lineno};
+        sh->count++;
+        pthread_cond_signal(&sh->can_get);
+    }
+    pthread_mutex_unlock(&sh->lock);
+    if (!ok) {
+        free(line);
+    }
+    return ok;
+}
+
+/* Reads and checks the header line; NULL (reported) when it is not one. */
+static json_object *read_header(FILE *f, const char *path, unsigned long long *lineno) {
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    json_object *h = NULL;
+    while ((n = getline(&line, &cap, f)) > 0) {
+        (*lineno)++;
+        if (n == 1 && line[0] == '\n') {
+            continue;
+        }
+        h = rc_parse_json(line, path);
+        json_object *fmt, *ver;
+        if (h && (!json_object_object_get_ex(h, "format", &fmt) ||
+                  strcmp(json_object_get_string(fmt), BACKUP_FORMAT) != 0 ||
+                  !json_object_object_get_ex(h, "version", &ver) ||
+                  json_object_get_int(ver) != BACKUP_VERSION)) {
+            fprintf(stderr, "riakctl: %s is not a riakctl backup (version %d)\n", path,
+                    BACKUP_VERSION);
+            json_object_put(h);
+            h = NULL;
+        }
+        break;
+    }
+    if (n <= 0 && !ferror(f)) {
+        fprintf(stderr, "riakctl: %s: empty backup\n", path);
+    }
+    free(line);
+    return h;
+}
+
+#define RESTORE_MAX_JOBS 64
+
 int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
     static const struct option opts[] = {{"type", required_argument, NULL, 't'},
                                          {"bucket", required_argument, NULL, 'b'},
                                          {"dry-run", no_argument, NULL, 'n'},
+                                         {"jobs", required_argument, NULL, 'j'},
                                          {NULL, 0, NULL, 0}};
-    rs_ctx r = {.x = x};
     const char *bucket = NULL;
+    bool dry_run = false;
+    unsigned long long jobs = 4;
     int ch;
-    while ((ch = getopt_long(argc, argv, "t:b:n", opts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "t:b:nj:", opts, NULL)) != -1) {
         switch (ch) {
         case 't':
             x->type = optarg;
@@ -789,7 +1037,12 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
             bucket = optarg;
             break;
         case 'n':
-            r.dry_run = true;
+            dry_run = true;
+            break;
+        case 'j':
+            if (!rc_parse_uint(optarg, RESTORE_MAX_JOBS, &jobs) || jobs == 0) {
+                return rc_usage_error("restore", "--jobs takes 1 to %d", RESTORE_MAX_JOBS);
+            }
             break;
         default:
             return rc_usage_error("restore", "unknown option");
@@ -804,107 +1057,137 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
         fprintf(stderr, "riakctl: %s: %s\n", path, strerror(errno));
         return RC_ERROR;
     }
+    unsigned long long lineno = 0;
+    json_object *header = read_header(f, path, &lineno);
+    json_object *v;
+    const char *type = x->type;
+    if (header && type == NULL && json_object_object_get_ex(header, "type", &v)) {
+        type = json_object_get_string(v);
+    }
+    if (header && bucket == NULL && json_object_object_get_ex(header, "bucket", &v)) {
+        bucket = json_object_get_string(v);
+    }
+    riak_client *c = header && bucket ? rc_client(x) : NULL;
+    if (c == NULL) {
+        if (header && bucket == NULL) {
+            fprintf(stderr, "riakctl: %s: the header names no bucket\n", path);
+        }
+        json_object_put(header);
+        if (f != stdin) {
+            (void)fclose(f); /* read-only: nothing is lost */
+        }
+        return RC_ERROR;
+    }
+
+    rs_shared sh = {.cap = (size_t)jobs * 8, .rc = RC_OK, .path = path};
+    rs_ctx workers[RESTORE_MAX_JOBS];
+    pthread_t threads[RESTORE_MAX_JOBS];
+    size_t started = 0;
+    sh.items = calloc(sh.cap, sizeof *sh.items);
+    pthread_mutex_init(&sh.lock, NULL);
+    pthread_cond_init(&sh.can_get, NULL);
+    pthread_cond_init(&sh.can_put, NULL);
+    bool allow_mult = bucket_allow_mult(c, type, bucket);
+    int rc = sh.items ? RC_OK : RC_ERROR;
+    for (size_t i = 0; rc == RC_OK && i < jobs; i++) {
+        rs_ctx *r = &workers[i];
+        *r = (rs_ctx){.c = i == 0 ? c : rc_client_new(x),
+                      .type = type,
+                      .bucket = bucket,
+                      .dry_run = dry_run,
+                      .allow_mult = allow_mult,
+                      .sh = &sh};
+        if (r->c == NULL || pthread_create(&threads[i], NULL, restore_worker, r) != 0) {
+            if (r->c != c) {
+                riak_client_free(r->c);
+            }
+            rc = RC_ERROR;
+            break;
+        }
+        started++;
+    }
+    if (rc != RC_OK) {
+        rs_abort(&sh, rc);
+    }
+
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
-    unsigned long long lineno = 0;
-    json_object *header = NULL;
-    bool complete = false;
-    int rc = RC_OK;
-    while ((n = getline(&line, &cap, f)) > 0) {
+    while (rc == RC_OK && (n = getline(&line, &cap, f)) > 0) {
         lineno++;
         if (n == 1 && line[0] == '\n') {
             continue;
         }
-        char what[64];
-        snprintf(what, sizeof what, "%s line %llu", path, lineno);
-        json_object *e = rc_parse_json(line, what);
-        if (e == NULL) {
-            rc = RC_ERROR;
+        if (!rs_put(&sh, line, lineno)) {
+            line = NULL;
             break;
         }
-        json_object *v;
-        if (header == NULL) {
-            json_object *fmt, *ver;
-            if (!json_object_object_get_ex(e, "format", &fmt) ||
-                strcmp(json_object_get_string(fmt), BACKUP_FORMAT) != 0 ||
-                !json_object_object_get_ex(e, "version", &ver) ||
-                json_object_get_int(ver) != BACKUP_VERSION) {
-                fprintf(stderr, "riakctl: %s is not a riakctl backup (version %d)\n", path,
-                        BACKUP_VERSION);
-                json_object_put(e);
-                rc = RC_ERROR;
-                break;
-            }
-            header = e;
-            r.type = x->type;
-            if (r.type == NULL && json_object_object_get_ex(header, "type", &v)) {
-                r.type = json_object_get_string(v);
-            }
-            r.bucket = bucket;
-            if (r.bucket == NULL && json_object_object_get_ex(header, "bucket", &v)) {
-                r.bucket = json_object_get_string(v);
-            }
-            if (r.bucket == NULL || (r.c = rc_client(x)) == NULL) {
-                rc = RC_ERROR;
-                break;
-            }
-            continue;
-        }
-        if (json_object_object_get_ex(e, "end", &v)) {
-            complete = true;
-            json_object_put(e);
-            continue;
-        }
-        if (!json_object_object_get_ex(e, "key", &v)) {
-            rc_warn("%s: no key, entry skipped", what);
-            r.skipped++;
-            json_object_put(e);
-            continue;
-        }
-        const char *key = json_object_get_string(v);
-        bool ok = json_object_object_get_ex(e, "datatype", NULL) ? restore_datatype(&r, key, e)
-                                                                 : restore_object(&r, key, e);
-        r.failed += !ok;
-        json_object_put(e);
-        if (!ok && riak_client_check_nodes(r.c) == 0) {
-            rc_warn("restore: no node answers, stopping");
-            rc = RC_UNREACHABLE;
-            break;
-        }
-    }
-    if (ferror(f)) {
-        fprintf(stderr, "riakctl: %s: read error\n", path);
-        rc = RC_ERROR;
+        line = NULL; /* the queue owns it */
+        cap = 0;
     }
     free(line);
+    if (ferror(f)) {
+        fprintf(stderr, "riakctl: %s: read error\n", path);
+        rs_abort(&sh, RC_ERROR);
+    }
+    pthread_mutex_lock(&sh.lock);
+    sh.closed = true;
+    pthread_cond_broadcast(&sh.can_get);
+    pthread_mutex_unlock(&sh.lock);
     if (f != stdin) {
         (void)fclose(f); /* read-only: nothing is lost */
     }
-    if (header == NULL) {
-        if (rc == RC_OK) {
-            fprintf(stderr, "riakctl: %s: empty backup\n", path);
+
+    rs_ctx total = {0};
+    for (size_t i = 0; i < started; i++) {
+        pthread_join(threads[i], NULL);
+        total.restored += workers[i].restored;
+        total.unchanged += workers[i].unchanged;
+        total.skipped += workers[i].skipped;
+        total.failed += workers[i].failed;
+        total.collapsed += workers[i].collapsed;
+        if (workers[i].c != c) {
+            riak_client_free(workers[i].c);
         }
-        return RC_ERROR;
+    }
+    for (; sh.count > 0; sh.count--) { /* left behind by an abandoned restore */
+        free(sh.items[sh.head].line);
+        sh.head = (sh.head + 1) % sh.cap;
+    }
+    free(sh.items);
+    pthread_mutex_destroy(&sh.lock);
+    pthread_cond_destroy(&sh.can_get);
+    pthread_cond_destroy(&sh.can_put);
+    if (rc == RC_OK) {
+        rc = sh.rc;
+    }
+
+    if (total.collapsed) {
+        rc_warn("restore: %s does not keep siblings (allow_mult is false): of %llu keys with "
+                "siblings only the last modified one was restored",
+                bucket, total.collapsed);
     }
     json_object *o = json_object_new_object();
-    json_object_object_add(o, "bucket", json_object_new_string(r.bucket ? r.bucket : ""));
-    if (r.type) {
-        json_object_object_add(o, "type", json_object_new_string(r.type));
+    json_object_object_add(o, "bucket", json_object_new_string(bucket));
+    if (type) {
+        json_object_object_add(o, "type", json_object_new_string(type));
     }
-    json_object_object_add(o, r.dry_run ? "would_restore" : "restored",
-                           json_object_new_int64((int64_t)r.restored));
-    json_object_object_add(o, "unchanged", json_object_new_int64((int64_t)r.unchanged));
-    json_object_object_add(o, "skipped", json_object_new_int64((int64_t)r.skipped));
-    json_object_object_add(o, "failed", json_object_new_int64((int64_t)r.failed));
-    json_object_object_add(o, "complete", json_object_new_boolean(complete));
+    json_object_object_add(o, dry_run ? "would_restore" : "restored",
+                           json_object_new_int64((int64_t)total.restored));
+    json_object_object_add(o, "unchanged", json_object_new_int64((int64_t)total.unchanged));
+    json_object_object_add(o, "skipped", json_object_new_int64((int64_t)total.skipped));
+    json_object_object_add(o, "failed", json_object_new_int64((int64_t)total.failed));
+    if (total.collapsed) {
+        json_object_object_add(o, "collapsed", json_object_new_int64((int64_t)total.collapsed));
+    }
+    json_object_object_add(o, "complete", json_object_new_boolean(sh.complete));
     int prc = rc_print(x, o);
     json_object_put(header);
-    if (rc == RC_OK && !complete) {
+    if (rc == RC_OK && !sh.complete) {
         rc_warn("restore: %s has no trailer; the backup is incomplete", path);
         rc = RC_ERROR;
     }
-    if (rc == RC_OK && r.failed) {
+    if (rc == RC_OK && total.failed) {
         rc = RC_ERROR;
     }
     return rc != RC_OK ? rc : prc;

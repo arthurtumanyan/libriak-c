@@ -15,7 +15,8 @@ add_library(riakctl_core STATIC
   out.c)
 target_include_directories(riakctl_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(riakctl_core PUBLIC _POSIX_C_SOURCE=200809L)
-target_link_libraries(riakctl_core PUBLIC riak json-c::json-c PRIVATE riak_warnings)
+find_package(Threads REQUIRED)
+target_link_libraries(riakctl_core PUBLIC riak json-c::json-c Threads::Threads PRIVATE riak_warnings)
 # stricter than the library: implicit conversions are errors with RIAK_WERROR
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(riakctl_core PRIVATE -Wconversion -Wsign-conversion)

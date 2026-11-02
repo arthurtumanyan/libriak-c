@@ -13,8 +13,9 @@
   lists the keys whose clocks differ between two clusters or buckets),
   repl, backup and restore. Backups are JSON Lines files with every
   sibling, vector clock, content type, metadata, index and link, or the
-  values of data type buckets; restores are idempotent and keep the vector
-  clocks of single-sibling objects. See [docs/riakctl.md](docs/riakctl.md).
+  values of data type buckets; restores are idempotent, run with parallel
+  workers (`--jobs`) and write single-sibling objects with their vector
+  clocks. See [docs/riakctl.md](docs/riakctl.md).
 - Demo workflows built on `riakctl` in `examples/cli/` (connectivity,
   checked backup and restore, Nagios-style health check, statistics
   sampling, paged index queries, AAE inspection, replication queues), run

@@ -253,6 +253,20 @@ static int aae_compare(rc_ctx *x, riak_client *c, riak_aae_filter f, riak_aae_tr
     if (peer_bucket) {
         pf.bucket = peer_bucket;
     }
+    /* A key's segment depends on its bucket as well: trees are comparable
+     * only for the same bucket. Two buckets are compared key by key. */
+    if (rc == RC_OK && strcmp(f.bucket, pf.bucket) != 0) {
+        unsigned long long diffs = 0;
+        rc = compare_segments(c, pc, f, pf, NULL, 0, &diffs);
+        if (rc == RC_OK) {
+            fprintf(stderr, "riakctl: aae compare: %llu keys differ (key by key)\n", diffs);
+        }
+        if (pc != c) {
+            riak_client_free(pc);
+        }
+        rc_conn_free(&px.conn);
+        return rc;
+    }
     riak_aae_tree ta = {0}, tb = {0};
     riak_status st;
     if (rc == RC_OK && (st = riak_aae_merge_range(c, &f, size, &ta)) != RIAK_OK) {
@@ -569,8 +583,8 @@ int rc_cmd_aae(rc_ctx *x, int argc, char **argv) {
         }
         riak_aae_buckets_free(&b);
     } else if (strcmp(action, "compare") == 0) {
-        if (peer == NULL && peer_bucket == NULL) {
-            rc = rc_usage_error("aae", "compare needs --peer URL and/or --peer-bucket NAME");
+        if (peer == NULL && (peer_bucket == NULL || strcmp(peer_bucket, f.bucket) == 0)) {
+            rc = rc_usage_error("aae", "compare needs --peer URL and/or another --peer-bucket");
             goto out;
         }
         rc = aae_compare(x, c, f, size, peer, peer_bucket);

@@ -73,7 +73,9 @@ static const rc_cmd commands[] = {
      "whose siblings are all present already are skipped.",
      "  -t, --type TYPE     restore into this bucket type instead of the backup's\n"
      "  -b, --bucket NAME   restore into this bucket instead of the backup's\n"
-     "  -n, --dry-run       only report what would be written\n"},
+     "  -n, --dry-run       only report what would be written\n"
+     "  -j, --jobs N        worker threads, each with its own connection\n"
+     "                      (default 4, at most 64)\n"},
     {"index", rc_cmd_index, "[options] BUCKET INDEX VALUE | BUCKET INDEX MIN MAX",
      "Secondary index query (exact match or range). Matches are streamed as JSON\n"
      "Lines: a key string, or {\"key\", \"term\"} with --terms. With --max one\n"
@@ -159,7 +161,9 @@ static const rc_cmd commands[] = {
      "  aae repair BUCKET                read repair of the range\n"
      "  aae repl BUCKET QUEUE            queues the range for nextgenrepl\n"
      "  aae compare BUCKET --peer URL | --peer-bucket NAME\n"
-     "                                   keys whose clocks differ (JSON Lines)",
+     "                                   keys whose clocks differ (JSON Lines);\n"
+     "                                   trees for one bucket on two clusters,\n"
+     "                                   key by key for two buckets",
      "  -t, --type TYPE           bucket type\n"
      "      --start-key K, --end-key K  key range\n"
      "      --segments A,B,...    segment filter, ids of --tree-size\n"

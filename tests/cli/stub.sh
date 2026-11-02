@@ -100,6 +100,29 @@ expect 0 "$R" --compact restore -b dst "$work/b.jsonl"
 check "second restore unchanged" [ "$(jq .unchanged "$work/out")" -eq 3 ]
 expect 0 "$R" --compact get --json dst k2
 check "restored object" [ "$(jq -c '[.value, .meta.m, .indexes.n_int[0]]' "$work/out")" = '["v2","2","2"]' ]
+# parallel restore: the same result with 8 workers
+expect 0 "$R" --compact restore --jobs 8 -b dst8 "$work/b.jsonl"
+check "parallel restore" [ "$(jq -c '[.restored, .failed, .complete]' "$work/out")" = '[3,0,true]' ]
+expect 0 "$R" --compact get --json dst8 k3
+check "parallel restored object" [ "$(jq -c '[.value, .meta.m]' "$work/out")" = '["v3","3"]' ]
+expect 2 "$R" restore --jobs 0 "$work/b.jsonl"
+expect 2 "$R" restore --jobs 65 "$work/b.jsonl"
+
+# siblings into a bucket without allow_mult: the last modified one is kept,
+# and a second restore finds it unchanged
+cat >"$work/sib.jsonl" <<'JSONL'
+{"format":"riakctl-backup","version":1,"bucket":"plain"}
+{"key":"s","siblings":[{"value":"old","last_modified":"Mon, 02 Nov 2026 10:00:00 GMT"},{"value":"new","last_modified":"Mon, 02 Nov 2026 11:00:00 GMT"},{"value":"older","last_modified":"Sun, 01 Nov 2026 23:00:00 GMT"}]}
+{"end":true,"count":1}
+JSONL
+expect 0 "$R" --compact restore "$work/sib.jsonl"
+check "collapsed" [ "$(jq -c '[.restored, .collapsed]' "$work/out")" = '[1,1]' ]
+check "collapse warning" grep -q 'does not keep siblings' "$work/err"
+expect 0 "$R" get plain s
+check "newest sibling kept" [ "$(cat "$work/out")" = new ]
+expect 0 "$R" --compact restore "$work/sib.jsonl"
+check "collapsed key unchanged" [ "$(jq -c '[.restored, .unchanged]' "$work/out")" = '[0,1]' ]
+
 head -n 2 "$work/b.jsonl" >"$work/cut.jsonl"
 expect 1 "$R" restore -b dst2 "$work/cut.jsonl"
 echo '{"format":"other"}' >"$work/bad.jsonl"

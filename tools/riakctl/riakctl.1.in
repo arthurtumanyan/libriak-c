@@ -114,8 +114,8 @@ Bucket or key listing (expensive), \-\-plain for plain lines.
 .BI backup " BUCKET"
 Writes the bucket to standard output or \-o FILE; see BACKUPS.
 .TP
-.BR restore " [" \fIFILE\fR]
-Restores a backup; see BACKUPS.
+.BR restore " [" \-j\~\fIN\fR "] [" \fIFILE\fR]
+Restores a backup with N worker threads (default 4); see BACKUPS.
 .TP
 .BI index " BUCKET INDEX VALUE" "\fR | \fP" "BUCKET INDEX MIN MAX"
 Secondary index query; streamed, or one page with \-\-max and
@@ -145,7 +145,8 @@ Riak Search (Riak 2.x).
 .B aae root\fR|\fPbranches\fR|\fPclocks\fR|\fPbuckets\fR|\fPtree\fR|\fPkeys\fR|\fPfind\fR|\fPstats\fR|\fPtombs\fR|\fPreap\fR|\fPerase\fR|\fPrepair\fR|\fPrepl\fR|\fPcompare
 AAE folds (Riak 2.9+ with tictac AAE). Reap and erase only count unless
 \-\-local or \-\-job is given. compare lists the keys whose vector clocks
-differ between two clusters (\-\-peer URL) or two buckets (\-\-peer\-bucket).
+differ between two clusters (\-\-peer URL, by comparing trees) or two
+buckets (\-\-peer\-bucket, key by key).
 .TP
 .B repl fetch\fR|\fPpush\fR|\fPmembers\fR|\fPcluster\-id\fR|\fPget
 nextgenrepl queues and riak_repl.
@@ -166,7 +167,8 @@ A restore is idempotent: keys that already hold every sibling of the
 backup are left alone. A single sibling is written "as is", keeping the
 backed-up vector clock; Riak then keeps a newer version already stored,
 as replication does. Several siblings are written one by one and become
-siblings again in allow_mult buckets. Counters are restored through the
+siblings again in allow_mult buckets; in a bucket without allow_mult only
+the last modified sibling is written (reported as collapsed). Counters are restored through the
 difference to the stored value, sets by adding elements, maps field by
 field; HyperLogLogs cannot be restored.
 .SH EXIT STATUS
