@@ -119,6 +119,12 @@ if(RIAK_FUZZ)
   target_compile_options(fuzz_pb PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_pb PRIVATE -fsanitize=fuzzer)
   target_link_libraries(fuzz_pb PRIVATE riak_objects riak_pbgen riak_warnings)
+  if(TARGET riakctl_core)
+    add_executable(fuzz_riakctl fuzz_riakctl.c)
+    target_compile_options(fuzz_riakctl PRIVATE -fsanitize=fuzzer)
+    target_link_options(fuzz_riakctl PRIVATE -fsanitize=fuzzer)
+    target_link_libraries(fuzz_riakctl PRIVATE riakctl_core riak_warnings)
+  endif()
 endif()
 
 # riakctl: against the stub (no Riak needed) and, with RIAK_TEST_URL, the

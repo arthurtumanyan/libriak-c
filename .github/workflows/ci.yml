@@ -268,6 +268,7 @@ jobs:
         run: |
           build/tests/fuzz_parse -max_total_time=60 -max_len=4096
           build/tests/fuzz_pb -max_total_time=60 -max_len=4096
+          build/tests/fuzz_riakctl -max_total_time=60 -max_len=4096 -close_fd_mask=2
 
   package:
     name: package dry run

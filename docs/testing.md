@@ -12,6 +12,7 @@
 | `threads` | Eight threads with one client each, on both transports, every result checked; with `-DRIAK_SANITIZE=thread` ThreadSanitizer checks the library for data races | Python 3 for the HTTP part |
 | `docs` | API names used in `README.md` and `docs/` exist; complete example programs build | Python 3 |
 | `live` | Everything against a real Riak node | `RIAK_TEST_URL` |
+| `riakctl_unit` | riakctl internals with exact expected values: node URLs, base64 (RFC 4648 vectors), the UTF-8/base64 decision, argument parsing, exit codes, JSON forms, usage errors | — |
 | `riakctl_cli` | `riakctl` against `tests/stub_riak.py`: options, exit codes, JSON output, backup and restore | Python 3, jq |
 | `riakctl_live` | The `riakctl` demo workflow (`examples/cli/run-all.sh`) against a real Riak node, with the `RIAK_TEST_*` settings of `live` | `RIAK_TEST_URL`, jq |
 
@@ -139,9 +140,10 @@ transports; the OpenRiak images are cached between runs.
 
 ```sh
 CC=clang cmake -S . -B build-fuzz -DRIAK_FUZZ=ON -DRIAK_SANITIZE=ON
-cmake --build build-fuzz --target fuzz_parse fuzz_pb
+cmake --build build-fuzz --target fuzz_parse fuzz_pb fuzz_riakctl
 build-fuzz/tests/fuzz_parse -max_total_time=300
 build-fuzz/tests/fuzz_pb -max_total_time=300
+build-fuzz/tests/fuzz_riakctl -max_total_time=300 -close_fd_mask=2
 ```
 
 `fuzz_parse` covers the JSON parsers, the multipart parser (streamed and
@@ -149,6 +151,15 @@ one-shot results are compared), the data type parser and URL decoding.
 `fuzz_pb` covers the decoding of Protocol Buffers responses into objects,
 sibling sets and put results, the mapping of Riak error messages, and the
 base64 decoding of vector clocks and contexts.
+`fuzz_riakctl` covers the parsers of riakctl that see untrusted input (node
+URLs, base64, the text/base64 form of values in backups, numbers and quorums)
+and checks that values and bytes survive their round trips unchanged.
+
+riakctl is also checked beyond the test suites: every process of the demo
+workflow ran under valgrind memcheck over PB, HTTP, PBS and HTTPS (no leaks,
+no invalid or uninitialised accesses), the parallel restore ran under
+ThreadSanitizer, and backups and restores of 100,000 objects with siblings
+and large values were compared with their source after the round trip.
 
 ```sh
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug -DRIAK_COVERAGE=ON
