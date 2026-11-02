@@ -120,3 +120,17 @@ if(RIAK_FUZZ)
   target_link_options(fuzz_pb PRIVATE -fsanitize=fuzzer)
   target_link_libraries(fuzz_pb PRIVATE riak_objects riak_pbgen riak_warnings)
 endif()
+
+# riakctl: against the stub (no Riak needed) and, with RIAK_TEST_URL, the
+# demo workflow of examples/cli against a live node
+if(TARGET riakctl AND Python3_Interpreter_FOUND)
+  add_test(NAME riakctl_cli
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stub_riak.py
+            sh ${CMAKE_CURRENT_SOURCE_DIR}/cli/stub.sh $<TARGET_FILE:riakctl>)
+  set_tests_properties(riakctl_cli PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+endif()
+if(TARGET riakctl)
+  add_test(NAME riakctl_live
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cli/live.sh $<TARGET_FILE:riakctl>)
+  set_tests_properties(riakctl_live PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()

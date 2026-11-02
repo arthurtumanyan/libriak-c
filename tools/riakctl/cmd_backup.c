@@ -470,6 +470,34 @@ static riak_status put_sib(rs_ctx *r, const char *key, const rs_sib *s, const ch
     return riak_put(r->c, r->bucket, key, s->data, s->len, &o, NULL, NULL);
 }
 
+/* The key holds a sibling equal to s. */
+static bool present(rs_ctx *r, const char *key, const rs_sib *s) {
+    riak_object_set cur = {0};
+    riak_opts o = {0};
+    o.bucket_type = r->type;
+    bool found = false;
+    if (riak_get_siblings(r->c, r->bucket, key, &o, &cur) == RIAK_OK) {
+        for (size_t i = 0; i < cur.count && !found; i++) {
+            found = sib_eq(s, &cur.items[i]);
+        }
+    }
+    riak_object_set_free(&cur);
+    return found;
+}
+
+/* Vector clock of the tombstone of a deleted key, NULL when unknown. */
+static char *tombstone_vclock(rs_ctx *r, const char *key) {
+    riak_opts o = {0};
+    o.bucket_type = r->type;
+    o.deletedvclock = true;
+    o.head = true;
+    riak_object obj = {0};
+    riak_get(r->c, r->bucket, key, &o, &obj);
+    char *v = obj.vclock ? strdup(obj.vclock) : NULL;
+    riak_object_free(&obj);
+    return v;
+}
+
 /* Restores one object; returns false after a failure. */
 static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
     json_object *sibs, *v;
@@ -522,6 +550,13 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         st = put_sib(r, key, &s[0], vclock, vclock != NULL);
         if (st != RIAK_OK && st != RIAK_E_TRANSPORT && st != RIAK_E_UNAUTHORIZED) {
             st = put_sib(r, key, &s[0], cur.vclock, false);
+        } else if (st == RIAK_OK && cur.count == 0 && !present(r, key, &s[0])) {
+            /* the tombstone of a recent delete descends the backup's clock
+             * and wins over an "asis" write: the object is written again
+             * as an update of the tombstone */
+            char *tomb = tombstone_vclock(r, key);
+            st = put_sib(r, key, &s[0], tomb, false);
+            free(tomb);
         }
         ok = st == RIAK_OK;
         if (!ok) {
@@ -530,16 +565,21 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         r->restored += ok;
     } else if (ok) {
         /* one sibling per put; each write without a vector clock becomes a
-         * sibling of what is stored (in allow_mult buckets) */
+         * sibling of what is stored (in allow_mult buckets). On a deleted
+         * key the first write replaces the tombstone. */
+        char *tomb = cur.count == 0 ? tombstone_vclock(r, key) : NULL;
         for (size_t i = 0; ok && i < n; i++) {
             if (missing[i]) {
-                st = put_sib(r, key, &s[i], NULL, false);
+                st = put_sib(r, key, &s[i], tomb, false);
+                free(tomb);
+                tomb = NULL;
                 ok = st == RIAK_OK;
                 if (!ok) {
                     rc_fail(r->c, key, st);
                 }
             }
         }
+        free(tomb);
         r->restored += ok;
     }
     riak_object_set_free(&cur);
