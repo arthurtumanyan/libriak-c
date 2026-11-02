@@ -422,7 +422,7 @@ int rc_cmd_put(rc_ctx *x, int argc, char **argv) {
 
     /* metadata and index entries share one array: meta first, then indexes */
     pairs = calloc(meta.count + index.count + 1, sizeof *pairs);
-    owned = calloc(2 * (meta.count + index.count) + 1, sizeof *owned);
+    owned = (char **)calloc(2 * (meta.count + index.count) + 1, sizeof *owned);
     if (pairs == NULL || owned == NULL) {
         rc = RC_ERROR;
         goto out;
@@ -489,7 +489,7 @@ out:
         for (size_t i = 0; i < 2 * (meta.count + index.count); i++) {
             free(owned[i]);
         }
-        free(owned);
+        free((void *)owned);
     }
     free(pairs);
     free(data);

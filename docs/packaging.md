@@ -2,16 +2,19 @@
 
 ## Packages
 
-Each format consists of a runtime and a development package:
+Each format consists of a runtime, a development and a tools package:
 
 | | Debian / Ubuntu | Fedora / EL |
 |---|---|---|
 | Runtime | `libriak-c2` | `libriak-c` |
 | Development | `libriak-c-dev` | `libriak-c-devel` |
+| Tools | `libriak-c-tools` | `libriak-c-tools` |
 
 The runtime package holds the shared library and documentation; the
 development package holds the header, the static library, the `.so` link,
-the CMake package and the pkg-config file. Runtime dependencies are derived
+the CMake package and the pkg-config file. The tools package holds the
+[`riakctl`](riakctl.md) command-line client and its man page, and depends on
+the runtime package of the same version. Runtime dependencies are derived
 by `dpkg-shlibdeps` and RPM autoreq; the development packages depend on the
 libcurl, json-c, protobuf-c, OpenSSL and zlib development packages.
 
@@ -32,7 +35,9 @@ packaging/build-packages.sh DEB      # or RPM; output in dist/
 ```
 
 `packaging/smoke-test.sh` compiles `examples/basic.c` against the installed
-packages through pkg-config and through the CMake package, shared and static.
+packages through pkg-config and through the CMake package, shared and static,
+and checks the installed `riakctl` (version, linkage, exit code of an
+unreachable node, packaged man page).
 
 ## Prebuilt packages
 

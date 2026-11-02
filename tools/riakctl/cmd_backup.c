@@ -288,7 +288,10 @@ int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
     char created[32];
     time_t now = time(NULL);
     struct tm tm;
-    strftime(created, sizeof created, "%Y-%m-%dT%H:%M:%SZ", gmtime_r(&now, &tm));
+    if (gmtime_r(&now, &tm) == NULL ||
+        strftime(created, sizeof created, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) {
+        created[0] = '\0';
+    }
     json_object *h = json_object_new_object();
     json_object_object_add(h, "format", json_object_new_string(BACKUP_FORMAT));
     json_object_object_add(h, "version", json_object_new_int(BACKUP_VERSION));
@@ -413,7 +416,7 @@ static bool sib_decode(json_object *o, rs_sib *s) {
         json_object_object_foreach(v, iname, ivals) {
             size_t k =
                 json_object_is_type(ivals, json_type_array) ? json_object_array_length(ivals) : 1;
-            for (size_t i = 0; i < k; i++) {
+            for (size_t i = 0; i < k && s->n_indexes < n; i++) {
                 json_object *e = json_object_is_type(ivals, json_type_array)
                                      ? json_object_array_get_idx(ivals, i)
                                      : ivals;
@@ -876,7 +879,7 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
     }
     free(line);
     if (f != stdin) {
-        fclose(f);
+        (void)fclose(f); /* read-only: nothing is lost */
     }
     if (header == NULL) {
         if (rc == RC_OK) {

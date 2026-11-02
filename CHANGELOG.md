@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `riakctl`, a command-line client for Riak KV built on the library, in a
+  new `libriak-c-tools` package with a `riakctl(1)` man page (CMake option
+  `RIAK_BUILD_TOOLS`). It reaches nodes over Protocol Buffers or HTTP, with
+  TLS, authentication and multi-node URLs, prints JSON (JSON Lines for
+  streams) and reports failures through stable exit codes. Commands: ping,
+  info, stats, get, put, delete, list, index, query, mapred, coverage,
+  preflist, dt, counter, props, search, aae (including `aae compare`, which
+  lists the keys whose clocks differ between two clusters or buckets),
+  repl, backup and restore. Backups are JSON Lines files with every
+  sibling, vector clock, content type, metadata, index and link, or the
+  values of data type buckets; restores are idempotent and keep the vector
+  clocks of single-sibling objects. See [docs/riakctl.md](docs/riakctl.md).
+- Demo workflows built on `riakctl` in `examples/cli/` (connectivity,
+  checked backup and restore, Nagios-style health check, statistics
+  sampling, paged index queries, AAE inspection, replication queues), run
+  as one scenario by `run-all.sh`, against a Docker node by `run-demo.sh`,
+  and in CI by the new `riakctl_live` test; `riakctl_cli` tests the tool
+  against the stub server.
+
 ## 2.1.0 — 2026-10-29
 
 ### Fixed

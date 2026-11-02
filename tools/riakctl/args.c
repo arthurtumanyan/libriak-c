@@ -21,7 +21,7 @@ void rc_getopt_reset(void) {
 }
 
 bool rc_strv_push(rc_strv *v, const char *s) {
-    const char **n = realloc(v->items, (v->count + 1) * sizeof *n);
+    const char **n = (const char **)realloc((void *)v->items, (v->count + 1) * sizeof *n);
     if (n == NULL) {
         return false;
     }
@@ -31,7 +31,7 @@ bool rc_strv_push(rc_strv *v, const char *s) {
 }
 
 void rc_strv_free(rc_strv *v) {
-    free(v->items);
+    free((void *)v->items);
     v->items = NULL;
     v->count = 0;
 }

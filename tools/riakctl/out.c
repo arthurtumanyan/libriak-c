@@ -64,9 +64,9 @@ int rc_fail(riak_client *c, const char *what, riak_status st) {
 int rc_usage_error(const char *cmd, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "riakctl %s: ", cmd);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\nriakctl help %s shows the usage\n", cmd);
+    (void)fprintf(stderr, "riakctl %s: ", cmd);
+    (void)vfprintf(stderr, fmt, ap);
+    (void)fprintf(stderr, "\nriakctl help %s shows the usage\n", cmd);
     va_end(ap);
     return RC_USAGE;
 }
@@ -74,18 +74,19 @@ int rc_usage_error(const char *cmd, const char *fmt, ...) {
 void rc_warn(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fputs("riakctl: ", stderr);
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
+    (void)fputs("riakctl: ", stderr);
+    (void)vfprintf(stderr, fmt, ap);
+    (void)fputc('\n', stderr);
     va_end(ap);
 }
 
+/* json-c's flags are int macros */
 static int print_flags(int extra) {
-    int f = extra;
+    unsigned f = (unsigned)extra;
 #ifdef JSON_C_TO_STRING_NOSLASHESCAPE
-    f |= JSON_C_TO_STRING_NOSLASHESCAPE;
+    f |= (unsigned)JSON_C_TO_STRING_NOSLASHESCAPE;
 #endif
-    return f;
+    return (int)f;
 }
 
 static int put_json(json_object *o, int flags) {
@@ -103,8 +104,8 @@ int rc_print(rc_ctx *x, json_object *o) {
         fprintf(stderr, "riakctl: out of memory\n");
         return RC_ERROR;
     }
-    return put_json(o, x->pretty ? JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_SPACED
-                                 : JSON_C_TO_STRING_PLAIN);
+    unsigned pretty = (unsigned)JSON_C_TO_STRING_PRETTY | (unsigned)JSON_C_TO_STRING_SPACED;
+    return put_json(o, x->pretty ? (int)pretty : JSON_C_TO_STRING_PLAIN);
 }
 
 int rc_print_line(json_object *o) {
@@ -128,58 +129,69 @@ json_object *rc_parse_json(const char *text, const char *what) {
 
 static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+static char b64_char(uint32_t v) {
+    return b64[v & 63U];
+}
+
 char *rc_base64_encode(const unsigned char *data, size_t len) {
     char *out = malloc((len + 2) / 3 * 4 + 1);
     if (out == NULL) {
         return NULL;
     }
     char *p = out;
-    size_t i = 0;
-    for (; i + 2 < len; i += 3) {
-        uint32_t v = (uint32_t)data[i] << 16 | (uint32_t)data[i + 1] << 8 | data[i + 2];
-        *p++ = b64[v >> 18];
-        *p++ = b64[(v >> 12) & 63];
-        *p++ = b64[(v >> 6) & 63];
-        *p++ = b64[v & 63];
-    }
-    if (i < len) {
-        uint32_t v = (uint32_t)data[i] << 16;
-        if (i + 1 < len) {
-            v |= (uint32_t)data[i + 1] << 8;
+    for (size_t i = 0; i < len; i += 3) {
+        size_t left = len - i;
+        uint32_t v = (uint32_t)data[i] << 16U;
+        if (left > 1) {
+            v |= (uint32_t)data[i + 1] << 8U;
         }
-        *p++ = b64[v >> 18];
-        *p++ = b64[(v >> 12) & 63];
-        *p++ = i + 1 < len ? b64[(v >> 6) & 63] : '=';
-        *p++ = '=';
+        if (left > 2) {
+            v |= data[i + 2];
+        }
+        *p++ = b64_char(v >> 18U);
+        *p++ = b64_char(v >> 12U);
+        *p++ = left > 1 ? b64_char(v >> 6U) : '=';
+        *p++ = left > 2 ? b64_char(v) : '=';
     }
     *p = '\0';
     return out;
 }
 
+/* Value of a base64 character, -1 for other characters. */
+static int b64_value(char ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch - 'A';
+    }
+    if (ch >= 'a' && ch <= 'z') {
+        return ch - 'a' + 26;
+    }
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0' + 52;
+    }
+    return ch == '+' ? 62 : ch == '/' ? 63 : -1;
+}
+
 unsigned char *rc_base64_decode(const char *text, size_t *len) {
     size_t n = strlen(text);
-    unsigned char *out = malloc(n / 4 * 3 + 3);
+    size_t cap = n / 4 * 3 + 3;
+    unsigned char *out = malloc(cap);
     if (out == NULL) {
         return NULL;
     }
     uint32_t acc = 0;
-    int bits = 0;
+    unsigned bits = 0;
     size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        char ch = text[i];
-        if (ch == '=') {
-            break;
-        }
-        const char *pos = ch ? strchr(b64, ch) : NULL;
-        if (pos == NULL) {
+    for (size_t i = 0; i < n && text[i] != '='; i++) {
+        int v = b64_value(text[i]);
+        if (v < 0 || o >= cap) {
             free(out);
             return NULL;
         }
-        acc = acc << 6 | (uint32_t)(pos - b64);
+        acc = (acc << 6U) | (uint32_t)v;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
-            out[o++] = (unsigned char)(acc >> bits);
+            out[o++] = (unsigned char)((acc >> bits) & 0xFFU);
         }
     }
     *len = o;
@@ -188,43 +200,48 @@ unsigned char *rc_base64_decode(const char *text, size_t *len) {
 
 /* ---- values and objects ------------------------------------------------- */
 
+/* Length of the UTF-8 sequence starting with c (0: invalid lead byte), and
+ * the payload bits of c. */
+static size_t utf8_lead(unsigned c, uint32_t *cp) {
+    if (c >= 0x01U && c < 0x80U) {
+        *cp = c;
+        return 1;
+    }
+    if ((c & 0xE0U) == 0xC0U) {
+        *cp = c & 0x1FU;
+        return 2;
+    }
+    if ((c & 0xF0U) == 0xE0U) {
+        *cp = c & 0x0FU;
+        return 3;
+    }
+    if ((c & 0xF8U) == 0xF0U) {
+        *cp = c & 0x07U;
+        return 4;
+    }
+    return 0; /* NUL bytes are rejected too: values with them go to base64 */
+}
+
 static bool valid_utf8(const unsigned char *s, size_t len) {
+    static const uint32_t min_cp[] = {0, 0, 0x80, 0x800, 0x10000};
     size_t i = 0;
     while (i < len) {
-        unsigned char c = s[i];
-        size_t n;
         uint32_t cp;
-        if (c == 0) {
-            return false;
-        } else if (c < 0x80) {
-            i++;
-            continue;
-        } else if ((c & 0xE0) == 0xC0) {
-            n = 1;
-            cp = c & 0x1F;
-        } else if ((c & 0xF0) == 0xE0) {
-            n = 2;
-            cp = c & 0x0F;
-        } else if ((c & 0xF8) == 0xF0) {
-            n = 3;
-            cp = c & 0x07;
-        } else {
+        size_t n = utf8_lead(s[i], &cp);
+        if (n == 0 || n > len - i) {
             return false;
         }
-        if (i + n >= len) {
-            return false;
-        }
-        for (size_t k = 1; k <= n; k++) {
-            if ((s[i + k] & 0xC0) != 0x80) {
+        for (size_t k = 1; k < n; k++) {
+            unsigned c = s[i + k];
+            if ((c & 0xC0U) != 0x80U) {
                 return false;
             }
-            cp = cp << 6 | (s[i + k] & 0x3F);
+            cp = (cp << 6U) | (c & 0x3FU);
         }
-        if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && cp < 0x10000) ||
-            cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        if (cp < min_cp[n] || cp > 0x10FFFFU || (cp >= 0xD800U && cp <= 0xDFFFU)) {
             return false;
         }
-        i += n + 1;
+        i += n;
     }
     return true;
 }
@@ -238,6 +255,7 @@ json_object *rc_value_json(const char *data, size_t len) {
     }
     if (data == NULL) {
         data = "";
+        len = 0;
     }
     if (valid_utf8((const unsigned char *)data, len)) {
         json_object_object_add(o, "value", json_object_new_string_len(data, (int)len));
@@ -374,7 +392,7 @@ bool rc_read_all(FILE *f, char **data, size_t *len) {
         return false;
     }
     for (;;) {
-        if (n + 1 >= cap) {
+        if (cap - n < 2) {
             char *nb = realloc(buf, cap * 2);
             if (nb == NULL) {
                 free(buf);
@@ -383,10 +401,11 @@ bool rc_read_all(FILE *f, char **data, size_t *len) {
             buf = nb;
             cap *= 2;
         }
-        size_t r = fread(buf + n, 1, cap - n - 1, f);
+        size_t want = cap - n - 1;
+        size_t r = fread(buf + n, 1, want, f);
         n += r;
-        if (r == 0) {
-            break;
+        if (r < want) {
+            break; /* end of input or an error */
         }
     }
     if (ferror(f)) {
@@ -410,7 +429,7 @@ char *rc_read_file(const char *path, size_t *len) {
         fprintf(stderr, "riakctl: cannot read %s\n", path);
     }
     if (f != stdin) {
-        fclose(f);
+        (void)fclose(f); /* read-only: nothing is lost */
     }
     return data;
 }

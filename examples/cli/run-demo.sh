@@ -18,7 +18,7 @@ fi
 if [ -z "${RIAKCTL:-}" ] && [ -x "$root/build/tools/riakctl/riakctl" ]; then
     RIAKCTL=$root/build/tools/riakctl/riakctl
 fi
-export RIAKCTL=${RIAKCTL:-riakctl}
+export RIAKCTL="${RIAKCTL:-riakctl}"
 
 name=riakctl-demo-$$
 trap 'docker rm -f "$name" >/dev/null 2>&1' EXIT INT TERM
@@ -34,5 +34,5 @@ pb) RIAK_URL=pb://127.0.0.1:$pb ;;
 http) RIAK_URL=http://127.0.0.1:$http ;;
 *) echo "transport pb or http" >&2; exit 2 ;;
 esac
-export RIAK_URL RIAK_HTTP_PORT=$http
+export RIAK_URL RIAK_HTTP_PORT="$http"
 sh "$root/examples/cli/run-all.sh"

@@ -90,7 +90,7 @@ check "bucket properties" jq -e '.props.n_val == 3' "$work/out"
 
 # backup and restore (key listing over HTTP), then a second, idempotent restore
 for i in 1 2 3; do
-    printf "v$i" | "$R" put -i "n_int=$i" -m "m=$i" src "k$i" || { echo "FAIL: put k$i" >&2; failures=$((failures + 1)); }
+    printf 'v%s' "$i" | "$R" put -i "n_int=$i" -m "m=$i" src "k$i" || { echo "FAIL: put k$i" >&2; failures=$((failures + 1)); }
 done
 expect 0 "$R" backup --method keys -o "$work/b.jsonl" src
 check "backup trailer" [ "$(tail -n 1 "$work/b.jsonl" | jq .count)" -eq 3 ]

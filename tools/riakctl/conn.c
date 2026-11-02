@@ -102,7 +102,7 @@ int rc_conn_setup(rc_conn *c, const char *urls) {
             if (nn) {
                 c->nodes = nn;
             }
-            char **nh = realloc(c->hosts, cap * sizeof *nh);
+            char **nh = (char **)realloc((void *)c->hosts, cap * sizeof *nh);
             if (nh) {
                 c->hosts = nh;
             }
@@ -154,7 +154,7 @@ void rc_conn_free(rc_conn *c) {
     for (size_t i = 0; i < c->n_nodes; i++) {
         free(c->hosts[i]);
     }
-    free(c->hosts);
+    free((void *)c->hosts);
     c->hosts = NULL;
     free(c->nodes);
     c->nodes = NULL;

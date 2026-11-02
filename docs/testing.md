@@ -12,6 +12,8 @@
 | `threads` | Eight threads with one client each, on both transports, every result checked; with `-DRIAK_SANITIZE=thread` ThreadSanitizer checks the library for data races | Python 3 for the HTTP part |
 | `docs` | API names used in `README.md` and `docs/` exist; complete example programs build | Python 3 |
 | `live` | Everything against a real Riak node | `RIAK_TEST_URL` |
+| `riakctl_cli` | `riakctl` against `tests/stub_riak.py`: options, exit codes, JSON output, backup and restore | Python 3, jq |
+| `riakctl_live` | The `riakctl` demo workflow (`examples/cli/run-all.sh`) against a real Riak node, with the `RIAK_TEST_*` settings of `live` | `RIAK_TEST_URL`, jq |
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON -DRIAK_WERROR=ON

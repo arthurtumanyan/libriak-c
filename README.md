@@ -31,6 +31,11 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 - Security: verified TLS (HTTPS or STARTTLS), password authentication,
   client certificates
 - Logging and per-request metrics callbacks
+- `riakctl`, a command-line client for scripts and operations: objects,
+  queries, data types, properties, Search, AAE folds and cluster
+  comparison, replication queues, statistics, and idempotent backups and
+  restores that keep siblings, vector clocks, metadata and indexes; JSON
+  output and stable exit codes, with demo workflows in `examples/cli/`
 - Debian and RPM packages, a CMake package and a pkg-config file
 
 ## Installing
@@ -110,6 +115,7 @@ The guides are found in [`docs/`](docs/index.md):
 - [Testing](docs/testing.md)
 - [Packaging and releases](docs/packaging.md)
 - [Migrating from 1.x](docs/migration.md)
+- [riakctl command-line client](docs/riakctl.md)
 
 The API reference is generated from `include/riak/riak.h` with
 `cmake --build build --target docs` (Doxygen). Changes between versions are

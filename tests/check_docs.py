@@ -30,6 +30,11 @@ def main():
     known |= {"RIAK_TAG", "RIAK_PATCHES", "RIAK_IMAGE"}  # build arguments of tests/docker
     # Riak server applications and modules named in the operations guide
     known |= {"riak_pb", "riak_pb_dt_codec", "riak_kv_query_server", "riak_kv_pb_object"}
+    # environment variables of riakctl and its demo scripts
+    known |= {"RIAK_URL", "RIAK_HTTP_PORT", "RIAK_USER", "RIAK_PASSWORD", "RIAK_CA", "RIAK_CERT",
+              "RIAK_KEY", "RIAK_TLS_LEGACY", "RIAK_FEATURES", "RIAK_MULTI_TYPE", "RIAK_MAP_TYPE",
+              "RIAK_REPL_QUEUE"}
+    known |= {"riak_version"}  # field of the riakctl backup header
     env_prefixes = ("RIAK_TEST_", "RIAK_DOCS_")
     failures = 0
     programs = 0

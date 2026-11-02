@@ -62,7 +62,7 @@ static bool parse_ids(const char *s, uint32_t **ids, size_t *n) {
     char *copy = strdup(s);
     char *save = NULL;
     bool ok = copy != NULL;
-    for (char *t = ok ? strtok_r(copy, ",", &save) : NULL; ok && t;
+    for (char *t = ok ? strtok_r(copy, ",", &save) : NULL; ok && t && *n < cap;
          t = strtok_r(NULL, ",", &save)) {
         unsigned long long v;
         ok = rc_parse_uint(t, 0xFFFFFFFFu, &v);
@@ -228,7 +228,7 @@ static int compare_segments(riak_client *a, riak_client *b, riak_aae_filter fa, 
 }
 
 static const riak_aae_branch *find_branch(const riak_aae_tree *t, uint32_t id) {
-    for (size_t i = 0; i < t->n_branches; i++) {
+    for (size_t i = 0; t->branches && i < t->n_branches; i++) {
         if (t->branches[i].id == id) {
             return &t->branches[i];
         }
@@ -278,18 +278,23 @@ static int aae_compare(rc_ctx *x, riak_client *c, riak_aae_filter f, riak_aae_tr
                 continue; /* compared from the local side */
             }
         }
-        size_t len = ba ? ba->len : bb->len;
+        /* at least one side holds the branch */
+        const riak_aae_branch *ref = ba ? ba : bb;
+        if (ref == NULL) {
+            continue;
+        }
+        size_t len = ref->len;
         if (ba && bb && (ba->len != bb->len)) {
             fprintf(stderr, "riakctl: aae compare: trees of different shapes\n");
             rc = RC_ERROR;
             break;
         }
-        if (ba && bb && memcmp(ba->data, bb->data, len) == 0) {
+        if (ba && bb && (len == 0 || memcmp(ba->data, bb->data, len) == 0)) {
             continue;
         }
         for (size_t s = 0; s < len / HASH_BYTES; s++) {
-            const uint8_t *ha = ba ? ba->data + s * HASH_BYTES : NULL;
-            const uint8_t *hb = bb ? bb->data + s * HASH_BYTES : NULL;
+            const uint8_t *ha = ba && ba->data ? ba->data + s * HASH_BYTES : NULL;
+            const uint8_t *hb = bb && bb->data ? bb->data + s * HASH_BYTES : NULL;
             static const uint8_t zero[HASH_BYTES];
             if (memcmp(ha ? ha : zero, hb ? hb : zero, HASH_BYTES) == 0) {
                 continue;
