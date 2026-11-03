@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.2.1 — 2026-11-03
+
+### Added
+- Signed apt and dnf repositories on GitHub Pages, rebuilt from the packages
+  of all releases by `.github/workflows/repository.yml` after each release
+  (`packaging/repo-site.sh`, `packaging/make-repo.sh`); installing
+  `libriak-c-tools` or `libriak-c-dev` from them pulls in the runtime
+  package.
+- Release packages for Ubuntu 22.04, 24.04 and 26.04, Debian 12 and 13,
+  Fedora 44 and 45 and AlmaLinux 9 and 10, each built and install-tested in
+  a container of its distribution (previously Ubuntu 22.04 and 24.04, the
+  newest Fedora and AlmaLinux 10).
+
+### Fixed
+- Build with libcurl 7.68 to 7.76 (AlmaLinux 9): `CURLE_SSL_CLIENTCERT` is
+  only used from libcurl 7.77, where it was introduced.
+- OpenSSL 4: the TLS peer name is set with `SSL_set1_dnsname` and
+  `SSL_set1_ipaddr` instead of the deprecated `SSL_set1_host`, and a
+  connection dropped during the TLS handshake over Protocol Buffers is again
+  reported with the `tls_legacy` hint.
+- HTTPS with libcurl 8.21: an unusable client key (missing, wrong passphrase,
+  not matching the certificate) is reported as `RIAK_E_TLS` instead of
+  `RIAK_E_TRANSPORT`.
+- Protocol buffer code is generated with `protoc` and the `protoc-gen-c`
+  plugin where both are installed; the deprecated `protoc-c` remains the
+  fallback.
+- CPack variables are written verbatim, which removes the invalid escape
+  warning of CMake 3.26 in the generated configuration.
+
 ## 2.2.0 — 2026-11-03
 
 ### Added

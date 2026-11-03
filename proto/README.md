@@ -18,5 +18,6 @@ field of the same name, which protoc rejects (Erlang's gpb accepts it). Enum
 values travel as numbers, so the rename does not change the wire format. They are distributed under the Apache License 2.0
 (see `LICENSE`).
 
-C code is generated from them with `protoc-c` at build time. The message
+C code is generated from them at build time with `protoc` and the
+`protoc-gen-c` plugin, or with `protoc-c` where those are missing. The message
 codes from `riak_pb_messages.csv` are mirrored in `src/pb.h`.

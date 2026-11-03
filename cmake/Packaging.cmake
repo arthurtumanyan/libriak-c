@@ -26,6 +26,7 @@ set(CPACK_COMPONENT_TOOLS_DESCRIPTION "Riak KV client library (Protocol Buffers 
 set(CPACK_COMPONENT_DEV_DEPENDS runtime)
 set(CPACK_COMPONENT_TOOLS_DEPENDS runtime)
 set(CPACK_SOURCE_GENERATOR TGZ)
+set(CPACK_VERBATIM_VARIABLES ON)
 set(CPACK_SOURCE_IGNORE_FILES /\\.git/ /build.*/ /graphify-out/)
 
 set(RIAK_PKG_RELEASE 1 CACHE STRING "Package release number")

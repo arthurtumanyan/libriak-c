@@ -9,30 +9,35 @@ permissions:
 
 jobs:
   deb:
-    name: deb / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: deb / ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        image: ["ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "debian:12", "debian:13"]
+    env:
+      DEBIAN_FRONTEND: noninteractive
     steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake dpkg-dev file pkg-config libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libssl-dev zlib1g-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake dpkg-dev file libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev
       - name: Build packages
         run: packaging/build-packages.sh DEB
       - name: Install and smoke-test packages
         run: |
-          sudo apt-get remove -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev
-          sudo apt-get install -y ./dist/*.deb
+          apt-get remove -y libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libssl-dev zlib1g-dev
+          apt-get install -y ./dist/*.deb
           packaging/smoke-test.sh
+      - id: name
+        run: echo "artifact=deb-$(echo '${{ matrix.image }}' | tr ':/' '--')" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: deb-${{ matrix.os }}
+          name: ${{ steps.name.outputs.artifact }}
           path: dist/*.deb
           if-no-files-found: error
 
@@ -43,8 +48,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ["fedora:latest", "almalinux:10"]
+        image: ["fedora:44", "fedora:45", "almalinux:9", "almalinux:10"]
     steps:
+      - name: Enable CodeReady Builder
+        if: startsWith(matrix.image, 'almalinux:')
+        run: |
+          dnf -y install dnf-plugins-core
+          dnf config-manager --set-enabled crb
       - name: Install build dependencies
         run: dnf -y install gcc cmake make rpm-build libcurl-devel json-c-devel protobuf-c-devel protobuf-c-compiler openssl-devel zlib-devel pkgconf-pkg-config
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,3 +113,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "libriak-c $VERSION" --notes-file notes.md
+
+  repository:
+    needs: release
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/repository.yml
+    secrets: inherit

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libriak-c VERSION 2.2.0 LANGUAGES C
+project(libriak-c VERSION 2.2.1 LANGUAGES C
         DESCRIPTION "C client for Riak KV (Protocol Buffers and HTTP)")
 
 include(GNUInstallDirs)
@@ -34,7 +34,16 @@ find_package(OpenSSL 1.1.1 REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PROTOBUFC REQUIRED IMPORTED_TARGET libprotobuf-c>=1.3)
-find_program(PROTOC_C protoc-c REQUIRED)
+# protoc with the protoc-gen-c plugin (protobuf-c 1.4 and later); protoc-c,
+# deprecated since protobuf-c 1.5, where protoc or the plugin is missing.
+find_program(PROTOC protoc)
+find_program(PROTOC_GEN_C protoc-gen-c)
+if(PROTOC AND PROTOC_GEN_C)
+  set(RIAK_PROTOC_COMMAND ${PROTOC} --plugin=protoc-gen-c=${PROTOC_GEN_C})
+else()
+  find_program(PROTOC_C protoc-c REQUIRED)
+  set(RIAK_PROTOC_COMMAND ${PROTOC_C})
+endif()
 
 # C code for the Riak protocol buffer messages is generated from proto/.
 set(RIAK_PROTOS riak riak_kv riak_dt riak_search riak_yokozuna riak_repl)
@@ -49,7 +58,7 @@ string(REPLACE ".pb-c.c" ".pb-c.h" RIAK_PB_HEADERS "${RIAK_PB_SOURCES}")
 add_custom_command(
   OUTPUT ${RIAK_PB_SOURCES} ${RIAK_PB_HEADERS}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${RIAK_PB_DIR}
-  COMMAND ${PROTOC_C} --proto_path=${PROJECT_SOURCE_DIR}/proto --c_out=${RIAK_PB_DIR}
+  COMMAND ${RIAK_PROTOC_COMMAND} --proto_path=${PROJECT_SOURCE_DIR}/proto --c_out=${RIAK_PB_DIR}
           ${RIAK_PB_FILES}
   DEPENDS ${RIAK_PB_FILES}
   COMMENT "Generating protocol buffer code"

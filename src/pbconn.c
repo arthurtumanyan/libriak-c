@@ -118,6 +118,13 @@ static void tls_fail(riak_pbconn *k, const char *what) {
                k->c->cert_file == NULL && k->state == RIAK_PBC_HANDSHAKE) {
 #endif
         fail(k, RIAK_E_TLS, "server requires a client certificate");
+#ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
+    } else if (ERR_GET_REASON(e) == SSL_R_UNEXPECTED_EOF_WHILE_READING &&
+               k->state == RIAK_PBC_HANDSHAKE) {
+        /* OpenSSL 4 reports a connection dropped in the handshake as an error */
+        fail(k, RIAK_E_TLS, "%s: connection closed by %s:%u%s", what, node_name(k), node_port(k),
+             k->c->cfg.tls_legacy ? "" : LEGACY_HINT);
+#endif
     } else if (e != 0) {
         char buf[200];
         ERR_error_string_n(e, buf, sizeof buf);
@@ -344,8 +351,13 @@ static bool start_tls(riak_pbconn *k) {
         (void)SSL_set_tlsext_host_name(k->ssl, c->nodes[k->node].host);
     }
     if (c->cfg.tls_verify) {
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+        /* OpenSSL 4 deprecates SSL_set1_host in favour of these */
+        int ok = ip ? SSL_set1_ipaddr(k->ssl, host) : SSL_set1_dnsname(k->ssl, host);
+#else
         int ok = ip ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(k->ssl), host)
                     : SSL_set1_host(k->ssl, host);
+#endif
         if (ok != 1) {
             fail(k, RIAK_E_NOMEM, "cannot set the TLS peer name");
             return false;
