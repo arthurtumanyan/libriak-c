@@ -8,7 +8,7 @@ Each format consists of a runtime, a development and a tools package:
 |---|---|---|
 | Runtime | `libriak-c2` | `libriak-c` |
 | Development | `libriak-c-dev` | `libriak-c-devel` |
-| Tools | `libriak-c-tools` | `libriak-c-tools` |
+| Tools | `riakctl` | `riakctl` |
 
 The runtime package holds the shared library and documentation; the
 development package holds the header, the static library, the `.so` link,
@@ -18,6 +18,12 @@ the runtime package of the same version. Runtime dependencies are derived
 by `dpkg-shlibdeps` and RPM autoreq; the development packages depend on the
 libcurl, json-c, protobuf-c, OpenSSL and zlib development packages.
 
+Up to 2.2.1 the tools package was named `libriak-c-tools`. From 2.2.2 on,
+the `riakctl` package obsoletes it on Fedora/EL (`dnf upgrade` replaces it);
+on Debian/Ubuntu a transitional `libriak-c-tools` package depends on
+`riakctl`, so `apt upgrade` installs `riakctl`; the transitional package can
+then be removed with `apt remove libriak-c-tools`.
+
 The runtime package of every 2.x release is named after the library's
 major version (`libriak-c2`, `libriak-c.so.2`): a 2.1 package replaces 2.0,
 and programs built against 2.0.0 keep working with it (see
@@ -25,8 +31,8 @@ and programs built against 2.0.0 keep working with it (see
 
 Package versions carry the distribution (`2.1.0-1~ubuntu24.04`,
 `2.1.0-1.fc42`), so packages for different distributions do not collide.
-They are built and install-tested on Ubuntu 22.04 and 24.04, Debian 12,
-Fedora and AlmaLinux 10.
+They are built and install-tested on Ubuntu 22.04, 24.04 and 26.04, Debian
+12 and 13, Fedora 44 and 45 and AlmaLinux 9 and 10.
 
 Packages are built locally with:
 
@@ -44,7 +50,7 @@ unreachable node, packaged man page).
 Signed apt and dnf repositories with the packages of all releases are
 published on GitHub Pages at https://arthurtumanyan.github.io/libriak-c/.
 With the repository configured, the package manager resolves the
-dependencies itself: installing `libriak-c-tools` or `libriak-c-dev` pulls in
+dependencies itself: installing `riakctl` or `libriak-c-dev` pulls in
 the runtime package of the same version, and upgrades arrive with the
 regular system updates.
 
@@ -59,7 +65,7 @@ curl -fsSL "$repo/libriak-c.asc" | sudo tee /etc/apt/keyrings/libriak-c.asc > /d
 echo "deb [signed-by=/etc/apt/keyrings/libriak-c.asc] $repo/deb/ubuntu-24.04 ./" |
     sudo tee /etc/apt/sources.list.d/libriak-c.list
 sudo apt update
-sudo apt install libriak-c-tools    # riakctl; libriak-c-dev for development
+sudo apt install riakctl    # libriak-c-dev for development
 ```
 
 Fedora 44 and 45 (`libriak-c-fedora.repo`) and AlmaLinux, Rocky Linux or
@@ -68,7 +74,7 @@ RHEL 9 and 10 (`libriak-c-el.repo`):
 ```sh
 sudo curl -fsSL -o /etc/yum.repos.d/libriak-c.repo \
     https://arthurtumanyan.github.io/libriak-c/libriak-c-fedora.repo
-sudo dnf install libriak-c-tools    # riakctl; libriak-c-devel for development
+sudo dnf install riakctl    # libriak-c-devel for development
 ```
 
 The repository metadata (`InRelease`, `Release.gpg`, `repomd.xml.asc`) is
@@ -85,12 +91,31 @@ built for it. Up to 2.2.0 the releases were built for Ubuntu 22.04 and
 Ubuntu 26.04, Debian 12 and 13, Fedora 44 and EL 9 receive packages from
 2.2.1 on.
 
+## Fedora Copr
+
+The Fedora and EL packages are also built in the Copr project
+[`atumanyan/libriak-c`](https://copr.fedorainfracloud.org/coprs/atumanyan/libriak-c/)
+for Fedora 44 and 45 and EPEL 9 and 10, from the release tarball and
+`packaging/rpm/libriak-c.spec` (same package split and names as above):
+
+```sh
+sudo dnf copr enable atumanyan/libriak-c
+sudo dnf install riakctl
+```
+
+Copr signs the packages with its own per-project key. A release is
+submitted with:
+
+```sh
+packaging/copr-build.sh 2.2.2    # needs copr-cli and ~/.config/copr
+```
+
 ## Prebuilt packages in the source tree
 
 Prebuilt x86_64 packages of 2.1.0 and 2.2.0 are also kept in the source tree
 under `packages/<version>/<distribution>/`, together with a `SHA256SUMS`
 file, for Ubuntu 22.04 and 24.04, Debian 12, Fedora 42 and AlmaLinux 10.
-From 2.2.0 on, `libriak-c-tools` holds `riakctl`. Each set was installed
+In 2.2.0, `libriak-c-tools` holds `riakctl`. Each set was installed
 into a clean container of its distribution and passed
 `packaging/smoke-test.sh`.
 

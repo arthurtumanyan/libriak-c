@@ -1,0 +1,3 @@
+libriak-c-tools is a transitional package. From libriak-c 2.2.2 on, riakctl
+and its man page are shipped by the riakctl package; libriak-c-tools can be
+removed.

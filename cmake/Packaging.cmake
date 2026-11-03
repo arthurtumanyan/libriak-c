@@ -4,7 +4,10 @@
 #   runtime  libriak-c2 (deb) / libriak-c (rpm)        shared library, docs
 #   dev      libriak-c-dev (deb) / libriak-c-devel (rpm) headers, static lib,
 #            .so link, CMake package and pkg-config file
-#   tools    libriak-c-tools (deb and rpm)             riakctl and its man page
+#   tools    riakctl (deb and rpm)                     riakctl and its man page
+#
+# plus, for deb only, libriak-c-tools: the transitional package that moves
+# installations of the former tools package name to riakctl.
 
 set(CPACK_PACKAGE_NAME libriak-c)
 set(CPACK_PACKAGE_VENDOR "Arthur Tumanyan")
@@ -26,6 +29,8 @@ set(CPACK_COMPONENT_TOOLS_DESCRIPTION "Riak KV client library (Protocol Buffers 
 set(CPACK_COMPONENT_DEV_DEPENDS runtime)
 set(CPACK_COMPONENT_TOOLS_DEPENDS runtime)
 set(CPACK_SOURCE_GENERATOR TGZ)
+# selects the transitional component for deb only
+set(CPACK_PROJECT_CONFIG_FILE ${PROJECT_SOURCE_DIR}/cmake/CPackProjectConfig.cmake)
 set(CPACK_VERBATIM_VARIABLES ON)
 set(CPACK_SOURCE_IGNORE_FILES /\\.git/ /build.*/ /graphify-out/)
 
@@ -47,10 +52,19 @@ set(CPACK_DEBIAN_DEV_PACKAGE_DEPENDS
 
 # riakctl links libriak-c.so.2 of the runtime package: dpkg-shlibdeps finds it in the build tree
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS ${PROJECT_BINARY_DIR})
-set(CPACK_DEBIAN_TOOLS_PACKAGE_NAME libriak-c-tools)
+set(CPACK_DEBIAN_TOOLS_PACKAGE_NAME riakctl)
 set(CPACK_DEBIAN_TOOLS_PACKAGE_SECTION utils)
 set(CPACK_DEBIAN_TOOLS_PACKAGE_DEPENDS
   "libriak-c${PROJECT_VERSION_MAJOR} (= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE})")
+# riakctl was shipped as libriak-c-tools up to 2.2.1
+set(CPACK_DEBIAN_TOOLS_PACKAGE_REPLACES "libriak-c-tools (<< 2.2.2)")
+set(CPACK_DEBIAN_TOOLS_PACKAGE_BREAKS "libriak-c-tools (<< 2.2.2)")
+set(CPACK_DEBIAN_TRANSITIONAL_PACKAGE_NAME libriak-c-tools)
+set(CPACK_DEBIAN_TRANSITIONAL_PACKAGE_SECTION oldlibs)
+set(CPACK_DEBIAN_TRANSITIONAL_PACKAGE_ARCHITECTURE all)
+set(CPACK_DEBIAN_TRANSITIONAL_PACKAGE_DEPENDS
+  "riakctl (>= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE})")
+set(CPACK_COMPONENT_TRANSITIONAL_DESCRIPTION "Riak KV client library (Protocol Buffers and HTTP) - transitional package for riakctl")
 
 # RPM
 set(CPACK_RPM_COMPONENT_INSTALL ON)
@@ -62,10 +76,14 @@ set(CPACK_RPM_PACKAGE_GROUP "System Environment/Libraries")
 set(CPACK_RPM_PACKAGE_AUTOREQ ON)
 set(CPACK_RPM_RUNTIME_PACKAGE_NAME libriak-c)
 set(CPACK_RPM_DEV_PACKAGE_NAME libriak-c-devel)
-set(CPACK_RPM_DEV_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}, libcurl-devel, json-c-devel, protobuf-c-devel, openssl-devel, zlib-devel")
-set(CPACK_RPM_TOOLS_PACKAGE_NAME libriak-c-tools)
+# pkgconfig() names: Fedora 45 ships protobuf-c-devel next to protobuf3-c-devel, which obsoletes it
+set(CPACK_RPM_DEV_PACKAGE_REQUIRES
+  "libriak-c = ${PROJECT_VERSION}, pkgconfig(libcurl), pkgconfig(json-c), pkgconfig(libprotobuf-c), pkgconfig(openssl), pkgconfig(zlib)")
+set(CPACK_RPM_TOOLS_PACKAGE_NAME riakctl)
 set(CPACK_RPM_TOOLS_PACKAGE_GROUP "Applications/Databases")
 set(CPACK_RPM_TOOLS_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}")
+set(CPACK_RPM_TOOLS_PACKAGE_PROVIDES "libriak-c-tools = ${PROJECT_VERSION}")
+set(CPACK_RPM_TOOLS_PACKAGE_OBSOLETES "libriak-c-tools < 2.2.2")
 # system directories stay owned by the filesystem package
 list(APPEND CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
   ${CMAKE_INSTALL_FULL_MANDIR} ${CMAKE_INSTALL_FULL_MANDIR}/man1)

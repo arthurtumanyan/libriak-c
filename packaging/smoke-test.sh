@@ -33,7 +33,7 @@ if command -v riakctl >/dev/null 2>&1; then
     [ "$rc" -eq 7 ]  # nothing listens: "unreachable"
     riakctl help backup >/dev/null
     # the package lists the man page (minimal images may skip installing it)
-    { dpkg -L libriak-c-tools 2>/dev/null || rpm -ql libriak-c-tools 2>/dev/null; } |
+    { dpkg -L riakctl 2>/dev/null || rpm -ql riakctl 2>/dev/null; } |
         grep -q 'man1/riakctl\.1'
     echo "riakctl smoke test passed"
 fi
