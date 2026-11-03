@@ -47,8 +47,10 @@ static void test_config(void) {
     if (c) {
         riak_status st = riak_ping(c);
         if (st != RIAK_OK) { /* nothing listens there in the test */
-            /* libcurl's wording: HTTP, port 8098 (Protocol Buffers would be :8087) */
-            CHECK(strstr(riak_client_errmsg(c), "port 8098") != NULL);
+            /* libcurl's wording, "port 8098" or, in newer releases, "127.0.0.1:8098":
+             * HTTP (Protocol Buffers would be 8087) */
+            const char *msg = riak_client_errmsg(c);
+            CHECK(strstr(msg, "port 8098") != NULL || strstr(msg, ":8098") != NULL);
         }
         riak_client_free(c);
     }
