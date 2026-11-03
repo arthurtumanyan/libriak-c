@@ -446,6 +446,10 @@ be included.
   does not store starts a new key epoch, so that it never issues a counter
   twice. This concerns the keys whose replicas land on a vnode named in
   the clock (about n_val / ring size of them, 4 to 5% with the defaults).
+  The entry appears on that vnode's replica first; until anti-entropy
+  repairs the other replicas, reads and folds may return either clock, so
+  a backup or comparison taken right after such a restore can differ from
+  one taken later.
   Into another cluster the clocks are kept as they are, provided its nodes
   are named differently (vnode actor ids derive from the node name).
   Values, metadata, indexes and siblings are not affected.
@@ -511,13 +515,13 @@ environment variables, and follow `set -eu`, `jq` and exit codes:
 
 `run-all.sh` chains them on a fresh bucket and checks every result:
 connectivity, seeding (objects with metadata, indexes and a binary value,
-siblings, a map), backup, wiping the bucket, restoring, comparing with the
-backup, restoring again (nothing written), the paged query, monitoring,
-AAE inspection, the comparison with another cluster and the replication
+siblings, a map), backup, the comparison with another cluster, wiping the
+bucket, restoring, comparing with the backup, restoring again (nothing
+written), the paged query, monitoring, AAE inspection and the replication
 round trip. For the comparison `RIAK_PEER_URL` names a second cluster (same
-credentials, nodes named differently): the backup is restored there, the
-bucket is compared by trees, and a copy with deliberate changes key by key
-in ranges of 10 keys; without it this part is skipped. Optional parts are
+credentials, nodes named differently): the backup is restored there as in a
+migration, the bucket is compared by trees, and a copy with deliberate
+changes key by key in ranges of 10 keys; without it this part is skipped. Optional parts are
 detected from the node (`RIAK_FEATURES`, comma separated `2i`, `aae`,
 `nextgenrepl`, skips the detection), and the bucket types come from
 `tests/docker/setup-node.sh` (`RIAK_MULTI_TYPE`, `RIAK_MAP_TYPE`,

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs the demos as one workflow against the node(s) of RIAK_URL and checks
-# their results: connectivity, seeding, backup, wiping the bucket, restore
-# (twice), a paged index query, monitoring, AAE inspection, a comparison
-# with another cluster and a replication queue round trip. Every key written lives in a fresh bucket
+# their results: connectivity, seeding, backup, a comparison with another
+# cluster, wiping the bucket, restore (twice), a paged index query,
+# monitoring, AAE inspection and a replication queue round trip. Every key written lives in a fresh bucket
 # that is removed at the end.
 #   RIAK_URL=pb://127.0.0.1:8087 examples/cli/run-all.sh
 # RIAK_FEATURES (comma separated: 2i, aae, nextgenrepl) skips the detection
@@ -46,11 +46,13 @@ trap cleanup EXIT
 
 features=${RIAK_FEATURES:-}
 if [ -z "$features" ]; then
-    printf 1 | r put -i probe_int=1 "$bucket" probe
-    r index "$bucket" probe_int 1 >/dev/null 2>&1 && features=2i
+    # in a bucket of its own: its tombstone stays in the demo bucket's
+    # AAE results for a few seconds otherwise
+    printf 1 | r put -i probe_int=1 "$bucket-probe" probe
+    r index "$bucket-probe" probe_int 1 >/dev/null 2>&1 && features=2i
     r aae buckets 3 >/dev/null 2>&1 && features="$features,aae"
     r repl fetch "$queue" --max 1 >/dev/null 2>&1 && features="$features,nextgenrepl"
-    r delete "$bucket" probe
+    r delete "$bucket-probe" probe
 fi
 has() { case ",$features," in *",$1,"*) return 0 ;; esac; return 1; }
 has_type() { r props type-get "$1" >/dev/null 2>&1; }
@@ -85,6 +87,35 @@ step backup
 "$here/basic/backup.sh" "$bucket" "$work/objects.jsonl"
 has_type "$multi" && "$here/basic/backup.sh" "$bucket" "$work/siblings.jsonl" "$multi"
 has_type "$maps" && "$here/basic/backup.sh" "$bucket" "$work/maps.jsonl" "$maps"
+
+if has aae && [ -z "${RIAK_PEER_URL:-}" ]; then
+    echo "no RIAK_PEER_URL: comparison with another cluster skipped"
+elif has aae; then
+    # Another cluster, as for a migration, and the bucket as backed up,
+    # before it is wiped and restored here: restored "as is" into its own
+    # cluster, a key's clock can get an entry (a vnode that receives a
+    # clock holding its own actor for a key it does not store starts a new
+    # key epoch) on one replica first, until anti-entropy repairs the
+    # others, so the clocks would not be a stable reference.
+    step "comparison with the cluster of $RIAK_PEER_URL"
+    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/objects.jsonl" >/dev/null
+    PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$bucket" ||
+        fail "the peer differs after the restore"
+    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/objects.jsonl" "$copy" >/dev/null
+    printf changed | rp put "$copy" user1
+    printf extra | rp put "$copy" only_in_copy
+    printf extra | r put "$bucket" only_in_original
+    # ranges of 10 keys: the 27 keys of each bucket take several folds
+    rc=0
+    CHUNK=10 PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$copy" \
+        >"$work/compare.txt" || rc=$?
+    cat "$work/compare.txt"
+    [ "$rc" -eq 1 ] || fail "bucket comparison exit code $rc"
+    [ "$(grep -v ' differ in ' "$work/compare.txt")" = "differs user1
+missing_locally only_in_copy
+missing_on_peer only_in_original" ] || fail "unexpected comparison result"
+    r delete "$bucket" only_in_original
+fi
 
 step "wiping $bucket"
 r list --plain keys "$bucket" | while read -r k; do r delete "$bucket" "$k"; done
@@ -149,32 +180,6 @@ cat "$work/stats.csv"
 if has aae; then
     step "AAE inspection"
     "$here/operations/aae-inspection.sh" "$bucket"
-fi
-if has aae && [ -z "${RIAK_PEER_URL:-}" ]; then
-    echo "no RIAK_PEER_URL: comparison with another cluster skipped"
-elif has aae; then
-    # Another cluster, as for a migration: on the same cluster a copy's
-    # clocks would not stay equal, since a vnode that receives a clock
-    # holding its own actor for a key it does not store starts a new key
-    # epoch (an additional clock entry).
-    step "comparison with the cluster of $RIAK_PEER_URL"
-    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/again.jsonl" >/dev/null
-    PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$bucket" ||
-        fail "the peer differs after the restore"
-    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/again.jsonl" "$copy" >/dev/null
-    printf changed | rp put "$copy" user1
-    printf extra | rp put "$copy" only_in_copy
-    printf extra | r put "$bucket" only_in_original
-    # ranges of 10 keys: the 27 keys of each bucket take several folds
-    rc=0
-    CHUNK=10 PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$copy" \
-        >"$work/compare.txt" || rc=$?
-    cat "$work/compare.txt"
-    [ "$rc" -eq 1 ] || fail "bucket comparison exit code $rc"
-    [ "$(grep -v ' differ in ' "$work/compare.txt")" = "differs user1
-missing_locally only_in_copy
-missing_on_peer only_in_original" ] || fail "unexpected comparison result"
-    r delete "$bucket" only_in_original
 fi
 # queue pushes need Protocol Buffers
 case ${RIAK_URL:-pb://} in
