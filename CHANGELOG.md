@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 — 2026-11-03
 
 ### Added
+- Prebuilt packages for Ubuntu 22.04 and 24.04, Debian 12, Fedora 42
+  and AlmaLinux 10 under `packages/2.2.0/`, with `SHA256SUMS`, now
+  including `libriak-c-tools`.
 - `riakctl`, a command-line client for Riak KV built on the library, in a
   new `libriak-c-tools` package with a `riakctl(1)` man page (CMake option
   `RIAK_BUILD_TOOLS`). It reaches nodes over Protocol Buffers or HTTP, with
