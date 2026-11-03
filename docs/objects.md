@@ -51,7 +51,10 @@ riak_opts o = {.meta = meta, .n_meta = 1, .indexes = idx, .n_indexes = 2,
 ```
 
 Fetched objects carry them back in `meta`, `indexes` and `links`, with the
-`X-Riak-Meta-` and `X-Riak-Index-` prefixes removed.
+`X-Riak-Meta-` and `X-Riak-Index-` prefixes removed. `links` holds the
+stored links in Link header form (`</buckets/B/keys/K>; riaktag="T"`,
+comma separated) over both transports; the `rel="up"` entry Riak adds to
+every HTTP response is left out.
 
 ## Bucket types
 

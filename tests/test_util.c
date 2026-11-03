@@ -97,8 +97,8 @@ static void test_headerlist(void) {
     CHECK_EQ_INT(riak_headerlist_add_line(&h, "Content-Type:  text/plain \r\n", 28), 0);
     CHECK_EQ_INT(riak_headerlist_add_line(&h, "X-Riak-Index-age_int: 42", 24), 0);
     CHECK_EQ_INT(riak_headerlist_add_line(&h, "X-Riak-Index-name_bin: a", 24), 0);
-    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <a>", 9), 0);
-    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <b>", 9), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <a>; riaktag=x", 20), 0);
+    CHECK_EQ_INT(riak_headerlist_add_line(&h, "Link: <b>; riaktag=y", 20), 0);
     CHECK_EQ_INT(riak_headerlist_add_line(&h, "Empty:", 6), 0);
     CHECK_EQ_INT(riak_headerlist_add_line(&h, "\r\n", 2), 1);
     CHECK_EQ_INT(riak_headerlist_add_line(&h, ": novalue", 9), 1);
@@ -115,7 +115,7 @@ static void test_headerlist(void) {
         CHECK_EQ_STR(obj.indexes[0].name, "age_int");
         CHECK_EQ_STR(obj.indexes[1].value, "a");
     }
-    CHECK_EQ_STR(obj.links, "<a>, <b>");
+    CHECK_EQ_STR(obj.links, "<a>; riaktag=x, <b>; riaktag=y");
     CHECK(obj.meta == NULL && obj.n_meta == 0);
     riak_object_free(&obj);
     riak_headerlist_clear(&h);

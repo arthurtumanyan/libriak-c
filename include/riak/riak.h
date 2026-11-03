@@ -257,7 +257,7 @@ typedef struct {
     size_t n_meta;        /**< Number of entries in #meta. */
     riak_header *indexes; /**< Secondary index entries; names without the X-Riak-Index- prefix. */
     size_t n_indexes;     /**< Number of entries in #indexes. */
-    char *links;          /**< Raw Link header value(s), comma separated; NULL when absent. */
+    char *links;          /**< Stored links (riaktag entries), comma separated; NULL if none. */
 } riak_object;
 
 /** All siblings of one key; released with riak_object_set_free(). */
