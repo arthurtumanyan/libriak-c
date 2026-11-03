@@ -2,7 +2,7 @@
 # Build the package repository site from release packages:
 # packaging/repo-site.sh ASSETS SITE KEY URL
 # The .deb and .rpm files of ASSETS are sorted by distribution into
-#   SITE/deb/ubuntu-<version>/   flat apt repositories
+#   SITE/deb/<ubuntu|debian>-<version>/  flat apt repositories
 #   SITE/rpm/fedora/<version>/   dnf repositories
 #   SITE/rpm/el/<version>/       dnf repositories (AlmaLinux, Rocky, RHEL)
 # and indexed and signed with the gpg key KEY by make-repo.sh. The public
@@ -19,8 +19,8 @@ for f in "$assets"/*.deb "$assets"/*.rpm; do
     [ -e "$f" ] || continue
     name=$(basename "$f")
     case $name in
-        *[.~]ubuntu[0-9]*_*.deb)
-            dist=deb/ubuntu-$(echo "$name" | sed 's/.*[.~]ubuntu\([0-9.]*\)_.*/\1/') ;;
+        *[.~]ubuntu[0-9]*_*.deb | *[.~]debian[0-9]*_*.deb)
+            dist=deb/$(echo "$name" | sed 's/.*[.~]\(ubuntu\|debian\)\([0-9.]*\)_.*/\1-\2/') ;;
         *.fc[0-9]*.rpm)
             dist=rpm/fedora/$(echo "$name" | sed 's/.*\.fc\([0-9]*\)\..*/\1/') ;;
         *.el[0-9]*.rpm)
