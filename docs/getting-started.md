@@ -5,7 +5,9 @@
 - CMake 3.20 or newer and a C11 compiler (GCC or Clang)
 - libcurl 7.66 or newer
 - json-c 0.15 or newer
-- protobuf-c 1.3 or newer, with the `protoc-c` compiler
+- protobuf-c 1.3 or newer; the code is generated with `protoc` and the
+  `protoc-gen-c` plugin of protobuf-c 1.4 and later when both are installed,
+  otherwise with `protoc-c`
 - OpenSSL 1.1.1 or newer
 - zlib (AAE tree branches)
 - Python 3 and OpenSSL for the test suite (optional)
@@ -14,12 +16,17 @@ On Debian and Ubuntu the dependencies are installed with:
 
 ```sh
 sudo apt install cmake libcurl4-openssl-dev libjson-c-dev libprotobuf-c-dev \
-    protobuf-c-compiler libssl-dev zlib1g-dev
+    protobuf-c-compiler protobuf-compiler libssl-dev zlib1g-dev
 ```
 
-On Fedora and EL:
+`protobuf-compiler` provides `protoc`; without it the deprecated `protoc-c`
+is used, which protobuf-c 1.5 reports with a warning.
+
+On Fedora and EL (on AlmaLinux, Rocky Linux and RHEL, `protobuf-c-devel` is
+in the CodeReady Builder repository, enabled first):
 
 ```sh
+sudo dnf config-manager --set-enabled crb   # EL only
 sudo dnf install cmake gcc libcurl-devel json-c-devel protobuf-c-devel \
     protobuf-c-compiler openssl-devel zlib-devel
 ```

@@ -128,13 +128,18 @@ static riak_status map_curl_error(riak_attempt *a, CURLcode rc) {
     case CURLE_SSL_CACERT_BADFILE:
     case CURLE_SSL_ISSUER_ERROR:
     case CURLE_SSL_CRL_BADFILE:
-#if LIBCURL_VERSION_NUM >= 0x074400
+#if LIBCURL_VERSION_NUM >= 0x074D00
     case CURLE_SSL_CLIENTCERT:
 #endif
         if (rc == CURLE_SSL_CONNECT_ERROR && !a->c->cfg.tls_legacy) {
             return riak_set_error(a->c, RIAK_E_TLS, "%s%s", detail, LEGACY_HINT);
         }
         return riak_set_error(a->c, RIAK_E_TLS, "%s", detail);
+    case CURLE_BAD_FUNCTION_ARGUMENT:
+        /* newer libcurl reports an unusable client key (missing, wrong passphrase, not
+         * matching the certificate) this way instead of CURLE_SSL_CERTPROBLEM */
+        return riak_set_error(
+            a->c, a->c->cert_file || a->c->key_file ? RIAK_E_TLS : RIAK_E_TRANSPORT, "%s", detail);
     default:
         return riak_set_error(a->c, RIAK_E_TRANSPORT, "%s", detail);
     }
