@@ -1,0 +1,15 @@
+21795df95883c31a39010c1e391d8bddcfa5691d2cc72a6330b121d8758341d7  almalinux-10/libriak-c-2.2.0-1.el10.x86_64.rpm
+5fcbab8f2fef1e6e79a6d247e80db612ed5fb3014a243016fdace184d7f26cb0  almalinux-10/libriak-c-devel-2.2.0-1.el10.x86_64.rpm
+c6d23b2ab3dbb9ddb7d962629163652654be3bd710f7b20c0c4750b2cdcb79e1  almalinux-10/libriak-c-tools-2.2.0-1.el10.x86_64.rpm
+578ff795532c5ac02390fd2c6c9d3635d74da3f4c8c6e539f57a9e9cb4d0f72f  debian-12/libriak-c2_2.2.0-1~debian12_amd64.deb
+27cb1c4d629f5fe67288af242687c8e0ce618864f40b3ec5fd58ec3197ce9dad  debian-12/libriak-c-dev_2.2.0-1~debian12_amd64.deb
+4d38e82dd3cb78c8178bf60757a7682cf82f6a7b22f56f8e47e041d0bad0a52f  debian-12/libriak-c-tools_2.2.0-1~debian12_amd64.deb
+5a383d9ec6cb192368fd8702941f86e563b5041ebfbd47b528af7dcdf8bc8529  fedora-42/libriak-c-2.2.0-1.fc42.x86_64.rpm
+f97ebe6acf06fd91fa522117ec10aed261d6614d5ffef993cd8e197c9fb00ef6  fedora-42/libriak-c-devel-2.2.0-1.fc42.x86_64.rpm
+bd182c2d4921b70879db91423c80ea59222486a923c79c6e2a5e539cbfb3d8fa  fedora-42/libriak-c-tools-2.2.0-1.fc42.x86_64.rpm
+30b93350dcc13523cd9d27c5fbe2ddca4578f52a64d92b76cf444a668b1aeab8  ubuntu-22.04/libriak-c2_2.2.0-1~ubuntu22.04_amd64.deb
+0885c1c15a716651195bf866e954f3279f8fb25be0aeaa30cdc21567648fd0cd  ubuntu-22.04/libriak-c-dev_2.2.0-1~ubuntu22.04_amd64.deb
+92595ab825e05ae231808eabb2a65604b96a6840b0380ef2e79a7235b5706d7d  ubuntu-22.04/libriak-c-tools_2.2.0-1~ubuntu22.04_amd64.deb
+f3b7e6b497ccaae764a31ad14b291bb307fe06c1a2dd745125a74377dd85441a  ubuntu-24.04/libriak-c2_2.2.0-1~ubuntu24.04_amd64.deb
+5dc9e782cea5c9d8050c461a0bacb0c487f460df08107c80a7ecf29caa137e3a  ubuntu-24.04/libriak-c-dev_2.2.0-1~ubuntu24.04_amd64.deb
+25c95d1fdd46c95f76ee5515497354fd71643f3ee3e84f2e67285606ae54ed11  ubuntu-24.04/libriak-c-tools_2.2.0-1~ubuntu24.04_amd64.deb
