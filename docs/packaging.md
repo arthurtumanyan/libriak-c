@@ -149,18 +149,23 @@ gh workflow run repository.yml
 It needs GitHub Pages enabled with GitHub Actions as the source, `v*` tags
 allowed to deploy (the `github-pages` environment that GitHub creates with
 Pages accepts the default branch only, and the release workflow deploys from
-the release tag), and the signing key as repository secrets:
-`RELEASE_GPG_KEY` (the armored secret key) and, for a key protected by a
-passphrase, `RELEASE_GPG_PASSPHRASE`:
+the release tag), and the signing key as repository secrets: `RELEASE_GPG_KEY` (the armored secret
+key) and, for a key protected by a passphrase, `RELEASE_GPG_PASSPHRASE`.
+
+The release signing key is dedicated to libriak-c. Its primary key
+`D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84` is certify-only and is kept
+offline; CI holds only the signing subkey, exported with
+`--export-secret-subkeys` and protected by a passphrase of its own. Metadata
+and tags signed by the subkey verify against the public key of the primary.
 
 ```sh
 gh api -X POST repos/arthurtumanyan/libriak-c/pages -f build_type=workflow
 gh api -X POST repos/arthurtumanyan/libriak-c/environments/github-pages/deployment-branch-policies \
     -f name='v*' -f type=tag
-gpg --armor --export-secret-keys D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 |
-    gh secret set RELEASE_GPG_KEY
+gpg --armor --export-secret-subkeys D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 |
+    gh secret set RELEASE_GPG_KEY    # the subkey passphrase goes to RELEASE_GPG_PASSPHRASE
 ```
 
-A dedicated signing subkey (`gpg --quick-add-key <fingerprint> ed25519
-sign`) exported with `--export-secret-subkeys` keeps the primary key out of
-CI; metadata signed by the subkey verifies against the same public key.
+The public key is published as `libriak-c.asc` at the repository root. When
+the key is replaced, apt reports `NO_PUBKEY` until the key file is downloaded
+again into `/etc/apt/keyrings/libriak-c.asc`; dnf asks to import the new key.
