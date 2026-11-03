@@ -32,9 +32,13 @@ riak_delete(c, "users", "u1", NULL);
 - `asis` stores the object exactly as sent, without the coordinating node
   updating its vector clock (replication tooling).
 - Over Protocol Buffers, `return_head` returns the stored object's metadata
-  and vector clock without its value, and `deletedvclock` makes a get of a
-  deleted key return `RIAK_E_NOT_FOUND` with the tombstone's vector clock in
-  `out->vclock` and `out->deleted` set.
+  and vector clock without its value.
+- `deletedvclock` makes a get of a deleted key return `RIAK_E_NOT_FOUND`
+  with the tombstone's vector clock in `out->vclock` and `out->deleted`
+  set, and `riak_get_siblings()` return it in `riak_object_set::vclock`
+  (with no siblings). A write with that clock supersedes the delete. Over
+  HTTP Riak sends the clock with every 404 of a deleted key; the option
+  decides whether it is returned. The result is freed as after a success.
 
 ## Metadata, secondary index entries, links
 

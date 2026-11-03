@@ -1241,10 +1241,44 @@ static void test_new_options_http(void) {
         CHECK(path && strstr(path, want));
         json_object_put(l);
     }
-    riak_opts pb_only[] = {{.return_head = true}, {.deletedvclock = true}};
+    riak_opts pb_only = {.return_head = true};
     riak_object o;
-    CHECK_EQ_INT(riak_put(rc, "opts", "k", "v", 1, &pb_only[0], NULL, NULL), RIAK_E_UNSUPPORTED);
-    CHECK_EQ_INT(riak_get(rc, "opts", "k", &pb_only[1], &o), RIAK_E_UNSUPPORTED);
+    CHECK_EQ_INT(riak_put(rc, "opts", "k", "v", 1, &pb_only, NULL, NULL), RIAK_E_UNSUPPORTED);
+
+    /* a deleted key: the tombstone's clock comes with the 404 */
+    riak_opts dv = {.deletedvclock = true};
+    riak_object_set set;
+    CHECK_EQ_INT(riak_put(rc, "opts", "gone", "v", 1, NULL, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_delete(rc, "opts", "gone", NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_get(rc, "opts", "gone", &dv, &o), RIAK_E_NOT_FOUND);
+    CHECK(o.deleted && o.vclock && strncmp(o.vclock, "vc-tomb-", 8) == 0 && o.data == NULL);
+    char *tomb = strdup(o.vclock);
+    riak_object_free(&o);
+    dv.head = true;
+    CHECK_EQ_INT(riak_get(rc, "opts", "gone", &dv, &o), RIAK_E_NOT_FOUND);
+    CHECK(o.deleted && o.vclock && strcmp(o.vclock, tomb) == 0);
+    riak_object_free(&o);
+    dv.head = false;
+    CHECK_EQ_INT(riak_get_siblings(rc, "opts", "gone", &dv, &set), RIAK_E_NOT_FOUND);
+    CHECK(set.count == 0 && set.items == NULL && set.vclock && strcmp(set.vclock, tomb) == 0);
+    riak_object_set_free(&set);
+    /* without the option the clock is not returned */
+    CHECK_EQ_INT(riak_get(rc, "opts", "gone", NULL, &o), RIAK_E_NOT_FOUND);
+    CHECK(o.vclock == NULL && !o.deleted);
+    CHECK_EQ_INT(riak_get_siblings(rc, "opts", "gone", NULL, &set), RIAK_E_NOT_FOUND);
+    CHECK(set.vclock == NULL && set.count == 0);
+    /* a key that never existed has no tombstone */
+    CHECK_EQ_INT(riak_get(rc, "opts", "never", &dv, &o), RIAK_E_NOT_FOUND);
+    CHECK(o.vclock == NULL && !o.deleted);
+    CHECK_EQ_INT(riak_get_siblings(rc, "opts", "never", &dv, &set), RIAK_E_NOT_FOUND);
+    CHECK(set.vclock == NULL);
+    /* writing with the tombstone's clock brings the key back */
+    riak_opts wv = {.vclock = tomb};
+    CHECK_EQ_INT(riak_put(rc, "opts", "gone", "w", 1, &wv, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_get(rc, "opts", "gone", &dv, &o), RIAK_OK);
+    CHECK(!o.deleted && o.len == 1 && o.data[0] == 'w');
+    riak_object_free(&o);
+    free(tomb);
     riak_opts nc = {.node_confirms = 2};
     CHECK_EQ_INT(riak_get(rc, "opts", "k", &nc, &o), RIAK_OK);
     riak_object_free(&o);

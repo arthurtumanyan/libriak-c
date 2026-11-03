@@ -18,11 +18,14 @@ With --tls (certificates from tests/gen_certs.sh) every node speaks HTTPS:
 node 0 requires Basic auth "riak:s3cret", node 1 requires a client
 certificate signed by the test CA, node 2 requires neither.
   GET /_hits  -> number of requests this node received (resets it)
+  GET /_folds -> {"count", "max"}: AAE clock folds answered from the stored
+                 objects of a bucket, and the most keys one returned (resets)
   GET /_old?set=1  -> answer the Riak 2.9+/3.x endpoints with Webmachine's
                       404 page, as Riak 2.2 does
 
 Bucket types: "default", "t1" and "multi" (allow_mult, so writes without a
-vclock create siblings). Special buckets: "many" (1000 streamed keys),
+vclock create siblings). A deleted key keeps a tombstone whose vclock comes
+with the 404 of a get, as in Riak. Special buckets: "many" (1000 streamed keys),
 "siblings" (always 300 with a text body), "needs-https" (426), "unavailable" (503), "truncated"
 (cut-off key stream), "notjson" (props are not an object), "nolocation"
 (POST without Location).
@@ -48,10 +51,12 @@ for _dt in ("counter", "set", "map", "hll", "gset"):
 DATATYPES = {}      # (type, bucket, key) -> python value
 DT_FIELD_TYPES = ("counter", "set", "map", "register", "flag")
 STORE = {}          # (type, bucket, key) -> {"vclock": str, "siblings": [obj]}
+TOMBS = {}          # (type, bucket, key) -> vclock of the tombstone of a deleted key
 PROPS = {}          # (type, bucket) -> dict
 TYPE_PROPS = {}     # type -> props set with PUT /types/<t>/props
 COUNTERS = {}       # (bucket, key) -> Riak 1.4 counter value
 LAST = {}
+FOLDS = {"count": 0, "max": 0}  # AAE clock folds answered from the store
 LOCK = threading.Lock()
 COUNTER = itertools.count(1)
 STREAM_BUCKET = "many"
@@ -240,6 +245,33 @@ class Handler(BaseHTTPRequestHandler):
             LAST["filter"] = decoded  # for assertions
         return decoded
 
+    @staticmethod
+    def _stored(typed, parts, rest):
+        """A bucket that holds objects: its folds answer from the store."""
+        btype = parts[2] if typed else "default"
+        with LOCK:
+            return any(t == btype and b == rest[1] for t, b, _ in list(STORE) + list(TOMBS))
+
+    def _stored_clocks(self, typed, parts, rest, query):
+        """Keys and clocks of the stored objects and tombstones in the filter's
+        key range (inclusive); counts the folds and the largest answer."""
+        btype = parts[2] if typed else "default"
+        bucket = rest[1]
+        kr = (self._filter(query) or {}).get("key_range")
+        with LOCK:
+            found = [(k, e["vclock"]) for (t, b, k), e in STORE.items() if t == btype and b == bucket]
+            found += [(k, v) for (t, b, k), v in TOMBS.items() if t == btype and b == bucket]
+        if kr:
+            found = [(k, v) for k, v in found if kr["start"] <= k <= kr["end"]]
+        with LOCK:
+            FOLDS["count"] += 1
+            FOLDS["max"] = max(FOLDS["max"], len(found))
+        entries = [{"bucket": bucket, "key": k, "clock": self._chars(v.encode())} for k, v in found]
+        if typed:
+            for e in entries:
+                e["bucket-type"] = btype
+        return {"keys-clocks": entries}
+
     def _keys_clocks(self, typed):
         entries = []
         for key in ("k1", "k2"):
@@ -315,6 +347,8 @@ class Handler(BaseHTTPRequestHandler):
                           for i in range(2)}
                 self._json(200, {"tree": {"level1": self._chars(b"\x01" * (width * 4)),
                                           "level2": level2}})
+            elif parts[0] == "rangetrees" and self._stored(typed, parts, rest):
+                self._json(200, self._stored_clocks(typed, parts, rest, query))
             elif parts[0] in ("rangetrees", "tombs"):
                 self._json(200, self._keys_clocks(typed))
             elif parts[0] in ("siblings", "objectsizes"):
@@ -458,6 +492,11 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["_drop"]:
             self.server.drop = int(query.get("set", ["0"])[0])
             return self._send(204)
+        if parts == ["_folds"]:
+            with LOCK:
+                doc = dict(FOLDS)
+                FOLDS.update(count=0, max=0)
+            return self._json(200, doc)
         if parts == ["_newer_hits"]:
             hits, self.server.newer_hits = self.server.newer_hits, 0
             return self._json(200, {"hits": hits})
@@ -531,7 +570,9 @@ class Handler(BaseHTTPRequestHandler):
             entry = STORE.get((btype, bucket, key))
             entry = json.loads(json.dumps(entry, default=list)) if entry else None
         if entry is None:
-            return self._send(404, "not found\n")
+            # like Riak, a tombstone's clock comes with the 404
+            tomb = TOMBS.get((btype, bucket, key))
+            return self._send(404, "not found\n", [("X-Riak-Vclock", tomb)] if tomb else None)
         sibs = entry["siblings"]
         if len(sibs) > 1:
             if "multipart/mixed" not in (self.headers.get("Accept") or ""):
@@ -772,6 +813,7 @@ class Handler(BaseHTTPRequestHandler):
                     siblings = [obj]
                 entry = {"vclock": f"vc-{next(COUNTER)}", "siblings": siblings}
                 STORE[(btype, bucket, key)] = entry
+                TOMBS.pop((btype, bucket, key), None)
         if failed:
             self._send(412, "precondition failed\n")
             return True
@@ -864,6 +906,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[0] == "buckets" and parts[2] == "keys":
             with LOCK:
                 existed = STORE.pop((btype, parts[1], parts[3]), None) is not None
+                if existed:
+                    TOMBS[(btype, parts[1], parts[3])] = f"vc-tomb-{next(COUNTER)}"
             return self._send(204 if existed else 404, "" if existed else "not found\n")
         return self._send(400, "bad request\n")
 

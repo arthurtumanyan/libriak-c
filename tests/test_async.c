@@ -376,6 +376,24 @@ static void test_data_path(void) {
     CHECK_EQ_INT(g.kept.siblings.count, 2);
     CHECK(g.kept.siblings.vclock != NULL);
     grab_free(&g);
+    /* a deleted key: the tombstone's clock only with deletedvclock */
+    CHECK_EQ_INT(riak_put(c, "asb", "gone", "x", 1, NULL, NULL, NULL), RIAK_OK);
+    CHECK_EQ_INT(riak_delete(c, "asb", "gone", NULL), RIAK_OK);
+    riak_opts dv = {.deletedvclock = true};
+    CHECK_EQ_INT(riak_async_get_siblings(a, "asb", "gone", &dv, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_NOT_FOUND);
+    CHECK(g.kept.siblings.count == 0 && g.kept.siblings.vclock &&
+          strncmp(g.kept.siblings.vclock, "vc-tomb-", 8) == 0);
+    grab_free(&g);
+    CHECK_EQ_INT(riak_async_get_siblings(a, "asb", "gone", NULL, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_NOT_FOUND);
+    CHECK(g.kept.siblings.vclock == NULL);
+    grab_free(&g);
+    CHECK_EQ_INT(riak_async_get(a, "asb", "gone", &dv, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_NOT_FOUND);
+    CHECK(g.kept.object.deleted && g.kept.object.vclock &&
+          strncmp(g.kept.object.vclock, "vc-tomb-", 8) == 0);
+    grab_free(&g);
 
     /* data types: update with return_body and a generated key, then fetch */
     riak_dt_op *op = riak_dt_op_new(RIAK_DT_COUNTER);

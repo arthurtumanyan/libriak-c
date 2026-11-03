@@ -329,9 +329,10 @@ typedef struct {
     int node_confirms;
     riak_sync sync_on_write; /**< Put: flush to disk before acknowledging (Riak 3.0+). */
     bool return_head;        /**< Protocol Buffers put: the stored metadata, without the value. */
-    /** Protocol Buffers get: for a deleted key the result is still
-     *  ::RIAK_E_NOT_FOUND, but riak_object::vclock holds the tombstone's
-     *  vector clock and riak_object::deleted is set. */
+    /** Get: for a deleted key the result is still ::RIAK_E_NOT_FOUND, but
+     *  riak_object::vclock holds the tombstone's vector clock and
+     *  riak_object::deleted is set; riak_get_siblings() gives the clock in
+     *  riak_object_set::vclock. Both are released as after a success. */
     bool deletedvclock;
     /** Put: the object is stored as given, without a new vector clock entry
      *  (used by replication). */
@@ -396,6 +397,15 @@ RIAK_API const char *riak_client_errmsg(const riak_client *client);
 RIAK_API long riak_client_http_status(const riak_client *client);
 
 /**
+ * Number of keys and bucket names left out of listings, folds, index and
+ * AAE results since the client was created because they contain a NUL
+ * byte: names are C strings in this API, so such a name cannot be passed
+ * on without changing it. Each one is also logged at ::RIAK_LOG_WARN.
+ * @param client Client handle; NULL gives 0.
+ */
+RIAK_API uint64_t riak_client_skipped_names(const riak_client *client);
+
+/**
  * Number of nodes the client was configured with (at least 1).
  * @param client Client handle.
  */
@@ -450,6 +460,8 @@ RIAK_API riak_status riak_get(riak_client *client, const char *bucket, const cha
  * @param key Key.
  * @param opts Per-request options; NULL selects the defaults.
  * @param out Receives the siblings; released with riak_object_set_free().
+ *        With riak_opts::deletedvclock, a deleted key gives ::RIAK_E_NOT_FOUND
+ *        with no siblings and the tombstone's clock in riak_object_set::vclock.
  */
 RIAK_API riak_status riak_get_siblings(riak_client *client, const char *bucket, const char *key,
                                        const riak_opts *opts, riak_object_set *out);
@@ -1132,7 +1144,7 @@ RIAK_API riak_status riak_counter_get(riak_client *client, const char *bucket, c
 
 /** A key range of riak_fold_objects(). */
 typedef struct {
-    const char *start_key;      /**< First key of the range; required. */
+    const char *start_key;      /**< First key of the range; required, "" for the first key. */
     const char *end_key;        /**< Last key; NULL: to the end of the bucket. */
     bool start_exclusive;       /**< #start_key itself is excluded. */
     bool end_inclusive;         /**< #end_key itself is included. */

@@ -885,11 +885,14 @@ static void test_new_options(void) {
     CHECK_EQ_INT(riak_delete(rc, bucket, "opt", NULL), RIAK_OK);
     riak_opts dv = {.deletedvclock = true};
     st = riak_get(rc, bucket, "opt", &dv, &obj);
-    CHECK_EQ_INT(st, is_pb() ? RIAK_E_NOT_FOUND : RIAK_E_UNSUPPORTED);
-    if (is_pb()) {
-        /* Riak keeps a tombstone for 3 s (delete_mode): its clock is returned */
-        CHECK(obj.vclock != NULL && obj.deleted);
-    }
+    CHECK_EQ_INT(st, RIAK_E_NOT_FOUND);
+    /* Riak keeps a tombstone for 3 s (delete_mode): its clock is returned */
+    CHECK(obj.vclock != NULL && obj.deleted);
+    riak_object_set ts;
+    CHECK_EQ_INT(riak_get_siblings(rc, bucket, "opt", &dv, &ts), RIAK_E_NOT_FOUND);
+    CHECK(ts.count == 0 && ts.vclock != NULL && obj.vclock != NULL &&
+          strcmp(ts.vclock, obj.vclock) == 0);
+    riak_object_set_free(&ts);
     riak_object_free(&obj);
 
     riak_index_query q = {.index = "$bucket", .value = bucket, .pagination_sort = true};

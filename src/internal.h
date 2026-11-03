@@ -8,6 +8,7 @@
 #define RIAK_INTERNAL_H
 
 #include <curl/curl.h>
+#include <string.h>
 
 #include "riak/riak.h"
 #include "util.h"
@@ -37,7 +38,8 @@ struct riak_client {
     char *cert_file, *key_file, *key_password;
     riak_config cfg; /* string members point at the copies above */
     long http_status;
-    bool busy; /* a blocking request is running: callbacks cannot start another */
+    bool busy;              /* a blocking request is running: callbacks cannot start another */
+    uint64_t skipped_names; /* keys and bucket names with NUL bytes, left out */
     char errmsg[512];
     struct riak_pb_state *pb; /* Protocol Buffers transport state */
 };
@@ -46,6 +48,13 @@ struct riak_client {
  * back into the client running it would reuse the connection and buffers of
  * the request in progress; such a call is refused instead. */
 #define RIAK_CLIENT_BUSY_MSG "the client is busy: a callback cannot use the client running it"
+
+/* A key or bucket name from Riak that holds a NUL byte cannot be passed on
+ * as a C string: it is counted, logged and left out of the result. */
+static inline bool riak_name_has_nul(const void *name, size_t len) {
+    return len > 0 && memchr(name, '\0', len) != NULL;
+}
+void riak_skip_names(riak_client *c, size_t n);
 
 static inline bool riak_is_pb(const riak_client *c) {
     return c->cfg.transport == RIAK_TRANSPORT_PB;
@@ -142,7 +151,8 @@ riak_status riak_prepare_ping(riak_client *c, riak_prepared *p);
 riak_status riak_finish_ping(riak_client *c, riak_response *resp);
 riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const char *key,
                                      const riak_opts *o, riak_prepared *p);
-riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out);
+riak_status riak_kv_finish_siblings(riak_client *c, const riak_opts *o, riak_response *resp,
+                                    riak_object_set *out);
 riak_status riak_dt_http_prepare_fetch(riak_client *c, const char *type, const char *bucket,
                                        const char *key, const riak_dt_opts *o, riak_prepared *p);
 riak_status riak_dt_http_finish_fetch(riak_client *c, riak_response *resp, riak_datatype *out);
@@ -185,6 +195,7 @@ typedef struct {
     riak_index_cb cb;
     void *ctx;
     char **continuation;
+    riak_client *c; /* receives the count of skipped keys */
 } riak_index_stream;
 /* Matches collected into a result page (riak_index_query_run()). */
 typedef struct {
@@ -213,6 +224,7 @@ riak_status riak_props_http_prepare(riak_client *c, const char *type, const char
 riak_status riak_props_http_finish_set(riak_client *c, riak_response *resp);
 /* Streamed listings: the keys of bucket, or the buckets when it is NULL. */
 typedef struct {
+    riak_client *c; /* set by riak_list_http_prepare() */
     struct riak_keystream *ks;
     riak_name_cb cb;
     void *ctx;

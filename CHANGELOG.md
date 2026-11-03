@@ -16,12 +16,27 @@
   values of data type buckets; restores are idempotent, run with parallel
   workers (`--jobs`) and write single-sibling objects with their vector
   clocks. See [docs/riakctl.md](docs/riakctl.md).
+- `riak_client_skipped_names()` (symbol version `LIBRIAK_2.2`): the number
+  of keys and bucket names left out of listings, object folds, index and
+  AAE results because they contain a NUL byte.
+- `riak_opts::deletedvclock` works over HTTP too, where Riak sends the
+  tombstone's clock with the 404, and `riak_get_siblings()` (blocking and
+  asynchronous) returns the tombstone's clock in `riak_object_set::vclock`.
 - Demo workflows built on `riakctl` in `examples/cli/` (connectivity,
   checked backup and restore, Nagios-style health check, statistics
   sampling, paged index queries, AAE inspection, replication queues), run
   as one scenario by `run-all.sh`, against a Docker node by `run-demo.sh`,
   and in CI by the new `riakctl_live` test; `riakctl_cli` tests the tool
   against the stub server.
+
+### Fixed
+- Keys and bucket names that contain a NUL byte were cut short at it in
+  listings, object folds, index and AAE results, so a different (and
+  possibly existing) key was reported. They are now left out, logged and
+  counted.
+- A Protocol Buffers connection kept the buffer of its largest request for
+  its whole life; buffers above 256 KiB are now freed once the request is
+  sent.
 
 ## 2.1.0 — 2026-10-29
 

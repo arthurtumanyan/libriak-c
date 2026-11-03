@@ -197,30 +197,36 @@ riak_status riak_async_delete(riak_async *a, const char *bucket, const char *key
 
 static riak_status siblings_http(riak_client *c, void *state, riak_response *resp,
                                  riak_async_result *res) {
-    (void)state;
-    return riak_kv_finish_siblings(c, resp, &res->siblings);
+    return riak_kv_finish_siblings(c, &((get_state *)state)->opts, resp, &res->siblings);
 }
 
 static riak_status siblings_pb(riak_client *c, void *state, riak_pb_response *resp,
                                riak_async_result *res) {
-    (void)state;
-    return riak_pb_finish_siblings(c, resp, &res->siblings);
+    return riak_pb_finish_siblings(c, &((get_state *)state)->opts, resp, &res->siblings);
 }
 
-static const riak_aop_def siblings_def = {
-    .kind = RIAK_ASYNC_GET_SIBLINGS, .finish_http = siblings_http, .finish_pb = siblings_pb};
+static const riak_aop_def siblings_def = {.kind = RIAK_ASYNC_GET_SIBLINGS,
+                                          .finish_http = siblings_http,
+                                          .finish_pb = siblings_pb,
+                                          .free_state = free_plain};
 
 riak_status riak_async_get_siblings(riak_async *a, const char *bucket, const char *key,
                                     const riak_opts *opts, riak_async_cb cb, void *ctx) {
     if (a == NULL || cb == NULL) return RIAK_E_INVALID_ARG;
-    static const riak_opts no_opts;
-    const riak_opts *o = opts ? opts : &no_opts;
     riak_client *c = riak_async_client(a);
+    get_state *s = new_state(a, sizeof *s);
+    if (s == NULL) return RIAK_E_NOMEM;
+    if (opts) s->opts = *opts;
     riak_prepared hp = {0};
     riak_pb_prepared pp = {0};
-    riak_status st = riak_async_pb_engine(a) ? riak_pb_prepare_get(c, bucket, key, o, &pp)
-                                             : riak_kv_prepare_siblings(c, bucket, key, o, &hp);
-    return submit(a, &siblings_def, NULL, st, &hp, &pp, cb, ctx);
+    riak_status st = riak_async_pb_engine(a)
+                         ? riak_pb_prepare_get(c, bucket, key, &s->opts, &pp)
+                         : riak_kv_prepare_siblings(c, bucket, key, &s->opts, &hp);
+    if (st != RIAK_OK) {
+        free_plain(s);
+        s = NULL;
+    }
+    return submit(a, &siblings_def, s, st, &hp, &pp, cb, ctx);
 }
 
 /* ---- data types --------------------------------------------------------- */
@@ -529,7 +535,8 @@ riak_status riak_async_index_query_stream(riak_async *a, const char *bucket,
         s->x = (riak_pb_index_ctx){.cb = item, .ctx = item_ctx, .continuation = &s->continuation};
         st = riak_pb_index_prepare(c, bucket, q, &s->x, &pp);
     } else {
-        s->is = (riak_index_stream){.cb = item, .ctx = item_ctx, .continuation = &s->continuation};
+        s->is = (riak_index_stream){
+            .cb = item, .ctx = item_ctx, .continuation = &s->continuation, .c = c};
         s->hs = (riak_http_stream){.c = c, .fn = riak_index_chunk, .ctx = &s->is};
         st = riak_index_http_prepare(c, bucket, q, true, &hp);
         if (st == RIAK_OK) riak_http_stream_attach(&s->hs, &hp.req);

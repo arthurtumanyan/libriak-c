@@ -273,6 +273,17 @@ void riak_client_free(riak_client *client) {
     free(client);
 }
 
+void riak_skip_names(riak_client *c, size_t n) {
+    if (n > 0) {
+        c->skipped_names += n;
+        riak_log(c, RIAK_LOG_WARN, "%zu name(s) with a NUL byte left out of a result", n);
+    }
+}
+
+uint64_t riak_client_skipped_names(const riak_client *client) {
+    return client ? client->skipped_names : 0;
+}
+
 size_t riak_client_node_count(const riak_client *client) {
     return client ? client->n_nodes : 0;
 }

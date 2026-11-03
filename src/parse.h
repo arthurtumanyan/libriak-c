@@ -14,9 +14,10 @@
 
 #include "riak/riak.h"
 
-/* {"<field>": ["a", "b", ...]} is parsed from a complete body. */
+/* {"<field>": ["a", "b", ...]} is parsed from a complete body; strings
+ * with a NUL byte are left out and counted in *skipped. */
 riak_status riak_parse_string_array(const char *json, size_t len, const char *field,
-                                    riak_strlist *out);
+                                    riak_strlist *out, size_t *skipped);
 
 /* Incremental parser for ?keys=stream responses, which are a sequence of
  * concatenated {"keys":[...]} objects split arbitrarily across chunks. */
@@ -30,15 +31,18 @@ void riak_keystream_take(riak_keystream *ks, riak_strlist *out);
 riak_status riak_keystream_feed(riak_keystream *ks, const char *data, size_t len);
 /* The collected keys are moved into out; an input that ended mid-object fails. */
 riak_status riak_keystream_finish(riak_keystream *ks, riak_strlist *out);
+/* Names with a NUL byte left out since the last call. */
+size_t riak_keystream_skipped(riak_keystream *ks);
 void riak_keystream_free(riak_keystream *ks);
 
 /* One page (or streamed chunk) of a 2i response: {"keys":[...]} or
  * {"results":[{"<term>":"<key>"},...]}, optionally with "continuation".
  * visit() returns false to stop (the call then returns RIAK_OK with
- * *stopped set). *continuation is replaced when the page carries one. */
+ * *stopped set). *continuation is replaced when the page carries one.
+ * Keys with a NUL byte are not visited but counted in *skipped. */
 typedef bool (*riak_index_visit_fn)(const char *key, const char *term, void *ctx);
 riak_status riak_parse_index_json(const char *json, size_t len, riak_index_visit_fn visit,
-                                  void *ctx, char **continuation, bool *stopped);
+                                  void *ctx, char **continuation, bool *stopped, size_t *skipped);
 
 /* Solr JSON response (wt=json) into a riak_search_result; raw is not set. */
 riak_status riak_parse_search(const char *json, size_t len, riak_search_result *out);

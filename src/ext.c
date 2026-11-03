@@ -202,7 +202,8 @@ riak_status riak_fold_objects(riak_client *client, const char *bucket, const ria
     }
     riak_status st;
     if ((st = riak_check_name(client, bucket, "bucket")) != RIAK_OK ||
-        (st = riak_check_name(client, q->start_key, "start_key")) != RIAK_OK ||
+        (q->start_key == NULL &&
+         (st = riak_set_error(client, RIAK_E_INVALID_ARG, "start_key must be set")) != RIAK_OK) ||
         (q->bucket_type &&
          (st = riak_check_name(client, q->bucket_type, "bucket type")) != RIAK_OK)) {
         return st;
