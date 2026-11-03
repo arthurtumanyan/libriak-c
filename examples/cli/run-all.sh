@@ -130,9 +130,18 @@ if has 2i; then
 fi
 
 step monitoring
-rc=0
-"$here/automation/health-check.sh" || rc=$?
-[ "$rc" -le 1 ] || fail "health check exit code $rc"
+# the latencies depend on the machine, so the classification is checked
+# with thresholds that every node is below (OK) or above (CRITICAL)
+check() {
+    rc=0
+    "$here/automation/health-check.sh" "$1" "$2" >"$work/check.txt" || rc=$?
+    cat "$work/check.txt"
+    [ "$rc" -eq "$3" ] || fail "health check exit code $rc, expected $3"
+    grep -q "^$4 - .* | get95=[0-9]*us;$1;$2 put95=[0-9]*us;$1;$2 nodes_up=[0-9]*;;;0;[0-9]*\$" \
+        "$work/check.txt" || fail "health check output"
+}
+check 1000000000 2000000000 0 OK
+check 0 0 2 CRITICAL
 "$here/automation/cluster-stats.sh" 1 2 >"$work/stats.csv"
 [ "$(wc -l <"$work/stats.csv")" -eq 3 ] || fail "expected a header and 2 samples"
 cat "$work/stats.csv"
