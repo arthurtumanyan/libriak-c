@@ -271,7 +271,7 @@ jobs:
           CC: clang
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_FUZZ=ON -DRIAK_SANITIZE=ON
-          && cmake --build build -j --target fuzz_parse fuzz_pb
+          && cmake --build build -j --target fuzz_parse fuzz_pb fuzz_riakctl
       - name: Fuzz for 60 seconds each
         run: |
           build/tests/fuzz_parse -max_total_time=60 -max_len=4096
