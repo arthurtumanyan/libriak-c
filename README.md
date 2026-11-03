@@ -40,12 +40,45 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 
 ## Installing
 
-Signed apt and dnf repositories for Ubuntu 22.04, 24.04 and 26.04, Debian 12
-and 13, Fedora 44 and 45 and AlmaLinux/EL 9 and 10 are published at https://arthurtumanyan.github.io/libriak-c/;
-the setup is described in
-[Package repository](docs/packaging.md#package-repository). Prebuilt
-packages are also kept under
-[packages/](packages/2.2.0).
+Signed apt and dnf repositories with the packages of all releases are
+published at https://arthurtumanyan.github.io/libriak-c/. The package
+manager resolves the dependencies: `libriak-c-tools` (`riakctl`) and the
+development package pull in the runtime library of the same version.
+
+Ubuntu 22.04, 24.04 and 26.04 and Debian 12 and 13 (`ubuntu-24.04` is
+replaced by `ubuntu-22.04`, `ubuntu-26.04`, `debian-12` or `debian-13`):
+
+```sh
+repo=https://arthurtumanyan.github.io/libriak-c
+sudo install -d -m 755 /etc/apt/keyrings
+curl -fsSL "$repo/libriak-c.asc" | sudo tee /etc/apt/keyrings/libriak-c.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/libriak-c.asc] $repo/deb/ubuntu-24.04 ./" |
+    sudo tee /etc/apt/sources.list.d/libriak-c.list
+sudo apt update
+sudo apt install libriak-c-tools    # riakctl; libriak-c-dev for development
+```
+
+Fedora 44 and 45:
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/libriak-c.repo \
+    https://arthurtumanyan.github.io/libriak-c/libriak-c-fedora.repo
+sudo dnf install libriak-c-tools    # riakctl; libriak-c-devel for development
+```
+
+AlmaLinux, Rocky Linux and RHEL 9 and 10:
+
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/libriak-c.repo \
+    https://arthurtumanyan.github.io/libriak-c/libriak-c-el.repo
+sudo dnf install libriak-c-tools    # riakctl; libriak-c-devel for development
+```
+
+The repository metadata is signed with the release key
+`250446BC3970DF96FB44862E79D98732D385788E`; dnf asks to confirm its import
+on first use. The packages are also attached to the
+[releases](https://github.com/arthurtumanyan/libriak-c/releases); details
+are in [Packaging and releases](docs/packaging.md#package-repository).
 
 ## Building
 
