@@ -199,3 +199,19 @@ GCC and Clang in sanitizer and release builds, ThreadSanitizer, valgrind,
 the oldest supported distribution (Ubuntu 22.04), the live matrix, coverage, a fuzzing run, a Debian
 package dry run, and linting (clang-format, cppcheck, clang-tidy, actionlint,
 Doxygen). CodeQL runs in `.github/workflows/codeql.yml`.
+
+The workflow runs once per pushed commit and its result stays attached to
+that commit; a later fix does not change it. GitHub's file view shows, next
+to each file and directory, the result of the last commit that touched it,
+so a directory that has not changed since a failing commit keeps showing
+that failure even when `master` is green. The current state is the result
+of the latest run on `master`. On pull requests, a new push cancels the run
+still in progress for the previous commit (`cancel-in-progress`), so the
+superseded commit shows cancelled jobs.
+
+The commits that added the prebuilt packages show such past results:
+
+| Commit | Result | Cause | Fixed by |
+|---|---|---|---|
+| Prebuilt 2.1.0 packages | live tests over HTTPS with authentication on Riak 3.2.6 and 3.4.1 timed out | the 120 s limit of the `live` test was below the run time of the suite over HTTPS with authentication on a hosted runner | "Time limits of the live tests over HTTPS with authentication" (limit raised to 900 s) |
+| Prebuilt 2.2.0 packages | `fuzz` failed, live jobs cancelled | the fuzzing job did not build `fuzz_riakctl`; the live jobs were cancelled by the next push to the pull request | "CI: build the riakctl fuzz target" |
