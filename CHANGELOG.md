@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The release tags and the package repositories are signed with a dedicated
+  libriak-c key, `D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84`, in place of a
+  key shared with another project; CI holds only its signing subkey. Systems
+  set up with the earlier key download `libriak-c.asc` again.
+
 ## 2.2.1 — 2026-11-03
 
 ### Added
