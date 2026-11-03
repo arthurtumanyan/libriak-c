@@ -80,6 +80,9 @@ static unsigned node_port(const riak_pbconn *k) {
 
 /* ---- framing -------------------------------------------------------- */
 
+/* Capacity of the frame buffer kept for the next request. */
+#define OUT_KEEP ((size_t)256U << 10U)
+
 static bool queue_frame(riak_pbconn *k, uint8_t code, const uint8_t *payload, size_t len) {
     if (len > UINT32_MAX - 1) {
         fail(k, RIAK_E_INVALID_ARG, "request too large");
@@ -221,6 +224,11 @@ static int pump(riak_pbconn *k) {
         if (k->state == RIAK_PBC_BUSY) {
             k->sent = true;
         }
+    }
+    if (k->out.cap > OUT_KEEP) {
+        /* a large request (a big value) is not kept for the connection's life */
+        riak_buf_free(&k->out);
+        k->out_off = 0;
     }
     for (;;) {
         if (k->rpos == k->rlen) {

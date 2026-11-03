@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libriak-c VERSION 2.1.0 LANGUAGES C
+project(libriak-c VERSION 2.2.0 LANGUAGES C
         DESCRIPTION "C client for Riak KV (Protocol Buffers and HTTP)")
 
 include(GNUInstallDirs)
@@ -7,6 +7,7 @@ include(CMakePackageConfigHelpers)
 
 option(RIAK_BUILD_TESTS "Build the test suite" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_BUILD_EXAMPLES "Build the examples" ${PROJECT_IS_TOP_LEVEL})
+option(RIAK_BUILD_TOOLS "Build the riakctl command-line tool" ${PROJECT_IS_TOP_LEVEL})
 option(RIAK_SANITIZE "Build with AddressSanitizer and UBSan (ON) or ThreadSanitizer (thread)" OFF)
 option(RIAK_WERROR "Treat warnings as errors" OFF)
 option(RIAK_FUZZ "Build libFuzzer targets (clang only)" OFF)
@@ -179,6 +180,10 @@ if(RIAK_BUILD_EXAMPLES)
   target_link_libraries(riak_example PRIVATE riak riak_warnings)
   add_executable(riak_async_example examples/async.c)
   target_link_libraries(riak_async_example PRIVATE riak riak_warnings)
+endif()
+
+if(RIAK_BUILD_TOOLS)
+  add_subdirectory(tools/riakctl)
 endif()
 
 find_package(Doxygen QUIET)

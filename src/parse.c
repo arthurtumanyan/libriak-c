@@ -22,10 +22,12 @@ struct riak_keystream {
     size_t cap;
     bool pending; /* an object has started but not finished */
     const char *field;
+    size_t skipped; /* names with a NUL byte, left out */
 };
 
 /* Every string of obj[field] is appended to out. */
-static riak_status collect(json_object *obj, const char *field, riak_strlist *out, size_t *cap) {
+static riak_status collect(json_object *obj, const char *field, riak_strlist *out, size_t *cap,
+                           size_t *skipped) {
     json_object *arr;
     if (!json_object_is_type(obj, json_type_object) ||
         !json_object_object_get_ex(obj, field, &arr) ||
@@ -40,6 +42,10 @@ static riak_status collect(json_object *obj, const char *field, riak_strlist *ou
         }
         const char *s = json_object_get_string(item);
         size_t len = (size_t)json_object_get_string_len(item);
+        if (memchr(s, '\0', len) != NULL) {
+            (*skipped)++;
+            continue;
+        }
         if (riak_strlist_push(out, cap, s, len) != 0) {
             return RIAK_E_NOMEM;
         }
@@ -57,7 +63,7 @@ static riak_status ensure_terminated(riak_strlist *out, size_t *cap) {
 }
 
 riak_status riak_parse_string_array(const char *json, size_t len, const char *field,
-                                    riak_strlist *out) {
+                                    riak_strlist *out, size_t *skipped) {
     memset(out, 0, sizeof *out);
     if (len > INT_MAX) {
         return RIAK_E_PARSE;
@@ -70,7 +76,7 @@ riak_status riak_parse_string_array(const char *json, size_t len, const char *fi
     riak_status st = RIAK_E_PARSE;
     size_t cap = 0;
     if (obj != NULL && json_tokener_get_error(tok) == json_tokener_success) {
-        st = collect(obj, field, out, &cap);
+        st = collect(obj, field, out, &cap, skipped);
         if (st == RIAK_OK) {
             st = ensure_terminated(out, &cap);
         }
@@ -132,7 +138,7 @@ riak_status riak_keystream_feed(riak_keystream *ks, const char *data, size_t len
         size_t used = json_tokener_get_parse_end(ks->tok);
         json_tokener_reset(ks->tok);
         ks->pending = false;
-        riak_status st = collect(obj, ks->field, &ks->list, &ks->cap);
+        riak_status st = collect(obj, ks->field, &ks->list, &ks->cap, &ks->skipped);
         json_object_put(obj);
         if (st != RIAK_OK) {
             return st;
@@ -161,6 +167,12 @@ void riak_keystream_take(riak_keystream *ks, riak_strlist *out) {
     *out = ks->list;
     memset(&ks->list, 0, sizeof ks->list);
     ks->cap = 0;
+}
+
+size_t riak_keystream_skipped(riak_keystream *ks) {
+    size_t n = ks->skipped;
+    ks->skipped = 0;
+    return n;
 }
 
 void riak_keystream_free(riak_keystream *ks) {
@@ -196,7 +208,7 @@ static json_object *parse_doc(const char *json, size_t len, riak_status *st) {
 }
 
 riak_status riak_parse_index_json(const char *json, size_t len, riak_index_visit_fn visit,
-                                  void *ctx, char **continuation, bool *stopped) {
+                                  void *ctx, char **continuation, bool *stopped, size_t *skipped) {
     *stopped = false;
     riak_status st;
     json_object *obj = parse_doc(json, len, &st);
@@ -234,6 +246,10 @@ riak_status riak_parse_index_json(const char *json, size_t len, riak_index_visit
             if (!json_object_is_type(k, json_type_string)) {
                 goto done;
             }
+            if (memchr(json_object_get_string(k), '\0', (size_t)json_object_get_string_len(k))) {
+                (*skipped)++;
+                continue;
+            }
             if (!visit(json_object_get_string(k), NULL, ctx)) {
                 *stopped = true;
                 st = RIAK_OK;
@@ -251,6 +267,11 @@ riak_status riak_parse_index_json(const char *json, size_t len, riak_index_visit
             json_object_object_foreach(r, term, key) {
                 if (!json_object_is_type(key, json_type_string)) {
                     goto done;
+                }
+                if (memchr(json_object_get_string(key), '\0',
+                           (size_t)json_object_get_string_len(key))) {
+                    (*skipped)++;
+                    continue;
                 }
                 if (!visit(json_object_get_string(key), term, ctx)) {
                     *stopped = true;

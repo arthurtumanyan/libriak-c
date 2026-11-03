@@ -221,6 +221,34 @@ static void test_lists(void) {
     CHECK_EQ_INT(riak_list_buckets_stream(c, NULL, on_name, &all), RIAK_OK);
     CHECK_EQ_INT(all.n, 3);
     CHECK_EQ_STR(all.names[1], "n2");
+
+    /* a key with a NUL byte is left out and counted, not truncated to "n" */
+    CHECK_EQ_INT(riak_client_skipped_names(c), 0);
+    CHECK_EQ_INT(riak_list_keys(c, "nulkeys", &l), RIAK_OK);
+    CHECK_EQ_INT(l.count, 2);
+    CHECK_EQ_STR(l.items[0], "n1");
+    CHECK_EQ_STR(l.items[1], "n3");
+    riak_strlist_free(&l);
+    CHECK_EQ_INT(riak_client_skipped_names(c), 1);
+    names nk = {0};
+    CHECK_EQ_INT(riak_list_keys_stream(c, NULL, "nulkeys", on_name, &nk), RIAK_OK);
+    CHECK_EQ_INT(nk.n, 2);
+    CHECK_EQ_STR(nk.names[1], "n3");
+    CHECK_EQ_INT(riak_client_skipped_names(c), 2);
+    riak_index_query iq = {.index = "age_int", .range_min = "1", .range_max = "9"};
+    riak_index_result ir;
+    CHECK_EQ_INT(riak_index_query_run(c, "nulkeys", &iq, &ir), RIAK_OK);
+    CHECK_EQ_INT(ir.count, 1);
+    CHECK_EQ_STR(ir.keys[0], "k2");
+    riak_index_result_free(&ir);
+    iq.return_terms = true;
+    CHECK_EQ_INT(riak_index_query_run(c, "nulkeys", &iq, &ir), RIAK_OK);
+    CHECK_EQ_INT(ir.count, 1);
+    CHECK_EQ_STR(ir.keys[0], "k2");
+    CHECK_EQ_STR(ir.terms[0], "t2");
+    riak_index_result_free(&ir);
+    CHECK_EQ_INT(riak_client_skipped_names(c), 4);
+    CHECK_EQ_INT(riak_client_skipped_names(NULL), 0);
     riak_client_free(c);
 }
 
@@ -589,6 +617,17 @@ static void test_new_options_pb(void) {
     riak_object_free(&o);
     CHECK_EQ_INT(riak_get(c, "b", "tombdv", NULL, &o), RIAK_E_NOT_FOUND);
     CHECK(o.vclock == NULL && !o.deleted);
+    riak_object_set ts;
+    CHECK_EQ_INT(riak_get_siblings(c, "b", "tombdv", &dv, &ts), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(ext.get_deletedvclock, 1);
+    CHECK(ts.count == 0 && ts.items == NULL);
+    CHECK_EQ_STR(ts.vclock, VCLOCK_B64);
+    riak_object_set_free(&ts);
+    CHECK_EQ_INT(riak_get_siblings(c, "b", "tombdv", NULL, &ts), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(ext.get_deletedvclock, 0);
+    CHECK(ts.vclock == NULL && ts.count == 0);
+    CHECK_EQ_INT(riak_get_siblings(c, "b", "missing", &dv, &ts), RIAK_E_NOT_FOUND);
+    CHECK(ts.vclock == NULL);
 
     riak_index_query q = {
         .index = "age_int", .range_min = "1", .range_max = "9", .pagination_sort = true};
@@ -727,6 +766,11 @@ static void test_fold_and_links(void) {
                          .start_exclusive = true,
                          .end_inclusive = true,
                          .max_results = 2};
+    CHECK_EQ_INT(riak_fold_objects(c, "nulkeys", &q, on_fold, &f, NULL), RIAK_OK);
+    CHECK_EQ_INT(f.n, 1); /* "f\0x" is left out */
+    CHECK_EQ_STR(f.last, "f2");
+    CHECK_EQ_INT(riak_client_skipped_names(c), 1);
+    memset(&f, 0, sizeof f);
     CHECK_EQ_INT(riak_fold_objects(c, "b", &q, on_fold, &f, &next), RIAK_OK);
     CHECK_EQ_INT(f.n, 2);
     CHECK_EQ_STR(f.last, "f2");
@@ -758,6 +802,13 @@ static void test_fold_and_links(void) {
     CHECK(after == NULL);
     riak_fold_query nostart = {0};
     CHECK_EQ_INT(riak_fold_objects(c, "b", &nostart, on_fold, &f, NULL), RIAK_E_INVALID_ARG);
+    /* "" starts at the first key: it is sent as an empty key */
+    riak_fold_query first = {.start_key = ""};
+    memset(&f, 0, sizeof f);
+    snprintf(ext.fold_start, sizeof ext.fold_start, "unset");
+    CHECK_EQ_INT(riak_fold_objects(c, "b", &first, on_fold, &f, NULL), RIAK_OK);
+    CHECK_EQ_STR(ext.fold_start, "");
+    CHECK_EQ_INT(f.n, 2);
 
     /* PB link walking runs MapReduce link phases and fetches the objects;
      * keys that are gone are dropped and duplicates collapse */
@@ -1348,6 +1399,13 @@ static void test_async_data_path(void) {
     CHECK_EQ_INT(wait_one(a, &g), RIAK_OK);
     CHECK_EQ_INT(g.kind, RIAK_ASYNC_GET_SIBLINGS);
     CHECK_EQ_INT(g.kept.siblings.count, 2);
+    grab_free(&g);
+    riak_opts dv = {.deletedvclock = true};
+    CHECK_EQ_INT(riak_async_get_siblings(a, "b", "tombdv", &dv, take, &g), RIAK_OK);
+    CHECK_EQ_INT(wait_one(a, &g), RIAK_E_NOT_FOUND);
+    CHECK_EQ_INT(ext.get_deletedvclock, 1);
+    CHECK(g.kept.siblings.count == 0);
+    CHECK_EQ_STR(g.kept.siblings.vclock, VCLOCK_B64);
     grab_free(&g);
 
     riak_datatype ref;

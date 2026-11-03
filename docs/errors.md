@@ -46,6 +46,12 @@ Deleting a key that does not exist is reported as `RIAK_OK`.
   `riak_dt_value::elements`) are NULL-terminated and also carry a count.
 - Object values (`riak_object::data`) are NUL-terminated for convenience;
   `len` gives the exact length, which matters for binary data.
+- Keys and bucket names are C strings. A name sent by Riak that contains a
+  NUL byte cannot be passed on unchanged, so listings, object folds, index
+  results and AAE results leave it out rather than cut it short; it is
+  logged at `RIAK_LOG_WARN` and counted by `riak_client_skipped_names()`,
+  which a caller checks to tell a complete result from one with names
+  left out.
 
 ## Threading
 

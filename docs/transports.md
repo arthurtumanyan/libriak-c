@@ -57,7 +57,8 @@ roughly 2 times faster.
 | `riak_opts::sloppy_quorum`, `n_val` | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_opts::if_none_match = "*"` | Supported | Supported |
 | `riak_get_coverage()`, `riak_index_query::cover_context` | Supported | `RIAK_E_UNSUPPORTED` |
-| `riak_opts::return_head`, `deletedvclock` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_opts::return_head` | Supported | `RIAK_E_UNSUPPORTED` |
+| `riak_opts::deletedvclock` | Supported | Supported |
 | `riak_opts::node_confirms` on a delete | `RIAK_E_UNSUPPORTED` | Supported |
 | `riak_fold_objects()`, `riak_get_client_id()`, `riak_repl_push()` | Supported | `RIAK_E_UNSUPPORTED` |
 | `riak_get_cluster_id()`, `riak_repl_get()` | Supported | `RIAK_E_UNSUPPORTED` |

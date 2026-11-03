@@ -2,16 +2,19 @@
 
 ## Packages
 
-Each format consists of a runtime and a development package:
+Each format consists of a runtime, a development and a tools package:
 
 | | Debian / Ubuntu | Fedora / EL |
 |---|---|---|
 | Runtime | `libriak-c2` | `libriak-c` |
 | Development | `libriak-c-dev` | `libriak-c-devel` |
+| Tools | `libriak-c-tools` | `libriak-c-tools` |
 
 The runtime package holds the shared library and documentation; the
 development package holds the header, the static library, the `.so` link,
-the CMake package and the pkg-config file. Runtime dependencies are derived
+the CMake package and the pkg-config file. The tools package holds the
+[`riakctl`](riakctl.md) command-line client and its man page, and depends on
+the runtime package of the same version. Runtime dependencies are derived
 by `dpkg-shlibdeps` and RPM autoreq; the development packages depend on the
 libcurl, json-c, protobuf-c, OpenSSL and zlib development packages.
 
@@ -32,7 +35,9 @@ packaging/build-packages.sh DEB      # or RPM; output in dist/
 ```
 
 `packaging/smoke-test.sh` compiles `examples/basic.c` against the installed
-packages through pkg-config and through the CMake package, shared and static.
+packages through pkg-config and through the CMake package, shared and static,
+and checks the installed `riakctl` (version, linkage, exit code of an
+unreachable node, packaged man page).
 
 ## Prebuilt packages
 
@@ -40,16 +45,19 @@ Prebuilt x86_64 packages of each release are kept in the repository under
 `packages/<version>/<distribution>/`, together with a `SHA256SUMS` file:
 
 ```sh
-cd packages/2.1.0 && sha256sum -c SHA256SUMS
-sudo apt install ./ubuntu-24.04/libriak-c2_2.1.0-1~ubuntu24.04_amd64.deb \
-                 ./ubuntu-24.04/libriak-c-dev_2.1.0-1~ubuntu24.04_amd64.deb
-sudo dnf install ./fedora-42/libriak-c-2.1.0-1.fc42.x86_64.rpm \
-                 ./fedora-42/libriak-c-devel-2.1.0-1.fc42.x86_64.rpm
+cd packages/2.2.0 && sha256sum -c SHA256SUMS
+sudo apt install ./ubuntu-24.04/libriak-c2_2.2.0-1~ubuntu24.04_amd64.deb \
+                 ./ubuntu-24.04/libriak-c-dev_2.2.0-1~ubuntu24.04_amd64.deb \
+                 ./ubuntu-24.04/libriak-c-tools_2.2.0-1~ubuntu24.04_amd64.deb
+sudo dnf install ./fedora-42/libriak-c-2.2.0-1.fc42.x86_64.rpm \
+                 ./fedora-42/libriak-c-devel-2.2.0-1.fc42.x86_64.rpm \
+                 ./fedora-42/libriak-c-tools-2.2.0-1.fc42.x86_64.rpm
 ```
 
-The 2.1.0 packages are provided for Ubuntu 22.04 and 24.04, Debian 12,
-Fedora 42 and AlmaLinux 10. Each set was installed into a clean container
-of its distribution and passed `packaging/smoke-test.sh`.
+The 2.1.0 and 2.2.0 packages are provided for Ubuntu 22.04 and 24.04,
+Debian 12, Fedora 42 and AlmaLinux 10; from 2.2.0 on, `libriak-c-tools`
+holds `riakctl`. Each set was installed into a clean container of its
+distribution and passed `packaging/smoke-test.sh`.
 
 ## Releases
 
@@ -58,8 +66,8 @@ the version macros in `include/riak/riak.h`, `PROJECT_NUMBER` in
 `docs/Doxyfile` and the `CHANGELOG.md` heading, and pushing a matching tag:
 
 ```sh
-git tag -s v2.1.0 -m "libriak-c 2.1.0"
-git push origin v2.1.0
+git tag -s v2.2.0 -m "libriak-c 2.2.0"
+git push origin v2.2.0
 ```
 
 `.github/workflows/release.yml` then checks that the tag matches the project

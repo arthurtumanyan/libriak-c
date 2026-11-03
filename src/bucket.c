@@ -120,8 +120,10 @@ riak_status riak_type_list_buckets(riak_client *client, const char *type, riak_s
     if (resp.status != 200) {
         st = riak_http_error(client, &resp);
     } else {
+        size_t skipped = 0;
         st = riak_parse_string_array(resp.body.data ? resp.body.data : "", resp.body.len, "buckets",
-                                     out);
+                                     out, &skipped);
+        riak_skip_names(client, skipped);
         if (st != RIAK_OK) {
             riak_set_error(client, st, "cannot parse bucket list");
         }
@@ -174,6 +176,7 @@ riak_status riak_type_list_keys(riak_client *client, const char *type, const cha
         } else if ((st = riak_keystream_finish(ks, out)) != RIAK_OK) {
             riak_set_error(client, st, "truncated key stream");
         }
+        riak_skip_names(client, riak_keystream_skipped(ks));
         riak_response_free(&resp);
     }
     riak_keystream_free(ks);
@@ -391,6 +394,7 @@ static bool name_sink(void *ctx, const char *data, size_t len, riak_status *abor
     }
     riak_strlist l;
     riak_keystream_take(s->ks, &l);
+    riak_skip_names(s->c, riak_keystream_skipped(s->ks));
     bool more = true;
     for (size_t i = 0; more && i < l.count; i++) {
         more = s->cb(l.items[i], strlen(l.items[i]), s->ctx);
@@ -417,6 +421,7 @@ riak_status riak_list_http_prepare(riak_client *c, const char *type, const char 
                riak_buf_append_str(&p->url, "/"))) ||
              riak_buf_append_str(&p->url, "buckets?buckets=stream");
     }
+    s->c = c;
     s->ks = rc ? NULL : riak_keystream_new_field(bucket ? "keys" : "buckets");
     if (s->ks == NULL) {
         riak_prepared_free(p);
@@ -441,6 +446,7 @@ riak_status riak_list_http_end(riak_client *c, riak_name_stream *s, riak_status 
         } else {
             riak_strlist_free(&rest);
         }
+        riak_skip_names(c, riak_keystream_skipped(s->ks));
     }
     riak_keystream_free(s->ks);
     s->ks = NULL;

@@ -159,6 +159,12 @@ static riak_status inflate_all(const uint8_t *in, size_t len, size_t limit, uint
     return RIAK_OK;
 }
 
+/* A JSON string with a NUL byte (a name that cannot be passed on). */
+static bool json_has_nul(json_object *v) {
+    return json_object_is_type(v, json_type_string) &&
+           riak_name_has_nul(json_object_get_string(v), (size_t)json_object_get_string_len(v));
+}
+
 /* A JSON value holding base64: a string, or an array of character codes. */
 static char *json_b64(json_object *v) {
     if (json_object_is_type(v, json_type_string)) {
@@ -331,6 +337,11 @@ static riak_status pb_keys(riak_client *c, RpbAaeFoldKeyValueResp *r, riak_aae_k
     }
     for (size_t i = 0; i < r->n_keys_value; i++) {
         const RpbKeysValue *kv = r->keys_value[i];
+        if (riak_name_has_nul(kv->key.data, kv->key.len) ||
+            riak_name_has_nul(kv->bucket.data, kv->bucket.len)) {
+            riak_skip_names(c, 1);
+            continue;
+        }
         riak_aae_key_clock *k = &out->items[out->count++];
         if ((kv->has_type && (k->bucket_type = dup_bin(kv->type)) == NULL) ||
             (k->bucket = dup_bin(kv->bucket)) == NULL || (k->key = dup_bin(kv->key)) == NULL ||
@@ -444,12 +455,16 @@ static riak_status http_keys(riak_client *c, json_object *doc, riak_aae_keys *ou
     }
     for (size_t i = 0; i < n; i++) {
         json_object *e = json_object_array_get_idx(arr, i), *t, *b, *k, *clk;
-        riak_aae_key_clock *kc = &out->items[out->count++];
         if (!json_object_object_get_ex(e, "bucket", &b) ||
             !json_object_object_get_ex(e, "key", &k) ||
             !json_object_object_get_ex(e, "clock", &clk)) {
             return riak_set_error(c, RIAK_E_PARSE, "malformed keys-clocks entry");
         }
+        if (json_has_nul(k) || json_has_nul(b)) {
+            riak_skip_names(c, 1);
+            continue;
+        }
+        riak_aae_key_clock *kc = &out->items[out->count++];
         if ((json_object_object_get_ex(e, "bucket-type", &t) &&
              (kc->bucket_type = riak_strdup(json_object_get_string(t))) == NULL) ||
             (kc->bucket = riak_strdup(json_object_get_string(b))) == NULL ||
@@ -809,6 +824,10 @@ riak_status riak_aae_find_keys(riak_client *client, const riak_aae_filter *f, ri
                 st = riak_set_error(client, RIAK_E_NOMEM, "out of memory");
             }
             for (size_t i = 0; st == RIAK_OK && i < n; i++) {
+                if (riak_name_has_nul(r->keys_count[i]->tag.data, r->keys_count[i]->tag.len)) {
+                    riak_skip_names(client, 1);
+                    continue;
+                }
                 riak_aae_key_count *kc = &out->items[out->count++];
                 kc->value = r->keys_count[i]->count;
                 if ((kc->key = dup_bin(r->keys_count[i]->tag)) == NULL) {
@@ -839,11 +858,17 @@ riak_status riak_aae_find_keys(riak_client *client, const riak_aae_filter *f, ri
         }
         for (size_t i = 0; st == RIAK_OK && i < n; i++) {
             json_object *e = json_object_array_get_idx(arr, i), *k, *v;
-            riak_aae_key_count *kc = &out->items[out->count++];
             if (!json_object_object_get_ex(e, "key", &k) ||
                 !json_object_object_get_ex(e, "value", &v)) {
                 st = riak_set_error(client, RIAK_E_PARSE, "malformed result");
-            } else if ((kc->key = riak_strdup(json_object_get_string(k))) == NULL) {
+                break;
+            }
+            if (json_has_nul(k)) {
+                riak_skip_names(client, 1);
+                continue;
+            }
+            riak_aae_key_count *kc = &out->items[out->count++];
+            if ((kc->key = riak_strdup(json_object_get_string(k))) == NULL) {
                 st = riak_set_error(client, RIAK_E_NOMEM, "out of memory");
             } else {
                 kc->value = (uint64_t)json_object_get_int64(v);
@@ -1109,6 +1134,10 @@ riak_status riak_aae_list_buckets(riak_client *client, unsigned n_val, riak_aae_
             }
             for (size_t i = 0; st == RIAK_OK && i < n; i++) {
                 const RpbAaeFoldBucket *b = r->bucket_list[i];
+                if (riak_name_has_nul(b->bucket.data, b->bucket.len)) {
+                    riak_skip_names(client, 1);
+                    continue;
+                }
                 riak_aae_bucket *ab = &out->items[out->count++];
                 if ((b->has_type && (ab->bucket_type = dup_bin(b->type)) == NULL) ||
                     (ab->bucket = dup_bin(b->bucket)) == NULL) {
@@ -1137,12 +1166,18 @@ riak_status riak_aae_list_buckets(riak_client *client, unsigned n_val, riak_aae_
         }
         for (size_t i = 0; st == RIAK_OK && i < n; i++) {
             json_object *e = json_object_array_get_idx(arr, i), *t, *b;
-            riak_aae_bucket *ab = &out->items[out->count++];
             if (!json_object_object_get_ex(e, "bucket", &b)) {
                 st = riak_set_error(client, RIAK_E_PARSE, "malformed bucket entry");
-            } else if ((json_object_object_get_ex(e, "bucket-type", &t) &&
-                        (ab->bucket_type = riak_strdup(json_object_get_string(t))) == NULL) ||
-                       (ab->bucket = riak_strdup(json_object_get_string(b))) == NULL) {
+                break;
+            }
+            if (json_has_nul(b)) {
+                riak_skip_names(client, 1);
+                continue;
+            }
+            riak_aae_bucket *ab = &out->items[out->count++];
+            if ((json_object_object_get_ex(e, "bucket-type", &t) &&
+                 (ab->bucket_type = riak_strdup(json_object_get_string(t))) == NULL) ||
+                (ab->bucket = riak_strdup(json_object_get_string(b))) == NULL) {
                 st = riak_set_error(client, RIAK_E_NOMEM, "out of memory");
             }
         }

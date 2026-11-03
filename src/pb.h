@@ -339,7 +339,8 @@ typedef struct {
 } riak_pb_prepared;
 
 void riak_pb_prepared_free(riak_pb_prepared *p);
-riak_status riak_pb_finish_siblings(riak_client *c, riak_pb_response *resp, riak_object_set *out);
+riak_status riak_pb_finish_siblings(riak_client *c, const riak_opts *o, riak_pb_response *resp,
+                                    riak_object_set *out);
 riak_status riak_pb_counter_prepare(riak_client *c, const char *bucket, const char *key,
                                     bool update, int64_t amount, const riak_opts *o,
                                     bool want_value, riak_pb_prepared *p);
@@ -349,6 +350,7 @@ typedef struct {
     riak_index_cb cb;
     void *ctx;
     char **continuation; /* receives the continuation, or NULL */
+    riak_client *c;      /* set by riak_pb_index_prepare() */
 } riak_pb_index_ctx;
 /* A streamed index query whose matches go to x->cb. */
 riak_status riak_pb_index_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
@@ -370,7 +372,8 @@ void riak_pb_mapred_ctx_free(riak_pb_mapred_ctx *x);
 typedef struct {
     riak_name_cb cb;
     void *ctx;
-    bool buckets; /* set by riak_pb_list_prepare() */
+    bool buckets;   /* set by riak_pb_list_prepare() */
+    riak_client *c; /* set by riak_pb_list_prepare() */
 } riak_pb_list_ctx;
 /* A streamed listing: the keys of bucket, or the buckets when it is NULL. */
 riak_status riak_pb_list_prepare(riak_client *c, const char *type, const char *bucket,

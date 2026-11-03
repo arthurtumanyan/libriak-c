@@ -175,7 +175,9 @@ static ProtobufCBinaryData stub_bin(const char *s) {
 
 static void stub_copy(char *dst, size_t cap, ProtobufCBinaryData b) {
     size_t n = b.len < cap - 1 ? b.len : cap - 1;
-    memcpy(dst, b.data, n);
+    if (n > 0) { /* an empty field may have no data pointer */
+        memcpy(dst, b.data, n);
+    }
     dst[n] = '\0';
 }
 
@@ -370,13 +372,20 @@ static int stub_put(stub_conn *c, const uint8_t *buf, size_t len) {
     return rc;
 }
 
-static int stub_names(stub_conn *c, uint8_t code, int keys) {
+/* A name with a NUL byte, which the client leaves out. */
+static const char stub_nul_name[] = {'n', '\0', 'x'};
+
+static int stub_names(stub_conn *c, uint8_t code, int keys, int nul) {
     const char *batches[3][2] = {{"n1", "n2"}, {"n3", NULL}, {NULL, NULL}};
     for (int i = 0; i < 3; i++) {
         ProtobufCBinaryData names[2];
         size_t n = 0;
         for (int j = 0; j < 2 && batches[i][j]; j++)
             names[n++] = stub_bin(batches[i][j]);
+        if (nul && i == 0) {
+            names[1].len = sizeof stub_nul_name;
+            names[1].data = (uint8_t *)(uintptr_t)stub_nul_name;
+        }
         int rc;
         if (keys) {
             RpbListKeysResp r = RPB_LIST_KEYS_RESP__INIT;
@@ -436,11 +445,16 @@ static int stub_index(stub_conn *c, const uint8_t *buf, size_t len) {
     if (q->has_cover_context && q->cover_context.len <= sizeof stub.cover)
         memcpy(stub.cover, q->cover_context.data, q->cover_context.len);
     int terms = q->has_return_terms && q->return_terms;
+    int nul = stub_is(q->bucket, "nulkeys");
     ext.index_pagination_sort = q->has_pagination_sort && q->pagination_sort;
     int rc = 0;
     for (int i = 0; rc == 0 && i < 2; i++) {
         RpbIndexResp r = RPB_INDEX_RESP__INIT;
         ProtobufCBinaryData keys[1] = {stub_bin(i ? "k2" : "k1")};
+        if (nul && i == 0) {
+            keys[0].len = sizeof stub_nul_name;
+            keys[0].data = (uint8_t *)(uintptr_t)stub_nul_name;
+        }
         RpbPair pair = RPB_PAIR__INIT;
         RpbPair *pairs[1] = {&pair};
         if (terms) {
@@ -823,6 +837,7 @@ static int stub_handle_ext(stub_conn *c, uint8_t code, const uint8_t *buf, size_
         RpbCSBucketReq *q = rpb_csbucket_req__unpack(NULL, len, buf);
         if (q == NULL) return -1;
         int fail = stub_is(q->bucket, "foldfail");
+        int nul = stub_is(q->bucket, "nulkeys");
         stub_copy(ext.fold_start, sizeof ext.fold_start, q->start_key);
         stub_copy(ext.fold_bucket, sizeof ext.fold_bucket, q->bucket);
         ext.fold_max = q->has_max_results ? q->max_results : 0;
@@ -853,6 +868,10 @@ static int stub_handle_ext(stub_conn *c, uint8_t code, const uint8_t *buf, size_
             g.vclock.len = sizeof STUB_VCLOCK;
             RpbIndexObject io = RPB_INDEX_OBJECT__INIT;
             io.key = stub_bin(batch ? "f2" : "f1");
+            if (nul && batch == 0) {
+                io.key.len = sizeof stub_nul_name;
+                io.key.data = (uint8_t *)(uintptr_t)stub_nul_name;
+            }
             io.object = &g;
             RpbIndexObject *ios[1] = {&io};
             r.n_objects = 1;
@@ -1183,9 +1202,14 @@ static int stub_handle(stub_conn *c, uint8_t code, const uint8_t *buf, size_t le
         return gone ? stub_error(c, "notfound") : stub_send(c, 14, NULL);
     }
     case 15:
-        return stub_names(c, 16, 0);
-    case 17:
-        return stub_names(c, 18, 1);
+        return stub_names(c, 16, 0, 0);
+    case 17: {
+        RpbListKeysReq *q = rpb_list_keys_req__unpack(NULL, len, buf);
+        if (q == NULL) return -1;
+        int nul = stub_is(q->bucket, "nulkeys");
+        rpb_list_keys_req__free_unpacked(q, NULL);
+        return stub_names(c, 18, 1, nul);
+    }
     case 19:
     case 31:
         return stub_props(c);

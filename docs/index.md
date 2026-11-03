@@ -24,6 +24,7 @@ protobuf-c, OpenSSL, libcurl and json-c.
 | [Testing](testing.md) | Test suites, stub server, live tests, fuzzing, coverage |
 | [Packaging and releases](packaging.md) | Debian/RPM packages and the release workflow |
 | [Migrating from 1.x](migration.md) | Mapping of the 1.x functions to the 2.0 API |
+| [riakctl](riakctl.md) | The command-line client: commands, JSON output, exit codes, backups and restores, demo workflows |
 
 ## API reference
 

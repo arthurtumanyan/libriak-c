@@ -32,9 +32,13 @@ riak_delete(c, "users", "u1", NULL);
 - `asis` stores the object exactly as sent, without the coordinating node
   updating its vector clock (replication tooling).
 - Over Protocol Buffers, `return_head` returns the stored object's metadata
-  and vector clock without its value, and `deletedvclock` makes a get of a
-  deleted key return `RIAK_E_NOT_FOUND` with the tombstone's vector clock in
-  `out->vclock` and `out->deleted` set.
+  and vector clock without its value.
+- `deletedvclock` makes a get of a deleted key return `RIAK_E_NOT_FOUND`
+  with the tombstone's vector clock in `out->vclock` and `out->deleted`
+  set, and `riak_get_siblings()` return it in `riak_object_set::vclock`
+  (with no siblings). A write with that clock supersedes the delete. Over
+  HTTP Riak sends the clock with every 404 of a deleted key; the option
+  decides whether it is returned. The result is freed as after a success.
 
 ## Metadata, secondary index entries, links
 
@@ -47,7 +51,10 @@ riak_opts o = {.meta = meta, .n_meta = 1, .indexes = idx, .n_indexes = 2,
 ```
 
 Fetched objects carry them back in `meta`, `indexes` and `links`, with the
-`X-Riak-Meta-` and `X-Riak-Index-` prefixes removed.
+`X-Riak-Meta-` and `X-Riak-Index-` prefixes removed. `links` holds the
+stored links in Link header form (`</buckets/B/keys/K>; riaktag="T"`,
+comma separated) over both transports; the `rel="up"` entry Riak adds to
+every HTTP response is left out.
 
 ## Bucket types
 

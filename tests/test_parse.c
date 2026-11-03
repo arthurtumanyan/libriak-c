@@ -11,7 +11,8 @@
 #include "parse.h"
 
 static riak_status parse(const char *json, riak_strlist *out) {
-    return riak_parse_string_array(json, strlen(json), "buckets", out);
+    size_t skipped = 0;
+    return riak_parse_string_array(json, strlen(json), "buckets", out, &skipped);
 }
 
 static void test_array(void) {
@@ -115,7 +116,54 @@ static bool visit(const char *key, const char *term, void *ctx) {
 }
 
 static riak_status index_json(const char *json, visited *v, char **cont, bool *stopped) {
-    return riak_parse_index_json(json, strlen(json), visit, v, cont, stopped);
+    size_t skipped = 0;
+    riak_status st = riak_parse_index_json(json, strlen(json), visit, v, cont, stopped, &skipped);
+    CHECK_EQ_INT(skipped, 0);
+    return st;
+}
+
+/* Names with a NUL byte cannot be C strings: they are left out and counted,
+ * never truncated into a different name. */
+static void test_nul_names(void) {
+    riak_strlist l;
+    size_t skipped = 0;
+    const char *arr = "{\"buckets\":[\"a\",\"x\\u0000y\",\"\\u0000\",\"b\"]}";
+    CHECK_EQ_INT(riak_parse_string_array(arr, strlen(arr), "buckets", &l, &skipped), RIAK_OK);
+    CHECK_EQ_INT(skipped, 2);
+    CHECK_EQ_INT(l.count, 2);
+    if (l.count == 2) {
+        CHECK_EQ_STR(l.items[0], "a");
+        CHECK_EQ_STR(l.items[1], "b");
+        CHECK(l.items[2] == NULL);
+    }
+    riak_strlist_free(&l);
+
+    riak_keystream *ks = riak_keystream_new();
+    const char *body = "{\"keys\":[\"k\\u0000\",\"k1\"]}{\"keys\":[\"\\u0000k\"]}";
+    CHECK_EQ_INT(riak_keystream_feed(ks, body, strlen(body)), RIAK_OK);
+    CHECK_EQ_INT(riak_keystream_skipped(ks), 2);
+    CHECK_EQ_INT(riak_keystream_skipped(ks), 0); /* the count is taken once */
+    CHECK_EQ_INT(riak_keystream_finish(ks, &l), RIAK_OK);
+    CHECK_EQ_INT(l.count, 1);
+    if (l.count == 1) {
+        CHECK_EQ_STR(l.items[0], "k1");
+    }
+    riak_strlist_free(&l);
+    riak_keystream_free(ks);
+
+    visited v = {0};
+    char *cont = NULL;
+    bool stopped;
+    skipped = 0;
+    const char *page = "{\"keys\":[\"a\\u0000\",\"b\"],"
+                       "\"results\":[{\"t\":\"c\\u0000d\"},{\"t\":\"e\"}]}";
+    CHECK_EQ_INT(riak_parse_index_json(page, strlen(page), visit, &v, &cont, &stopped, &skipped),
+                 RIAK_OK);
+    CHECK_EQ_INT(skipped, 2);
+    CHECK_EQ_INT(v.n, 2);
+    CHECK(strcmp(v.keys[0], "b") == 0 && strcmp(v.terms[0], "-") == 0);
+    CHECK(strcmp(v.keys[1], "e") == 0 && strcmp(v.terms[1], "t") == 0);
+    CHECK(cont == NULL && !stopped);
 }
 
 static void test_index_json(void) {
@@ -239,6 +287,7 @@ int main(void) {
     RUN(test_array);
     RUN(test_empty_array);
     RUN(test_bad_input);
+    RUN(test_nul_names);
     RUN(test_stream_split_everywhere);
     RUN(test_stream_truncated);
     RUN(test_stream_garbage);

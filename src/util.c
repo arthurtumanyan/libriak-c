@@ -384,16 +384,61 @@ static int collect_prefixed(const riak_headerlist *h, const char *prefix, riak_h
     return 0;
 }
 
+/* Appends one Link entry (s, len), trimmed, unless it has no riaktag after
+ * its target: Riak adds such an entry pointing to the bucket (rel="up") to
+ * every HTTP response; it is not stored with the object and Protocol
+ * Buffers does not return it. */
+static int append_link(riak_buf *b, const char *s, size_t len) {
+    while (len && (*s == ' ' || *s == '\t')) {
+        s++;
+        len--;
+    }
+    while (len && (s[len - 1] == ' ' || s[len - 1] == '\t')) {
+        len--;
+    }
+    const char *gt = memchr(s, '>', len);
+    bool tagged = false;
+    for (size_t i = gt ? (size_t)(gt - s) : len; !tagged && i + 8 <= len; i++) {
+        tagged = strncasecmp(s + i, "riaktag=", 8) == 0;
+    }
+    if (!tagged) {
+        return 0;
+    }
+    if (b->len && riak_buf_append_str(b, ", ") != 0) {
+        return -1;
+    }
+    return riak_buf_append(b, s, len) != 0 ? -1 : 0;
+}
+
+/* The entries of all Link headers, comma separated (commas inside <> and
+ * quoted strings do not separate entries). */
 static int join_links(const riak_headerlist *h, char **out) {
     riak_buf b = {0};
     for (size_t i = 0; i < h->count; i++) {
         if (strcasecmp(h->items[i].name, "Link") != 0) {
             continue;
         }
-        if ((b.len && riak_buf_append_str(&b, ", ") != 0) ||
-            riak_buf_append_str(&b, h->items[i].value) != 0) {
-            riak_buf_free(&b);
-            return -1;
+        const char *v = h->items[i].value;
+        bool quoted = false, angle = false;
+        size_t start = 0;
+        for (size_t j = 0;; j++) {
+            char ch = v[j];
+            if (ch == '"' && !angle) {
+                quoted = !quoted;
+            } else if (ch == '<' && !quoted) {
+                angle = true;
+            } else if (ch == '>' && !quoted) {
+                angle = false;
+            } else if (ch == '\0' || (ch == ',' && !quoted && !angle)) {
+                if (append_link(&b, v + start, j - start) != 0) {
+                    riak_buf_free(&b);
+                    return -1;
+                }
+                start = j + 1;
+            }
+            if (ch == '\0') {
+                break;
+            }
         }
     }
     *out = b.data;

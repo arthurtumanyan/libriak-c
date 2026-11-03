@@ -73,3 +73,8 @@ LIBRIAK_2.1 {
   local:
     *;
 } LIBRIAK_2.0;
+
+LIBRIAK_2.2 {
+  global:
+    riak_client_skipped_names;
+} LIBRIAK_2.1;

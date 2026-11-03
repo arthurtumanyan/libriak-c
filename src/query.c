@@ -215,8 +215,11 @@ riak_status riak_index_http_finish(riak_client *c, riak_response *resp, bool wan
     }
     riak_index_acc acc = {.want_terms = want_terms};
     bool stopped;
-    riak_status st = riak_parse_index_json(resp->body.data ? resp->body.data : "", resp->body.len,
-                                           riak_index_acc_add, &acc, &out->continuation, &stopped);
+    size_t skipped = 0;
+    riak_status st =
+        riak_parse_index_json(resp->body.data ? resp->body.data : "", resp->body.len,
+                              riak_index_acc_add, &acc, &out->continuation, &stopped, &skipped);
+    riak_skip_names(c, skipped);
     if (st == RIAK_OK) {
         st = riak_index_acc_take(&acc, out);
     } else {
@@ -263,7 +266,9 @@ bool riak_index_chunk(void *ctx, const char *json, size_t len, riak_status *err)
     riak_index_stream *s = ctx;
     char *cont = NULL;
     bool stopped;
-    *err = riak_parse_index_json(json, len, forward, s, &cont, &stopped);
+    size_t skipped = 0;
+    *err = riak_parse_index_json(json, len, forward, s, &cont, &stopped, &skipped);
+    riak_skip_names(s->c, skipped);
     if (*err == RIAK_OK && cont && s->continuation) {
         free(*s->continuation);
         *s->continuation = cont;
@@ -293,7 +298,7 @@ riak_status riak_index_query_stream(riak_client *client, const char *bucket,
     riak_buf url = {0};
     riak_status st = index_url(client, bucket, q, true, &url);
     if (st == RIAK_OK) {
-        riak_index_stream s = {.cb = cb, .ctx = ctx, .continuation = continuation};
+        riak_index_stream s = {.cb = cb, .ctx = ctx, .continuation = continuation, .c = client};
         riak_request req = {.method = "GET", .url = url.data};
         st = perform_stream(client, &req, riak_index_chunk, &s);
     }

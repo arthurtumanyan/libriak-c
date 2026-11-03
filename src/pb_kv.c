@@ -588,7 +588,8 @@ riak_status riak_pb_get(riak_client *c, const char *bucket, const char *key, con
     return st;
 }
 
-riak_status riak_pb_finish_siblings(riak_client *c, riak_pb_response *resp, riak_object_set *out) {
+riak_status riak_pb_finish_siblings(riak_client *c, const riak_opts *o, riak_pb_response *resp,
+                                    riak_object_set *out) {
     memset(out, 0, sizeof *out);
     RpbGetResp *r = rpb_get_resp__unpack(NULL, resp->body.len, (const uint8_t *)resp->body.data);
     if (r == NULL) {
@@ -598,11 +599,15 @@ riak_status riak_pb_finish_siblings(riak_client *c, riak_pb_response *resp, riak
     if (r->n_content == 0 ||
         (r->n_content == 1 && r->content[0]->has_deleted && r->content[0]->deleted)) {
         st = empty_get(c, r);
+        if (st == RIAK_E_NOT_FOUND && o->deletedvclock && r->has_vclock && r->vclock.len > 0 &&
+            (out->vclock = riak_pb_b64_encode(r->vclock)) == NULL) {
+            st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+        }
     } else {
         st = to_set(c, r, out);
     }
     rpb_get_resp__free_unpacked(r, NULL);
-    if (st != RIAK_OK) {
+    if (st != RIAK_OK && (st != RIAK_E_NOT_FOUND || out->vclock == NULL)) {
         riak_object_set_free(out);
     }
     return st;
@@ -614,7 +619,7 @@ riak_status riak_pb_get_siblings(riak_client *c, const char *bucket, const char 
     riak_pb_response resp = {0};
     riak_status st = run_prepared(c, riak_pb_prepare_get(c, bucket, key, o, &p), &p, &resp);
     if (st == RIAK_OK) {
-        st = riak_pb_finish_siblings(c, &resp, out);
+        st = riak_pb_finish_siblings(c, o, &resp, out);
     }
     riak_buf_free(&resp.body);
     return st;
@@ -893,6 +898,10 @@ static bool list_sink(void *ctx, const uint8_t *data, size_t len, bool *done, ri
     }
     bool more = true;
     for (size_t i = 0; more && i < n; i++) {
+        if (riak_name_has_nul(names[i].data, names[i].len)) {
+            riak_skip_names(l->c, 1);
+            continue;
+        }
         char *s = riak_pb_strdup(names[i]);
         if (s == NULL) {
             *err = RIAK_E_NOMEM;
@@ -911,6 +920,7 @@ riak_status riak_pb_list_prepare(riak_client *c, const char *type, const char *b
                                  riak_pb_list_ctx *x, riak_pb_prepared *p) {
     memset(p, 0, sizeof *p);
     x->buckets = bucket == NULL;
+    x->c = c;
     if (bucket == NULL) {
         RpbListBucketsReq m = RPB_LIST_BUCKETS_REQ__INIT;
         m.has_stream = 1;
@@ -1749,6 +1759,10 @@ static bool fold_sink(void *ctx, const uint8_t *data, size_t len, bool *done, ri
     for (size_t i = 0; more && i < r->n_objects; i++) {
         const RpbIndexObject *io = r->objects[i];
         const RpbGetResp *g = io->object;
+        if (riak_name_has_nul(io->key.data, io->key.len)) {
+            riak_skip_names(x->c, 1);
+            continue;
+        }
         char *key = riak_pb_strdup(io->key);
         if (key == NULL) {
             *err = RIAK_E_NOMEM;

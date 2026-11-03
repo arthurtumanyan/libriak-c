@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.2.0 — 2026-11-03
+
+### Added
+- Prebuilt packages for Ubuntu 22.04 and 24.04, Debian 12, Fedora 42
+  and AlmaLinux 10 under `packages/2.2.0/`, with `SHA256SUMS`, now
+  including `libriak-c-tools`.
+- `riakctl`, a command-line client for Riak KV built on the library, in a
+  new `libriak-c-tools` package with a `riakctl(1)` man page (CMake option
+  `RIAK_BUILD_TOOLS`). It reaches nodes over Protocol Buffers or HTTP, with
+  TLS, authentication and multi-node URLs, prints JSON (JSON Lines for
+  streams) and reports failures through stable exit codes. Commands: ping,
+  info, stats, get, put, delete, list, index, query, mapred, coverage,
+  preflist, dt, counter, props, search, aae (including `aae compare`, which
+  lists the keys whose clocks differ between two clusters or buckets),
+  repl, backup and restore. Backups are JSON Lines files with every
+  sibling, vector clock, content type, metadata, index and link, or the
+  values of data type buckets; restores are idempotent, run with parallel
+  workers (`--jobs`) and write single-sibling objects with their vector
+  clocks. See [docs/riakctl.md](docs/riakctl.md).
+- `riak_client_skipped_names()` (symbol version `LIBRIAK_2.2`): the number
+  of keys and bucket names left out of listings, object folds, index and
+  AAE results because they contain a NUL byte.
+- `riak_opts::deletedvclock` works over HTTP too, where Riak sends the
+  tombstone's clock with the 404, and `riak_get_siblings()` (blocking and
+  asynchronous) returns the tombstone's clock in `riak_object_set::vclock`.
+- Demo workflows built on `riakctl` in `examples/cli/` (connectivity,
+  checked backup and restore, Nagios-style health check, statistics
+  sampling, paged index queries, AAE inspection, comparison of buckets on
+  two clusters, replication queues), run
+  as one scenario by `run-all.sh`, against two Docker nodes by `run-demo.sh`,
+  and in CI by the new `riakctl_live` test; `riakctl_cli` tests the tool
+  against the stub server.
+
+### Fixed
+- Keys and bucket names that contain a NUL byte were cut short at it in
+  listings, object folds, index and AAE results, so a different (and
+  possibly existing) key was reported. They are now left out, logged and
+  counted.
+- Objects read over HTTP carried the `</buckets/B>; rel="up"` entry that
+  Riak adds to the Link header of every response in `riak_object::links`,
+  unlike Protocol Buffers; written back into another bucket it made Riak
+  reject the request (400, invalid Link header). Only stored links
+  (`riaktag`) are returned now.
+- A Protocol Buffers connection kept the buffer of its largest request for
+  its whole life; buffers above 256 KiB are now freed once the request is
+  sent.
+
 ## 2.1.0 — 2026-10-29
 
 ### Fixed

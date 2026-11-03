@@ -1,9 +1,10 @@
 # Binary packages: cpack -G DEB / cpack -G RPM / cpack -G TGZ
 #
-# Two components per format:
+# Three components per format:
 #   runtime  libriak-c2 (deb) / libriak-c (rpm)        shared library, docs
 #   dev      libriak-c-dev (deb) / libriak-c-devel (rpm) headers, static lib,
 #            .so link, CMake package and pkg-config file
+#   tools    libriak-c-tools (deb and rpm)             riakctl and its man page
 
 set(CPACK_PACKAGE_NAME libriak-c)
 set(CPACK_PACKAGE_VENDOR "Arthur Tumanyan")
@@ -14,10 +15,16 @@ set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_RESOURCE_FILE_README ${PROJECT_SOURCE_DIR}/README.md)
 set(CPACK_PACKAGE_FILE_NAME ${CPACK_PACKAGE_NAME}-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR})
 set(CPACK_STRIP_FILES ON)
-set(CPACK_COMPONENTS_ALL runtime dev)
+if(RIAK_BUILD_TOOLS)
+  set(CPACK_COMPONENTS_ALL runtime dev tools)
+else()
+  set(CPACK_COMPONENTS_ALL runtime dev)
+endif()
 set(CPACK_COMPONENT_RUNTIME_DESCRIPTION "Riak KV client library (Protocol Buffers and HTTP) - shared library")
 set(CPACK_COMPONENT_DEV_DESCRIPTION "Riak KV client library (Protocol Buffers and HTTP) - development files")
+set(CPACK_COMPONENT_TOOLS_DESCRIPTION "Riak KV client library (Protocol Buffers and HTTP) - riakctl command-line client")
 set(CPACK_COMPONENT_DEV_DEPENDS runtime)
+set(CPACK_COMPONENT_TOOLS_DEPENDS runtime)
 set(CPACK_SOURCE_GENERATOR TGZ)
 set(CPACK_SOURCE_IGNORE_FILES /\\.git/ /build.*/ /graphify-out/)
 
@@ -37,6 +44,13 @@ set(CPACK_DEBIAN_DEV_PACKAGE_SECTION libdevel)
 set(CPACK_DEBIAN_DEV_PACKAGE_DEPENDS
   "libriak-c${PROJECT_VERSION_MAJOR} (= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE}), libcurl4-openssl-dev | libcurl-dev, libjson-c-dev, libprotobuf-c-dev, libssl-dev, zlib1g-dev")
 
+# riakctl links libriak-c.so.2 of the runtime package: dpkg-shlibdeps finds it in the build tree
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS_PRIVATE_DIRS ${PROJECT_BINARY_DIR})
+set(CPACK_DEBIAN_TOOLS_PACKAGE_NAME libriak-c-tools)
+set(CPACK_DEBIAN_TOOLS_PACKAGE_SECTION utils)
+set(CPACK_DEBIAN_TOOLS_PACKAGE_DEPENDS
+  "libriak-c${PROJECT_VERSION_MAJOR} (= ${PROJECT_VERSION}-${CPACK_DEBIAN_PACKAGE_RELEASE})")
+
 # RPM
 set(CPACK_RPM_COMPONENT_INSTALL ON)
 set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
@@ -48,6 +62,12 @@ set(CPACK_RPM_PACKAGE_AUTOREQ ON)
 set(CPACK_RPM_RUNTIME_PACKAGE_NAME libriak-c)
 set(CPACK_RPM_DEV_PACKAGE_NAME libriak-c-devel)
 set(CPACK_RPM_DEV_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}, libcurl-devel, json-c-devel, protobuf-c-devel, openssl-devel, zlib-devel")
+set(CPACK_RPM_TOOLS_PACKAGE_NAME libriak-c-tools)
+set(CPACK_RPM_TOOLS_PACKAGE_GROUP "Applications/Databases")
+set(CPACK_RPM_TOOLS_PACKAGE_REQUIRES "libriak-c = ${PROJECT_VERSION}")
+# system directories stay owned by the filesystem package
+list(APPEND CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
+  ${CMAKE_INSTALL_FULL_MANDIR} ${CMAKE_INSTALL_FULL_MANDIR}/man1)
 set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
 
 include(CPack)

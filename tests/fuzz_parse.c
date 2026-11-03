@@ -35,9 +35,10 @@ static bool count_part(void *ctx, riak_part *part, riak_status *err) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     const char *s = (const char *)data;
+    size_t skipped = 0;
 
     riak_strlist l;
-    if (riak_parse_string_array(s, size, "keys", &l) == RIAK_OK) {
+    if (riak_parse_string_array(s, size, "keys", &l, &skipped) == RIAK_OK) {
         if (l.items[l.count] != NULL) {
             abort();
         }
@@ -91,7 +92,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     size_t visits = 0;
     char *cont = NULL;
     bool stopped;
-    (void)riak_parse_index_json(s, size, any_visit, &visits, &cont, &stopped);
+    (void)riak_parse_index_json(s, size, any_visit, &visits, &cont, &stopped, &skipped);
     free(cont);
     riak_search_result sr = {0};
     (void)riak_parse_search(s, size, &sr);

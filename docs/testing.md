@@ -12,6 +12,9 @@
 | `threads` | Eight threads with one client each, on both transports, every result checked; with `-DRIAK_SANITIZE=thread` ThreadSanitizer checks the library for data races | Python 3 for the HTTP part |
 | `docs` | API names used in `README.md` and `docs/` exist; complete example programs build | Python 3 |
 | `live` | Everything against a real Riak node | `RIAK_TEST_URL` |
+| `riakctl_unit` | riakctl internals with exact expected values: node URLs, base64 (RFC 4648 vectors), the UTF-8/base64 decision, argument parsing, exit codes, JSON forms, usage errors | — |
+| `riakctl_cli` | `riakctl` against `tests/stub_riak.py`: options, exit codes, JSON output, backup and restore (over tombstones, entries above `--max-line`, keys with NUL bytes), bucket against bucket `aae compare` in key ranges | Python 3, jq |
+| `riakctl_live` | The `riakctl` demo workflow (`examples/cli/run-all.sh`) against a real Riak node, with the `RIAK_TEST_*` settings of `live` | `RIAK_TEST_URL`, jq |
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DRIAK_SANITIZE=ON -DRIAK_WERROR=ON
@@ -35,14 +38,17 @@ retried. Malformed server documents are checked to give `RIAK_E_PARSE`.
 
 `tests/stub_riak.py` emulates the Riak HTTP API in memory: objects with
 metadata and indexes, bucket types (including `allow_mult` siblings),
-conditional requests, streamed key lists, secondary indexes, Search,
+tombstones whose clock comes with the 404 of a get, conditional requests,
+streamed key lists, secondary indexes, Search,
 MapReduce and data types. Three nodes share one store, like a cluster. Each
 node can be switched to answer with HTTP 503, to drop connections, or to
 answer slowly, to answer like Riak 2.2 (`/_old`) or Riak 3.x (`/_v3`), to
 answer the newer endpoints with malformed documents (`/_malformed`), to
 drop the next requests to them without an answer (`/_drop`), and records
 the last request (method, path, headers, body, decoded AAE filter and Query
-API document) for assertions. In `--tls` mode the nodes speak HTTPS with certificates made
+API document) for assertions. AAE key and clock folds of a bucket that
+holds objects answer from the store, honouring the key range, and
+`/_folds` reports how many were made and the most keys one returned. In `--tls` mode the nodes speak HTTPS with certificates made
 by `tests/gen_certs.sh`. The module docstring lists every control endpoint.
 
 `tests/stub_pb.h` is the Protocol Buffers counterpart: a C server started in
@@ -103,6 +109,20 @@ Buffers. Against a node set up with `--security`, `RIAK_TEST_USER`,
 `RIAK_TEST_LOG=1` prints the library's warnings. Nodes need a descriptor
 limit well above 1024 (`--ulimit nofile=65536:65536`).
 
+`RIAK_TEST_PEER_URL` names a second, separate node for the `riakctl`
+comparison of two clusters in `riakctl_live` (skipped without it). It needs
+a node name of its own, since vnode actor ids derive from the node name:
+the Riak 3.x image takes it from `RIAK_NODENAME` (the CI uses
+`peer@127.0.0.1`), the 2.x nodes are named after their container address.
+
+```sh
+docker run -d --name riak-peer --ulimit nofile=65536:65536 -e RIAK_NODENAME=peer@127.0.0.1 \
+    -p 18098:8098 -p 18087:8087 libriak-riak:3.4.1
+sh tests/docker/setup-node.sh riak-peer
+RIAK_TEST_URL=pb://127.0.0.1:8087 RIAK_TEST_PEER_URL=pb://127.0.0.1:18087 ... \
+    ctest --test-dir build -R riakctl_live --output-on-failure
+```
+
 Riak checks the password of every authenticated HTTP request, at a cost of
 a fraction of a second of server CPU each, while Protocol Buffers
 authenticate once per connection. Over HTTPS with authentication the suite
@@ -137,9 +157,10 @@ transports; the OpenRiak images are cached between runs.
 
 ```sh
 CC=clang cmake -S . -B build-fuzz -DRIAK_FUZZ=ON -DRIAK_SANITIZE=ON
-cmake --build build-fuzz --target fuzz_parse fuzz_pb
+cmake --build build-fuzz --target fuzz_parse fuzz_pb fuzz_riakctl
 build-fuzz/tests/fuzz_parse -max_total_time=300
 build-fuzz/tests/fuzz_pb -max_total_time=300
+build-fuzz/tests/fuzz_riakctl -max_total_time=300 -close_fd_mask=2
 ```
 
 `fuzz_parse` covers the JSON parsers, the multipart parser (streamed and
@@ -147,6 +168,21 @@ one-shot results are compared), the data type parser and URL decoding.
 `fuzz_pb` covers the decoding of Protocol Buffers responses into objects,
 sibling sets and put results, the mapping of Riak error messages, and the
 base64 decoding of vector clocks and contexts.
+`fuzz_riakctl` covers the parsers of riakctl that see untrusted input (node
+URLs, base64, the text/base64 form of values in backups, numbers and quorums)
+and checks that values and bytes survive their round trips unchanged.
+
+riakctl is also checked beyond the test suites: every process of the demo
+workflow and of `riakctl_cli` ran under valgrind memcheck over PB, HTTP,
+PBS and HTTPS against Riak 3.4 and 2.2 (no leaks, no invalid or
+uninitialised accesses), the parallel restore ran under ThreadSanitizer,
+backups and restores of 100,000 objects with siblings and large values
+were compared with their source after the round trip, and bucket against
+bucket comparisons in ranges of 10 to 20,000 keys were compared with the
+result of an independent comparison of the complete key and clock lists.
+The new checks of `riakctl_cli` and of the library tests were themselves
+checked by injecting faults into the code they cover, one at a time:
+every fault made a test fail.
 
 ```sh
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug -DRIAK_COVERAGE=ON

@@ -64,7 +64,6 @@ static riak_status http_unsupported(riak_client *c, const riak_opts *o) {
                        : o->if_modified     ? "if_modified"
                        : o->if_not_modified ? "if_not_modified"
                        : o->return_head     ? "return_head"
-                       : o->deletedvclock   ? "deletedvclock"
                                             : NULL;
     if (what) {
         return riak_set_error(c, RIAK_E_UNSUPPORTED, "%s needs the Protocol Buffers transport",
@@ -232,8 +231,28 @@ riak_status riak_kv_prepare_siblings(riak_client *c, const char *bucket, const c
     return prepare_fetch(c, bucket, key, o, OP_GET_SIBLINGS, p);
 }
 
-riak_status riak_kv_finish_siblings(riak_client *c, riak_response *resp, riak_object_set *out) {
+/* Riak answers a get of a deleted key with 404 and the tombstone's clock. */
+static riak_status tombstone_clock(riak_client *c, const riak_opts *o, const riak_response *resp,
+                                   char **vclock) {
+    riak_status st = riak_http_error(c, resp);
+    const char *v = riak_headerlist_get(&resp->headers, "X-Riak-Vclock");
+    if (st == RIAK_E_NOT_FOUND && o->deletedvclock && v && *v &&
+        (*vclock = riak_strdup(v)) == NULL) {
+        st = riak_set_error(c, RIAK_E_NOMEM, "out of memory");
+    }
+    return st;
+}
+
+riak_status riak_kv_finish_siblings(riak_client *c, const riak_opts *o, riak_response *resp,
+                                    riak_object_set *out) {
     memset(out, 0, sizeof *out);
+    if (resp->status == 404) {
+        riak_status st = tombstone_clock(c, o, resp, &out->vclock);
+        if (st != RIAK_E_NOT_FOUND) {
+            riak_object_set_free(out);
+        }
+        return st;
+    }
     riak_status st = (resp->status == 200 || resp->status == 300) ? to_sibling_set(c, resp, out)
                                                                   : riak_http_error(c, resp);
     if (st != RIAK_OK) {
@@ -256,7 +275,7 @@ riak_status riak_get_siblings(riak_client *client, const char *bucket, const cha
     riak_status st = riak_kv_prepare_siblings(client, bucket, key, opts ? opts : &no_opts, &p);
     st = run(client, st, &p, &resp);
     if (st == RIAK_OK) {
-        st = riak_kv_finish_siblings(client, &resp, out);
+        st = riak_kv_finish_siblings(client, opts ? opts : &no_opts, &resp, out);
     }
     riak_response_free(&resp);
     return st;
@@ -271,6 +290,11 @@ riak_status riak_kv_finish_get(riak_client *c, const riak_opts *o, riak_response
                                riak_object *out) {
     if (resp->status == 200) {
         return fill_object(c, resp, out);
+    }
+    if (resp->status == 404) {
+        riak_status st = tombstone_clock(c, o, resp, &out->vclock);
+        out->deleted = out->vclock != NULL;
+        return st;
     }
     if (resp->status != 300 || o->resolver == NULL) {
         return riak_http_error(c, resp);

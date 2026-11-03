@@ -101,7 +101,8 @@ static void test_object_from_part(void) {
     CHECK_EQ_STR(obj.content_type, "text/plain");
     CHECK_EQ_STR(obj.vclock, "vc-shared");
     CHECK_EQ_STR(obj.etag, "1");
-    CHECK_EQ_STR(obj.links, "</buckets/test>; rel=\"up\"");
+    /* the rel="up" entry Riak adds to every response is not a stored link */
+    CHECK(obj.links == NULL);
     CHECK_EQ_INT(obj.n_meta, 1);
     if (obj.n_meta == 1) {
         CHECK_EQ_STR(obj.meta[0].name, "Color");
@@ -115,6 +116,28 @@ static void test_object_from_part(void) {
     CHECK(obj.vclock == NULL);
     riak_object_free(&obj);
     riak_parts_free(parts, n);
+}
+
+/* Stored links are kept, Riak's rel="up" entry is dropped, wherever it is. */
+static void test_links_from_headers(void) {
+    static const char *const lines[] = {
+        "Link: </buckets/test>; rel=\"up\", </buckets/people/keys/a%2C>; riaktag=\"x,y\"",
+        "Link: </buckets/people/keys/b>; riaktag=\"boss\" ,</buckets/test>; rel=\"up\"",
+        "Link: </buckets/test>; rel=\"up\"",
+        "Link: </buckets/x/keys/riaktag=>; rel=\"up\"",
+        "Link:  </riak/people/c>;RiakTag=\"t\"  ",
+    };
+    riak_headerlist h = {0};
+    for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++) {
+        CHECK_EQ_INT(riak_headerlist_add_line(&h, lines[i], strlen(lines[i])), 0);
+    }
+    riak_object obj = {0};
+    CHECK_EQ_INT(riak_object_from_headers(&h, NULL, &obj), 0);
+    CHECK_EQ_STR(obj.links, "</buckets/people/keys/a%2C>; riaktag=\"x,y\", "
+                            "</buckets/people/keys/b>; riaktag=\"boss\", "
+                            "</riak/people/c>;RiakTag=\"t\"");
+    riak_object_free(&obj);
+    riak_headerlist_clear(&h);
 }
 
 typedef struct {
@@ -198,6 +221,7 @@ int main(void) {
     RUN(test_parse_binary_and_preamble);
     RUN(test_parse_errors);
     RUN(test_object_from_part);
+    RUN(test_links_from_headers);
     RUN(test_stream_matches_batch);
     RUN(test_stream_limits_and_stop);
     return CHECK_DONE();

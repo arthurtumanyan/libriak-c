@@ -29,6 +29,10 @@ static bool index_sink(void *ctx, const uint8_t *data, size_t len, bool *done, r
     }
     bool more = true;
     for (size_t i = 0; more && i < r->n_keys; i++) {
+        if (riak_name_has_nul(r->keys[i].data, r->keys[i].len)) {
+            riak_skip_names(x->c, 1);
+            continue;
+        }
         char *key = riak_pb_strdup(r->keys[i]);
         if (key == NULL) {
             *err = RIAK_E_NOMEM;
@@ -40,6 +44,11 @@ static bool index_sink(void *ctx, const uint8_t *data, size_t len, bool *done, r
     }
     /* results are term -> key pairs (return_terms) */
     for (size_t i = 0; more && i < r->n_results; i++) {
+        if (r->results[i]->has_value &&
+            riak_name_has_nul(r->results[i]->value.data, r->results[i]->value.len)) {
+            riak_skip_names(x->c, 1);
+            continue;
+        }
         char *term = riak_pb_strdup(r->results[i]->key);
         char *key = r->results[i]->has_value ? riak_pb_strdup(r->results[i]->value) : NULL;
         if (term == NULL || key == NULL) {
@@ -71,6 +80,7 @@ static bool index_sink(void *ctx, const uint8_t *data, size_t len, bool *done, r
 riak_status riak_pb_index_prepare(riak_client *c, const char *bucket, const riak_index_query *q,
                                   riak_pb_index_ctx *x, riak_pb_prepared *p) {
     memset(p, 0, sizeof *p);
+    x->c = c;
     riak_status st;
     if (q == NULL) {
         return riak_set_error(c, RIAK_E_INVALID_ARG, "query must not be NULL");

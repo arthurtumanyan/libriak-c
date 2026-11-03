@@ -18,7 +18,8 @@ bucket type can be created).
 |---|---|---|---|---|---|
 | Objects, siblings, conditional requests, bucket types | yes | yes | yes | yes | yes |
 | `riak_opts::node_confirms`, `sync_on_write` | yes | yes | accepted, not enforced | yes | yes |
-| `riak_opts::return_head`, `deletedvclock` | yes | `RIAK_E_UNSUPPORTED` | yes | yes | yes |
+| `riak_opts::return_head` | yes | `RIAK_E_UNSUPPORTED` | yes | yes | yes |
+| `riak_opts::deletedvclock` (`riak_get()`, `riak_get_siblings()`) | yes | yes | yes | yes | yes |
 | `riak_opts::asis` | yes | yes | yes | yes | yes |
 | `riak_opts::node_confirms` on a delete | `RIAK_E_UNSUPPORTED` | yes | – | yes | yes |
 | Bucket and bucket-type properties, `riak_set_type_props()` | yes | yes | yes | yes | yes |
