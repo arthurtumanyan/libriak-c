@@ -82,12 +82,12 @@ The layout is `deb/<ubuntu|debian>-<version>/` (flat apt repositories),
 `$releasever`). A distribution release receives the releases of libriak-c
 built for it. Up to 2.2.0 the releases were built for Ubuntu 22.04 and
 24.04, the newest Fedora (44 for 2.1.0, 45 for 2.2.0) and AlmaLinux 10;
-Ubuntu 26.04, Debian 12 and 13, Fedora 44 and EL 9 receive packages from the
-release after 2.2.0 on.
+Ubuntu 26.04, Debian 12 and 13, Fedora 44 and EL 9 receive packages from
+2.2.1 on.
 
 ## Prebuilt packages in the source tree
 
-Prebuilt x86_64 packages of each release are also kept in the source tree
+Prebuilt x86_64 packages of 2.1.0 and 2.2.0 are also kept in the source tree
 under `packages/<version>/<distribution>/`, together with a `SHA256SUMS`
 file, for Ubuntu 22.04 and 24.04, Debian 12, Fedora 42 and AlmaLinux 10.
 From 2.2.0 on, `libriak-c-tools` holds `riakctl`. Each set was installed
@@ -122,8 +122,8 @@ the version macros in `include/riak/riak.h`, `PROJECT_NUMBER` in
 `docs/Doxyfile` and the `CHANGELOG.md` heading, and pushing a matching tag:
 
 ```sh
-git tag -s v2.2.0 -m "libriak-c 2.2.0"
-git push origin v2.2.0
+git tag -s v2.2.1 -m "libriak-c 2.2.1"
+git push origin v2.2.1
 ```
 
 `.github/workflows/release.yml` then checks that the tag matches the project
