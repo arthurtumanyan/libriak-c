@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Signed apt and dnf repositories on GitHub Pages, rebuilt from the packages
+  of all releases by `.github/workflows/repository.yml` after each release
+  (`packaging/repo-site.sh`, `packaging/make-repo.sh`); installing
+  `libriak-c-tools` or `libriak-c-dev` from them pulls in the runtime
+  package.
+- Release packages for Fedora 44 and 45 instead of only the newest Fedora.
+
 ## 2.2.0 — 2026-11-03
 
 ### Added

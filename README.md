@@ -40,9 +40,12 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 
 ## Installing
 
-Prebuilt deb and rpm packages for Ubuntu 22.04 and 24.04, Debian 12,
-Fedora 42 and AlmaLinux 10 are kept under [packages/](packages/2.2.0); see
-[Packaging and releases](docs/packaging.md#prebuilt-packages).
+Signed apt and dnf repositories for Ubuntu 22.04 and 24.04, Fedora and
+AlmaLinux 10 are published at https://arthurtumanyan.github.io/libriak-c/;
+the setup is described in
+[Package repository](docs/packaging.md#package-repository). Prebuilt
+packages, including Debian 12, are also kept under
+[packages/](packages/2.2.0).
 
 ## Building
 
