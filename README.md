@@ -40,18 +40,18 @@ built on protobuf-c, OpenSSL, libcurl and json-c.
 
 ## Installing
 
-Signed apt and dnf repositories for Ubuntu 22.04 and 24.04, Fedora and
-AlmaLinux 10 are published at https://arthurtumanyan.github.io/libriak-c/;
+Signed apt and dnf repositories for Ubuntu 22.04, 24.04 and 26.04, Debian 12
+and 13, Fedora 44 and 45 and AlmaLinux/EL 9 and 10 are published at https://arthurtumanyan.github.io/libriak-c/;
 the setup is described in
 [Package repository](docs/packaging.md#package-repository). Prebuilt
-packages, including Debian 12, are also kept under
+packages are also kept under
 [packages/](packages/2.2.0).
 
 ## Building
 
 ```sh
 sudo apt install cmake libcurl4-openssl-dev libjson-c-dev \
-    libprotobuf-c-dev protobuf-c-compiler libssl-dev zlib1g-dev # Debian/Ubuntu
+    libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libssl-dev zlib1g-dev # Debian/Ubuntu
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -59,7 +59,7 @@ sudo cmake --install build
 ```
 
 Requirements: CMake ≥ 3.20, a C11 compiler, libcurl ≥ 7.66, json-c ≥ 0.15,
-protobuf-c ≥ 1.3 (with `protoc-c`), OpenSSL ≥ 1.1.1.
+protobuf-c ≥ 1.3 (with `protoc-c`, or `protoc` and `protoc-gen-c`), OpenSSL ≥ 1.1.1.
 Prebuilt packages are attached to the
 [releases](https://github.com/arthurtumanyan/libriak-c/releases).
 

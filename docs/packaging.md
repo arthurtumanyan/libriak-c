@@ -48,8 +48,9 @@ dependencies itself: installing `libriak-c-tools` or `libriak-c-dev` pulls in
 the runtime package of the same version, and upgrades arrive with the
 regular system updates.
 
-Ubuntu 22.04 and 24.04 (the directory names the release, `ubuntu-22.04` or
-`ubuntu-24.04`):
+Ubuntu 22.04, 24.04 and 26.04 and Debian 12 and 13 (the directory names
+the distribution release: `ubuntu-22.04`, `ubuntu-24.04`, `ubuntu-26.04`,
+`debian-12` or `debian-13`):
 
 ```sh
 repo=https://arthurtumanyan.github.io/libriak-c
@@ -61,8 +62,8 @@ sudo apt update
 sudo apt install libriak-c-tools    # riakctl; libriak-c-dev for development
 ```
 
-Fedora (`libriak-c-fedora.repo`) and AlmaLinux 10 or other EL 10
-distributions (`libriak-c-el.repo`):
+Fedora 44 and 45 (`libriak-c-fedora.repo`) and AlmaLinux, Rocky Linux or
+RHEL 9 and 10 (`libriak-c-el.repo`):
 
 ```sh
 sudo curl -fsSL -o /etc/yum.repos.d/libriak-c.repo \
@@ -76,11 +77,13 @@ signed with the release signing key
 packages are covered through the checksums in the signed metadata. dnf asks
 to confirm the import of the key on first use.
 
-The layout is `deb/ubuntu-<version>/` (flat apt repositories),
+The layout is `deb/<ubuntu|debian>-<version>/` (flat apt repositories),
 `rpm/fedora/<version>/` and `rpm/el/<version>/` (selected through
 `$releasever`). A distribution release receives the releases of libriak-c
-built for it: Fedora 44 and 45 from the release after 2.2.0 on, Fedora 44
-only 2.1.0 before that (without `libriak-c-tools`).
+built for it. Up to 2.2.0 the releases were built for Ubuntu 22.04 and
+24.04, the newest Fedora (44 for 2.1.0, 45 for 2.2.0) and AlmaLinux 10;
+Ubuntu 26.04, Debian 12 and 13, Fedora 44 and EL 9 receive packages from the
+release after 2.2.0 on.
 
 ## Prebuilt packages in the source tree
 
@@ -124,12 +127,13 @@ git push origin v2.2.0
 ```
 
 `.github/workflows/release.yml` then checks that the tag matches the project
-version, builds and install-tests packages on Ubuntu 22.04 and 24.04,
-Fedora 44 and 45 and AlmaLinux 10, and publishes them with a source tarball,
-`SHA256SUMS` and build provenance attestations. The release notes are taken
-from the `CHANGELOG.md` section of the version. The supported Fedora
-releases are listed in the `rpm` matrix of the workflow and are updated
-when Fedora releases or retires a version.
+version, builds and install-tests packages in containers of Ubuntu 22.04,
+24.04 and 26.04, Debian 12 and 13, Fedora 44 and 45 and AlmaLinux 9 and 10,
+and publishes them with a source tarball, `SHA256SUMS` and build provenance
+attestations. The release notes are taken from the `CHANGELOG.md` section of
+the version. The distribution releases are listed in the `deb` and `rpm`
+matrices of the workflow and are updated when a distribution publishes or
+retires a release.
 
 The release workflow then runs `.github/workflows/repository.yml`, which
 downloads the packages of all published releases, builds the repositories
