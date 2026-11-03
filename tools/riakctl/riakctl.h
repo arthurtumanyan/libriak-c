@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/types.h>
 
 #include <json-c/json.h>
 #include <riak/riak.h>
@@ -87,6 +88,11 @@ const char *rc_dt_name(riak_dt_type t);
 bool rc_dt_from_name(const char *name, riak_dt_type *t);
 char *rc_base64_encode(const unsigned char *data, size_t len);
 unsigned char *rc_base64_decode(const char *text, size_t *len);
+/* Reads one line (with its newline) into *buf, growing it as getline()
+ * does. Returns its length, or -1 at the end of the input or on an error.
+ * Of a line longer than max bytes only max are kept and *too_long is set;
+ * the line is still consumed and its full length returned. */
+ssize_t rc_read_line(FILE *f, char **buf, size_t *cap, size_t max, bool *too_long);
 bool rc_read_all(FILE *f, char **data, size_t *len);
 char *rc_read_file(const char *path, size_t *len);
 

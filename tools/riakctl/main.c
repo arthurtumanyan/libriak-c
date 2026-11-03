@@ -7,7 +7,11 @@
  main() itself is in entry.c, so that the tests can link everything else.
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <unistd.h>
 
@@ -75,7 +79,9 @@ static const rc_cmd commands[] = {
      "  -b, --bucket NAME   restore into this bucket instead of the backup's\n"
      "  -n, --dry-run       only report what would be written\n"
      "  -j, --jobs N        worker threads, each with its own connection\n"
-     "                      (default 4, at most 64)\n"},
+     "                      (default 4, at most 64)\n"
+     "      --max-line BYTES  longer entries are skipped and counted as failed\n"
+     "                      (default 268435456)\n"},
     {"index", rc_cmd_index, "[options] BUCKET INDEX VALUE | BUCKET INDEX MIN MAX",
      "Secondary index query (exact match or range). Matches are streamed as JSON\n"
      "Lines: a key string, or {\"key\", \"term\"} with --terms. With --max one\n"
@@ -163,7 +169,8 @@ static const rc_cmd commands[] = {
      "  aae compare BUCKET --peer URL | --peer-bucket NAME\n"
      "                                   keys whose clocks differ (JSON Lines);\n"
      "                                   trees for one bucket on two clusters,\n"
-     "                                   key by key for two buckets",
+     "                                   key by key for two buckets, in key\n"
+     "                                   ranges paged from the $bucket index",
      "  -t, --type TYPE           bucket type\n"
      "      --start-key K, --end-key K  key range\n"
      "      --segments A,B,...    segment filter, ids of --tree-size\n"
@@ -173,7 +180,9 @@ static const rc_cmd commands[] = {
      "      --size S              tree and compare: tree size (default small)\n"
      "      --local | --job ID    reap and erase: actually change data\n"
      "      --peer URL            compare: the other cluster (same credentials)\n"
-     "      --peer-bucket NAME    compare: the other bucket\n"},
+     "      --peer-bucket NAME    compare: the other bucket\n"
+     "      --chunk N             compare of two buckets: keys per side and\n"
+     "                            range (default 20000)\n"},
     {"repl", rc_cmd_repl, "ACTION ...",
      "Replication. nextgenrepl queues (Riak 2.9+):\n"
      "  repl fetch QUEUE [--max N]   takes changes off the queue (JSON Lines)\n"
@@ -432,6 +441,12 @@ static int run(rc_ctx *x, int argc, char **argv) {
 }
 
 int rc_main(int argc, char **argv) {
+#ifdef __GLIBC__
+    /* Large buffers (values, backup lines) go back to the system when they
+     * are freed. Otherwise glibc raises the threshold after the first such
+     * free, and each restore worker's arena keeps tens of megabytes. */
+    (void)mallopt(M_MMAP_THRESHOLD, (int)(1U << 20U));
+#endif
     if (riak_global_init() != RIAK_OK) {
         fprintf(stderr, "riakctl: cannot initialize libcurl\n");
         return RC_ERROR;
@@ -439,6 +454,16 @@ int rc_main(int argc, char **argv) {
     rc_ctx x;
     memset(&x, 0, sizeof x);
     int rc = run(&x, argc, argv);
+    uint64_t left_out = riak_client_skipped_names(x.client);
+    if (left_out > 0) {
+        /* a result without them would pass for a complete one */
+        rc_warn("%" PRIu64 " key(s) or bucket name(s) with a NUL byte were left out of the "
+                "result: libriak-c handles names as C strings",
+                left_out);
+        if (rc == RC_OK) {
+            rc = RC_ERROR;
+        }
+    }
     riak_client_free(x.client);
     rc_conn_free(&x.conn);
     riak_global_cleanup();

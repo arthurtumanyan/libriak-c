@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -111,8 +112,8 @@ static bool fold_cb(const char *key, riak_object *obj, void *ctx) {
 
 static riak_status run_fold(bk_ctx *b, riak_client *c) {
     riak_fold_query q = {0};
-    /* the smallest key a C string can hold */
-    q.start_key = "\x01";
+    /* from the first key: keys with a NUL byte are counted, not missed */
+    q.start_key = "";
     q.max_results = FOLD_PAGE;
     q.bucket_type = b->x->type;
     char *cont = NULL;
@@ -358,6 +359,10 @@ int rc_cmd_backup(rc_ctx *x, int argc, char **argv) {
     json_object *t = json_object_new_object();
     json_object_object_add(t, "end", json_object_new_boolean(1));
     json_object_object_add(t, "count", json_object_new_int64((int64_t)b.count));
+    uint64_t left_out = riak_client_skipped_names(c);
+    if (left_out > 0) {
+        json_object_object_add(t, "left_out", json_object_new_int64((int64_t)left_out));
+    }
     rc = rc_print_line(t);
     if (rc == RC_OK && output) {
         fprintf(stderr, "riakctl: %llu entries written to %s\n", b.count, output);
@@ -494,36 +499,6 @@ static riak_status put_sib(rs_ctx *r, const char *key, const rs_sib *s, const ch
     return riak_put(r->c, r->bucket, key, s->data, s->len, &o, NULL, NULL);
 }
 
-/* The key holds a sibling equal to s. */
-static bool present(rs_ctx *r, const char *key, const rs_sib *s) {
-    riak_object_set cur = {0};
-    riak_opts o = {0};
-    o.bucket_type = r->type;
-    bool found = false;
-    if (riak_get_siblings(r->c, r->bucket, key, &o, &cur) == RIAK_OK) {
-        for (size_t i = 0; i < cur.count && !found; i++) {
-            found = sib_eq(s, &cur.items[i]);
-        }
-    }
-    riak_object_set_free(&cur);
-    return found;
-}
-
-/* Vector clock of the tombstone of an absent key. *known is false when the
- * transport cannot tell (HTTP); otherwise NULL means there is no tombstone. */
-static char *tombstone_vclock(rs_ctx *r, const char *key, bool *known) {
-    riak_opts o = {0};
-    o.bucket_type = r->type;
-    o.deletedvclock = true;
-    o.head = true;
-    riak_object obj = {0};
-    riak_status st = riak_get(r->c, r->bucket, key, &o, &obj);
-    *known = st == RIAK_OK || st == RIAK_E_NOT_FOUND;
-    char *v = obj.vclock ? strdup(obj.vclock) : NULL;
-    riak_object_free(&obj);
-    return v;
-}
-
 /* Reads a number followed by sep (or by the end when sep is 0). */
 static bool date_field(const char **p, long lo, long hi, char sep, long *out) {
     char *end;
@@ -615,9 +590,11 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         n = 1;
         r->collapsed++;
     }
+    /* a deleted key gives the clock of its tombstone, if one is kept */
     riak_object_set cur = {0};
     riak_opts go = {0};
     go.bucket_type = r->type;
+    go.deletedvclock = true;
     riak_status st = ok ? riak_get_siblings(r->c, r->bucket, key, &go, &cur) : RIAK_OK;
     if (ok && st != RIAK_OK && st != RIAK_E_NOT_FOUND) {
         rc_fail(r->c, key, st);
@@ -638,10 +615,8 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
     } else if (ok && n == 1) {
         /* The tombstone of a recent delete descends the backup's clock and
          * would win over an "asis" write: on a deleted key the object is
-         * written as an update of the tombstone. Over HTTP the tombstone
-         * cannot be seen, so the "asis" write is checked afterwards. */
-        bool known = true;
-        char *tomb = cur.count == 0 ? tombstone_vclock(r, key, &known) : NULL;
+         * written as an update of the tombstone. */
+        const char *tomb = cur.count == 0 ? cur.vclock : NULL;
         if (tomb) {
             st = put_sib(r, key, &s[0], tomb, false);
         } else {
@@ -651,11 +626,8 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
             st = put_sib(r, key, &s[0], vclock, vclock != NULL);
             if (st != RIAK_OK && st != RIAK_E_TRANSPORT && st != RIAK_E_UNAUTHORIZED) {
                 st = put_sib(r, key, &s[0], cur.vclock, false);
-            } else if (st == RIAK_OK && !known && !present(r, key, &s[0])) {
-                st = put_sib(r, key, &s[0], NULL, false);
             }
         }
-        free(tomb);
         ok = st == RIAK_OK;
         if (!ok) {
             rc_fail(r->c, key, st);
@@ -665,12 +637,10 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
         /* one sibling per put; each write without a vector clock becomes a
          * sibling of what is stored (in allow_mult buckets). On a deleted
          * key the first write replaces the tombstone. */
-        bool known = true;
-        char *tomb = cur.count == 0 ? tombstone_vclock(r, key, &known) : NULL;
+        const char *tomb = cur.count == 0 ? cur.vclock : NULL;
         for (size_t i = 0; ok && i < n; i++) {
             if (missing[i]) {
                 st = put_sib(r, key, &s[i], tomb, false);
-                free(tomb);
                 tomb = NULL;
                 ok = st == RIAK_OK;
                 if (!ok) {
@@ -678,7 +648,6 @@ static bool restore_object(rs_ctx *r, const char *key, json_object *e) {
                 }
             }
         }
-        free(tomb);
         r->restored += ok;
     }
     riak_object_set_free(&cur);
@@ -893,8 +862,13 @@ static bool bucket_allow_mult(riak_client *c, const char *type, const char *buck
 /* A line of the backup handed to a worker. */
 typedef struct {
     char *line;
+    size_t len;
     unsigned long long lineno;
 } rs_item;
+
+/* Bytes of lines queued or being restored at most; a longer line is
+ * still taken when nothing else is. */
+#define QUEUE_BYTES ((size_t)64U << 20U)
 
 /* Lines flow from the reading thread to the workers through a bounded
  * queue; the first failure that ends the restore stops everyone. */
@@ -903,6 +877,7 @@ typedef struct rs_shared {
     pthread_cond_t can_get, can_put;
     rs_item *items;
     size_t cap, head, count;
+    size_t bytes;  /* bytes of lines queued or being restored, kept below QUEUE_BYTES */
     bool closed;   /* no more lines will come */
     bool stop;     /* the restore is abandoned */
     bool complete; /* the trailer was seen */
@@ -938,6 +913,11 @@ static int restore_line(rs_ctx *r, const rs_item *it) {
     } else if (!json_object_object_get_ex(e, "key", &v)) {
         rc_warn("%s: no key, entry skipped", what);
         r->skipped++;
+    } else if (!json_object_is_type(v, json_type_string) ||
+               (size_t)json_object_get_string_len(v) != strlen(json_object_get_string(v))) {
+        /* keys are C strings in libriak-c: one with a NUL byte cannot be written */
+        rc_warn("%s: the key is not a string without NUL bytes, entry not restored", what);
+        r->failed++;
     } else {
         const char *key = json_object_get_string(v);
         bool ok = json_object_object_get_ex(e, "datatype", NULL) ? restore_datatype(r, key, e)
@@ -971,6 +951,10 @@ static void *restore_worker(void *arg) {
         pthread_mutex_unlock(&sh->lock);
         int rc = restore_line(r, &it);
         free(it.line);
+        pthread_mutex_lock(&sh->lock);
+        sh->bytes -= it.len;
+        pthread_cond_signal(&sh->can_put);
+        pthread_mutex_unlock(&sh->lock);
         if (rc != RC_OK) {
             rs_abort(sh, rc);
             return NULL;
@@ -979,15 +963,17 @@ static void *restore_worker(void *arg) {
 }
 
 /* Queues a line (taking ownership); false once the restore is abandoned. */
-static bool rs_put(rs_shared *sh, char *line, unsigned long long lineno) {
+static bool rs_put(rs_shared *sh, char *line, size_t len, unsigned long long lineno) {
     pthread_mutex_lock(&sh->lock);
-    while (sh->count == sh->cap && !sh->stop) {
+    while ((sh->count == sh->cap || (sh->bytes > 0 && sh->bytes + len > QUEUE_BYTES)) &&
+           !sh->stop) {
         pthread_cond_wait(&sh->can_put, &sh->lock);
     }
     bool ok = !sh->stop;
     if (ok) {
-        sh->items[(sh->head + sh->count) % sh->cap] = (rs_item){line, lineno};
+        sh->items[(sh->head + sh->count) % sh->cap] = (rs_item){line, len, lineno};
         sh->count++;
+        sh->bytes += len;
         pthread_cond_signal(&sh->can_get);
     }
     pthread_mutex_unlock(&sh->lock);
@@ -997,16 +983,23 @@ static bool rs_put(rs_shared *sh, char *line, unsigned long long lineno) {
     return ok;
 }
 
+#define HEADER_MAX ((size_t)1U << 20U)
+
 /* Reads and checks the header line; NULL (reported) when it is not one. */
 static json_object *read_header(FILE *f, const char *path, unsigned long long *lineno) {
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
+    bool too_long;
     json_object *h = NULL;
-    while ((n = getline(&line, &cap, f)) > 0) {
+    while ((n = rc_read_line(f, &line, &cap, HEADER_MAX, &too_long)) > 0) {
         (*lineno)++;
         if (n == 1 && line[0] == '\n') {
             continue;
+        }
+        if (too_long) {
+            fprintf(stderr, "riakctl: %s is not a riakctl backup (header too long)\n", path);
+            break;
         }
         h = rc_parse_json(line, path);
         json_object *fmt, *ver;
@@ -1029,18 +1022,18 @@ static json_object *read_header(FILE *f, const char *path, unsigned long long *l
 }
 
 #define RESTORE_MAX_JOBS 64
+#define LINE_MAX_DEFAULT ((unsigned long long)256U << 20U)
 
 int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
-    static const struct option opts[] = {{"type", required_argument, NULL, 't'},
-                                         {"bucket", required_argument, NULL, 'b'},
-                                         {"dry-run", no_argument, NULL, 'n'},
-                                         {"jobs", required_argument, NULL, 'j'},
-                                         {NULL, 0, NULL, 0}};
+    static const struct option opts[] = {
+        {"type", required_argument, NULL, 't'},     {"bucket", required_argument, NULL, 'b'},
+        {"dry-run", no_argument, NULL, 'n'},        {"jobs", required_argument, NULL, 'j'},
+        {"max-line", required_argument, NULL, 'm'}, {NULL, 0, NULL, 0}};
     const char *bucket = NULL;
     bool dry_run = false;
-    unsigned long long jobs = 4;
+    unsigned long long jobs = 4, max_line = LINE_MAX_DEFAULT;
     int ch;
-    while ((ch = getopt_long(argc, argv, "t:b:nj:", opts, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "t:b:nj:m:", opts, NULL)) != -1) {
         switch (ch) {
         case 't':
             x->type = optarg;
@@ -1054,6 +1047,12 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
         case 'j':
             if (!rc_parse_uint(optarg, RESTORE_MAX_JOBS, &jobs) || jobs == 0) {
                 return rc_usage_error("restore", "--jobs takes 1 to %d", RESTORE_MAX_JOBS);
+            }
+            break;
+        case 'm':
+            if (!rc_parse_uint(optarg, SIZE_MAX / 2, &max_line) || max_line < 1024) {
+                return rc_usage_error("restore",
+                                      "--max-line takes a number of bytes, at least 1024");
             }
             break;
         default:
@@ -1125,12 +1124,20 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
-    while (rc == RC_OK && (n = getline(&line, &cap, f)) > 0) {
+    bool too_long;
+    unsigned long long oversized = 0;
+    while (rc == RC_OK && (n = rc_read_line(f, &line, &cap, (size_t)max_line, &too_long)) > 0) {
         lineno++;
         if (n == 1 && line[0] == '\n') {
             continue;
         }
-        if (!rs_put(&sh, line, lineno)) {
+        if (too_long) {
+            rc_warn("restore: %s line %llu: %zd bytes, longer than --max-line %llu; entry skipped",
+                    path, lineno, n, max_line);
+            oversized++;
+            continue;
+        }
+        if (!rs_put(&sh, line, (size_t)n, lineno)) {
             line = NULL;
             break;
         }
@@ -1150,7 +1157,7 @@ int rc_cmd_restore(rc_ctx *x, int argc, char **argv) {
         (void)fclose(f); /* read-only: nothing is lost */
     }
 
-    rs_ctx total = {0};
+    rs_ctx total = {.failed = oversized};
     for (size_t i = 0; i < started; i++) {
         pthread_join(threads[i], NULL);
         total.restored += workers[i].restored;

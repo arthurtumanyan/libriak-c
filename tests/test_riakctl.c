@@ -380,6 +380,78 @@ static int run(const char *const *args) {
         CHECK_EQ_INT(run(a_), want);                                                               \
     } while (0)
 
+/* ---- line reader -------------------------------------------------------- */
+
+static FILE *input(const char *data, size_t len) {
+    FILE *f = tmpfile();
+    CHECK(f != NULL);
+    if (f) {
+        CHECK_EQ_INT(fwrite(data, 1, len, f), len);
+        rewind(f);
+    }
+    return f;
+}
+
+static void test_read_line(void) {
+    /* lines up to the limit come back whole, with their newline; a NUL
+     * byte is kept and counted */
+    static const char text[] = "ab\n\nxyz\0q\n12345678\n123456789\nlast";
+    FILE *f = input(text, sizeof text - 1);
+    if (f == NULL) {
+        return;
+    }
+    char *buf = NULL;
+    size_t cap = 0;
+    bool too_long = true;
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 3);
+    CHECK(!too_long && strcmp(buf, "ab\n") == 0);
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 1);
+    CHECK(!too_long && strcmp(buf, "\n") == 0);
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 6);
+    CHECK(!too_long && memcmp(buf, "xyz\0q\n", 7) == 0);
+    /* exactly the limit, newline included */
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 9);
+    CHECK(!too_long && strcmp(buf, "12345678\n") == 0);
+    /* one byte over: the line is consumed, its full length returned */
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 10);
+    CHECK(too_long && strncmp(buf, "123456789", 9) == 0 && buf[9] == '\0');
+    /* the next line is read normally: nothing of the long one is left */
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), 4);
+    CHECK(!too_long && strcmp(buf, "last") == 0);
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), -1);
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 9, &too_long), -1);
+    (void)fclose(f);
+    free(buf);
+
+    /* a line far above the limit keeps memory at the limit */
+    size_t big = 1 << 20;
+    char *data = malloc(big + 1);
+    CHECK(data != NULL);
+    if (data == NULL) {
+        return;
+    }
+    memset(data, 'x', big);
+    data[big] = '\n';
+    f = input(data, big + 1);
+    free(data);
+    buf = NULL;
+    cap = 0;
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 4096, &too_long), (long)big + 1);
+    CHECK(too_long && cap <= 8192 && strlen(buf) == 4096);
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 4096, &too_long), -1);
+    (void)fclose(f);
+    free(buf);
+
+    /* a limit of 0 keeps nothing but still ends the string */
+    f = input("abc\n", 4);
+    buf = NULL;
+    cap = 0;
+    CHECK_EQ_INT(rc_read_line(f, &buf, &cap, 0, &too_long), 4);
+    CHECK(too_long && buf && buf[0] == '\0');
+    (void)fclose(f);
+    free(buf);
+}
+
 static void test_front_end(void) {
     RUN_RC(0, "--version");
     RUN_RC(0, "help");
@@ -434,6 +506,7 @@ int main(void) {
     RUN(test_args);
     RUN(test_exit_codes);
     RUN(test_json);
+    RUN(test_read_line);
     RUN(test_front_end);
     riak_global_cleanup();
     return CHECK_DONE();

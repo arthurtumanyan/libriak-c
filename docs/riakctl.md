@@ -330,8 +330,16 @@ same credentials) as nextgenrepl's full sync does: the range trees are
 compared first, and only the keys of differing segments are fetched with
 their clocks. Since a key's segment depends on its bucket too, two
 different buckets (`--peer-bucket NAME`, on the same or the peer cluster)
-are compared key by key instead, from the complete key and clock lists of
-both (memory grows with the number of keys). Each difference is a line
+are compared key by key instead, in key ranges: the keys of both buckets
+are paged in order from the `$bucket` index (`$key` with `--start-key` and
+`--end-key`), each range ends where one side's page ends, and the clocks
+of a range come from one AAE fold per side. A range holds at most
+`--chunk N` stored keys per side (default 20,000), so memory does not grow
+with the bucket: with 50,000 keys per side, 40 MB in one range, 22 MB with
+the default and 11 MB with `--chunk 2000`, at the price of one fold per
+range. Tombstones are compared too, including those after the last stored
+key. Without secondary indexes (bitcask) the complete key and clock lists
+are compared in memory, with a warning. Each difference is a line
 `{"key", "status", "vclock", "peer_vclock"}` with the status `differs`,
 `missing_on_peer` or `missing_locally`; a deleted key whose tombstone is
 still kept shows as `differs`. A summary goes to stderr:
@@ -342,7 +350,9 @@ riakctl aae compare orders --peer-bucket orders_migrated --size medium
 ```
 
 `--size` (default `small`, 65536 segments) trades tree size against the
-number of keys fetched per differing segment.
+number of keys fetched per differing segment. Over HTTP Riak cannot encode
+keys that are not valid UTF-8 in AAE fold results (it answers with an
+error); Protocol Buffers has no such restriction.
 
 ### Replication
 
@@ -405,9 +415,9 @@ one is used:
 Measured against a local single-node OpenRiak 3.4 (Protocol Buffers,
 1 KiB values with metadata and two indexes): the fold backs up about
 10,000 objects per second in under 20 MB of memory; the `aae` and `keys`
-methods about 4,000 to 5,000. A restore writes about 1,200 objects per
-second with one job and 5,600 to 6,700 with 16 jobs, in about 11 MB
-(55 MB with 256 KiB values in flight).
+methods about 4,000 to 5,000. A restore of 50,000 objects of 2 KiB writes
+about 12,000 objects per second with 16 jobs, in about 11 MB; with 16 MiB
+values it peaks at about 260 MB with 4 or with 16 jobs.
 
 Data type buckets use `aae` or `keys`. A backup reads a live bucket; it is
 not a point-in-time snapshot, and writes made while it runs may or may not
@@ -425,11 +435,11 @@ be included.
   descends the backup's), Riak keeps the newer version; concurrent
   versions become siblings in `allow_mult` buckets.
 - A key deleted shortly before still has a tombstone whose clock descends
-  the backup's, which would make Riak drop the "as is" write. Over Protocol
-  Buffers the tombstone is looked up first and the object is written as an
-  update of it (its clock then includes the deletion). Over HTTP, where a
-  tombstone cannot be read, the "as is" write is read back and repeated as
-  a normal write when the tombstone won.
+  the backup's, which would make Riak drop the "as is" write. The read that
+  precedes every write also returns the tombstone's clock (`deletedvclock`,
+  over both transports), and the object is written as an update of the
+  tombstone: its clock then includes the deletion, and no deleted sibling
+  is left behind.
 - Riak itself may extend the clocks of objects written "as is" afterwards
   (read repair and anti-entropy between the replicas): on OpenRiak 3.4,
   for about 4% of 20,000 restored objects the clock read back later
@@ -447,8 +457,14 @@ be included.
   unchanged.
 - `--jobs N` (default 4, at most 64) restores with N worker threads, each
   with its own connection; one thread reads the file and hands lines to
-  the workers through a bounded queue, so memory does not grow with the
-  size of the backup. Keys are independent, so the order does not matter.
+  the workers through a bounded queue. Lines queued or being restored are
+  kept below 64 MiB together (a longer line is taken alone), so memory
+  grows neither with the size of the backup nor with the number of jobs.
+  Keys are independent, so the order does not matter.
+- `--max-line BYTES` (default 256 MiB, at least 1024) limits the length of
+  an entry. A longer entry is read past without being kept, reported with
+  its line number and counted as `failed`; the other entries are restored.
+  The header line is limited to 1 MiB.
 - Counters are restored by adding the difference to the stored value, sets
   and grow-only sets by adding missing elements (elements added since the
   backup stay), maps field by field. HyperLogLogs cannot be restored: only
@@ -461,12 +477,13 @@ be included.
 
 ### Limitations
 
-- Over HTTP the vector clock of a tombstone cannot be read, so after a
-  restore over a recently deleted key of an `allow_mult` bucket the
-  tombstone can remain as an additional (deleted) sibling. Protocol
-  Buffers has no such limitation.
-- Keys and bucket names are C strings in libriak-c: keys containing a NUL
-  byte cannot be handled; the object fold starts at the key `"\x01"`.
+- Keys and bucket names are C strings in libriak-c, so a key that contains
+  a NUL byte cannot be read or written. Listings, folds and AAE results
+  leave such keys out instead of cutting them short
+  (`riak_client_skipped_names()`); riakctl then warns, exits with status 1,
+  and a backup's trailer carries `"left_out": N`, so an incomplete result
+  never passes for a complete one. A backup entry whose key holds a NUL
+  byte is counted as `failed`.
 - Bucket properties and bucket types are not part of a backup; `riakctl
   props get` saves the properties.
 

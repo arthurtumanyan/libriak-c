@@ -79,7 +79,7 @@ check "metadata" [ "$(jq -r .meta.owner "$work/out")" = alice ]
 check "indexes" [ "$(jq -cS .indexes "$work/out")" = '{"age_int":["30"],"email_bin":["a@b.c"]}' ]
 check "content type" [ "$(jq -r .content_type "$work/out")" = text/plain ]
 expect 0 "$R" --compact put --value generated users
-check "generated key" jq -e '.key | length > 0' "$work/out"
+check "generated key" jq -e '.key | length > 0' "$work/out" >/dev/null
 printf '\001\002\377' | expect 0 "$R" put users bin
 expect 0 "$R" --compact get --json users bin
 check "binary value as base64" [ "$(jq -r .value_b64 "$work/out")" = AQL/ ]
@@ -93,9 +93,9 @@ check "siblings listed" [ "$(jq -c '[.siblings[].value] | sort' "$work/out")" = 
 expect 0 "$R" delete users u1
 expect 3 "$R" get users u1
 expect 0 "$R" --compact list keys users
-check "key listing as JSON Lines" jq -e 'type == "string"' "$work/out"
+check "key listing as JSON Lines" jq -e 'type == "string"' "$work/out" >/dev/null
 expect 0 "$R" --compact props get users
-check "bucket properties" jq -e '.props.n_val == 3' "$work/out"
+check "bucket properties" jq -e '.props.n_val == 3' "$work/out" >/dev/null
 
 # backup and restore (key listing over HTTP), then a second, idempotent restore
 for i in 1 2 3; do
@@ -137,6 +137,108 @@ head -n 2 "$work/b.jsonl" >"$work/cut.jsonl"
 expect 1 "$R" restore -b dst2 "$work/cut.jsonl"
 echo '{"format":"other"}' >"$work/bad.jsonl"
 expect 1 "$R" restore "$work/bad.jsonl"
+
+# A request straight to the first stub node: stub_http METHOD PATH
+first=${ports%% *}
+stub_http() {
+    python3 -c 'import sys, urllib.request
+req = urllib.request.Request("http://127.0.0.1:" + sys.argv[1] + sys.argv[3], method=sys.argv[2],
+                             data=b"x" if sys.argv[2] == "PUT" else None,
+                             headers={"Content-Type": "text/plain"})
+try:
+    sys.stdout.write(urllib.request.urlopen(req).read().decode())
+except urllib.error.HTTPError as e:
+    sys.stdout.write(e.read().decode())' "$first" "$@"
+}
+
+# restore over a deleted key: the write descends the tombstone's clock,
+# which comes with the 404 over HTTP too
+printf 'live' | "$R" -u "http://127.0.0.1:$first" put tb k || failures=$((failures + 1))
+expect 0 "$R" -u "http://127.0.0.1:$first" backup --method keys -o "$work/tb.jsonl" tb
+expect 0 "$R" -u "http://127.0.0.1:$first" delete tb k
+expect 0 "$R" -u "http://127.0.0.1:$first" --compact restore "$work/tb.jsonl"
+check "restored over a tombstone" [ "$(jq -c '[.restored, .failed]' "$work/out")" = '[1,0]' ]
+stub_http GET /_last >"$work/last"
+check "written with the tombstone's clock" \
+    [ "$(jq -r '.headers["X-Riak-Vclock"] // "" | startswith("vc-tomb-")' "$work/last")" = true ]
+expect 0 "$R" -u "http://127.0.0.1:$first" get tb k
+check "value back after the restore" [ "$(cat "$work/out")" = live ]
+
+# entries longer than --max-line are skipped and counted as failed; the
+# others are restored
+big=$(head -c 3000 /dev/zero | tr '\0' 'x')
+cat >"$work/long.jsonl" <<JSONL
+{"format":"riakctl-backup","version":1,"bucket":"longb"}
+{"key":"small","siblings":[{"value":"s"}]}
+{"key":"big","siblings":[{"value":"$big"}]}
+{"key":"small2","siblings":[{"value":"s2"}]}
+{"end":true,"count":3}
+JSONL
+expect 1 "$R" --compact restore --max-line 2048 "$work/long.jsonl"
+check "long entry failed, others restored" \
+    [ "$(jq -c '[.restored, .failed, .complete]' "$work/out")" = '[2,1,true]' ]
+check "long entry reported" grep -q 'line 3: 30[0-9][0-9] bytes, longer than --max-line 2048' "$work/err"
+expect 0 "$R" --compact restore "$work/long.jsonl"
+check "restored with the default limit" [ "$(jq -c '[.restored, .unchanged]' "$work/out")" = '[1,2]' ]
+expect 2 "$R" restore --max-line 1000 "$work/long.jsonl"
+expect 2 "$R" restore --max-line 12x "$work/long.jsonl"
+# a header longer than 1 MiB is not a backup
+{ printf '{"format":"riakctl-backup","pad":"'; head -c 1100000 /dev/zero | tr '\0' 'p'; printf '"}\n'; } >"$work/hdr.jsonl"
+expect 1 "$R" restore "$work/hdr.jsonl"
+check "long header reported" grep -q 'header too long' "$work/err"
+
+# a key with a NUL byte cannot be written: the entry fails, the rest is restored
+cat >"$work/nul.jsonl" <<'JSONL'
+{"format":"riakctl-backup","version":1,"bucket":"nulb"}
+{"key":"a\u0000b","siblings":[{"value":"x"}]}
+{"key":"ok","siblings":[{"value":"y"}]}
+{"end":true,"count":2}
+JSONL
+expect 1 "$R" --compact restore "$work/nul.jsonl"
+check "NUL key entry failed" [ "$(jq -c '[.restored, .failed]' "$work/out")" = '[1,1]' ]
+check "NUL key reported" grep -q 'not a string without NUL bytes' "$work/err"
+expect 3 "$R" get nulb a
+
+# keys with a NUL byte from the server are left out, reported, and make the
+# result (exit status 1) and a backup (trailer "left_out") incomplete
+stub_http PUT '/buckets/nulsrc/keys/a%00b' >/dev/null
+printf 'v' | "$R" put nulsrc plain || failures=$((failures + 1))
+expect 1 "$R" --compact list keys nulsrc
+check "NUL key left out of the listing" [ "$(jq -sc . "$work/out")" = '["plain"]' ]
+check "left out key reported" grep -q '1 key(s) or bucket name(s) with a NUL byte were left out' "$work/err"
+expect 1 "$R" backup --method keys -o "$work/nul-b.jsonl" nulsrc
+check "backup trailer counts the left out key" \
+    [ "$(tail -n 1 "$work/nul-b.jsonl" | jq -c '[.count, .left_out]')" = '[1,1]' ]
+
+# two buckets compared in key ranges paged from $bucket: every key once,
+# with the right status, also a tombstone after the last stored key, and no
+# fold returns more than a page of keys per side
+i=0
+while [ $i -lt 180 ]; do
+    k=$(printf 'k%03d' $i)
+    if [ $i -lt 120 ]; then printf 'a' | "$R" put cmpa "$k" || failures=$((failures + 1)); fi
+    if [ $i -ge 60 ]; then printf 'b' | "$R" put cmpb "$k" || failures=$((failures + 1)); fi
+    i=$((i + 1))
+done
+printf 't' | "$R" put cmpa z-tomb && "$R" delete cmpa z-tomb >/dev/null || failures=$((failures + 1))
+printf 'm' | "$R" put cmpa k0300 && "$R" delete cmpa k0300 >/dev/null || failures=$((failures + 1))
+stub_http GET /_folds >/dev/null
+expect 0 "$R" --compact aae compare cmpa --peer-bucket cmpb --chunk 10
+jq -sc 'group_by(.status) | map({(.[0].status): length}) | add' "$work/out" >"$work/counts"
+check "compare counts" [ "$(cat "$work/counts")" = '{"differs":60,"missing_locally":60,"missing_on_peer":62}' ]
+check "every key once" [ "$(jq -s 'map(.key) | (length == (unique | length))' "$work/out")" = true ]
+check "tombstone after the last key compared" [ "$(jq -c 'select(.key == "z-tomb") | .status' "$work/out")" = '"missing_on_peer"' ]
+check "status by key" [ "$(jq -sc 'map(select(.key == "k059" or .key == "k060" or .key == "k119" or .key == "k120")) | sort_by(.key) | map(.status)' "$work/out")" = '["missing_on_peer","differs","differs","missing_locally"]' ]
+check "compare in ranges" grep -q 'key by key, [0-9][0-9]* ranges' "$work/err"
+folds=$(stub_http GET /_folds)
+check "folds bounded by the chunk ($folds)" [ "$(echo "$folds" | jq '.max <= 12 and .count >= 24')" = true ]
+# the same result in one range
+expect 0 "$R" --compact aae compare cmpa --peer-bucket cmpb
+check "compare with the default chunk" [ "$(jq -s length "$work/out")" -eq 182 ]
+# without secondary indexes the lists are compared whole, with a warning
+expect 0 "$R" --compact aae compare unavailable --peer-bucket cmpb
+check "fallback without 2i" grep -q 'compared whole, in memory' "$work/err"
+expect 2 "$R" aae compare cmpa --peer-bucket cmpb --chunk 5
 
 # AAE folds (canned answers of the stub)
 expect 0 "$R" --compact aae stats b

@@ -13,7 +13,7 @@
 | `docs` | API names used in `README.md` and `docs/` exist; complete example programs build | Python 3 |
 | `live` | Everything against a real Riak node | `RIAK_TEST_URL` |
 | `riakctl_unit` | riakctl internals with exact expected values: node URLs, base64 (RFC 4648 vectors), the UTF-8/base64 decision, argument parsing, exit codes, JSON forms, usage errors | — |
-| `riakctl_cli` | `riakctl` against `tests/stub_riak.py`: options, exit codes, JSON output, backup and restore | Python 3, jq |
+| `riakctl_cli` | `riakctl` against `tests/stub_riak.py`: options, exit codes, JSON output, backup and restore (over tombstones, entries above `--max-line`, keys with NUL bytes), bucket against bucket `aae compare` in key ranges | Python 3, jq |
 | `riakctl_live` | The `riakctl` demo workflow (`examples/cli/run-all.sh`) against a real Riak node, with the `RIAK_TEST_*` settings of `live` | `RIAK_TEST_URL`, jq |
 
 ```sh
@@ -38,14 +38,17 @@ retried. Malformed server documents are checked to give `RIAK_E_PARSE`.
 
 `tests/stub_riak.py` emulates the Riak HTTP API in memory: objects with
 metadata and indexes, bucket types (including `allow_mult` siblings),
-conditional requests, streamed key lists, secondary indexes, Search,
+tombstones whose clock comes with the 404 of a get, conditional requests,
+streamed key lists, secondary indexes, Search,
 MapReduce and data types. Three nodes share one store, like a cluster. Each
 node can be switched to answer with HTTP 503, to drop connections, or to
 answer slowly, to answer like Riak 2.2 (`/_old`) or Riak 3.x (`/_v3`), to
 answer the newer endpoints with malformed documents (`/_malformed`), to
 drop the next requests to them without an answer (`/_drop`), and records
 the last request (method, path, headers, body, decoded AAE filter and Query
-API document) for assertions. In `--tls` mode the nodes speak HTTPS with certificates made
+API document) for assertions. AAE key and clock folds of a bucket that
+holds objects answer from the store, honouring the key range, and
+`/_folds` reports how many were made and the most keys one returned. In `--tls` mode the nodes speak HTTPS with certificates made
 by `tests/gen_certs.sh`. The module docstring lists every control endpoint.
 
 `tests/stub_pb.h` is the Protocol Buffers counterpart: a C server started in
@@ -156,10 +159,16 @@ URLs, base64, the text/base64 form of values in backups, numbers and quorums)
 and checks that values and bytes survive their round trips unchanged.
 
 riakctl is also checked beyond the test suites: every process of the demo
-workflow ran under valgrind memcheck over PB, HTTP, PBS and HTTPS (no leaks,
-no invalid or uninitialised accesses), the parallel restore ran under
-ThreadSanitizer, and backups and restores of 100,000 objects with siblings
-and large values were compared with their source after the round trip.
+workflow and of `riakctl_cli` ran under valgrind memcheck over PB, HTTP,
+PBS and HTTPS against Riak 3.4 and 2.2 (no leaks, no invalid or
+uninitialised accesses), the parallel restore ran under ThreadSanitizer,
+backups and restores of 100,000 objects with siblings and large values
+were compared with their source after the round trip, and bucket against
+bucket comparisons in ranges of 10 to 20,000 keys were compared with the
+result of an independent comparison of the complete key and clock lists.
+The new checks of `riakctl_cli` and of the library tests were themselves
+checked by injecting faults into the code they cover, one at a time:
+every fault made a test fail.
 
 ```sh
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug -DRIAK_COVERAGE=ON

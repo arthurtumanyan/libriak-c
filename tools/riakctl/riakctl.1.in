@@ -146,7 +146,8 @@ Riak Search (Riak 2.x).
 AAE folds (Riak 2.9+ with tictac AAE). Reap and erase only count unless
 \-\-local or \-\-job is given. compare lists the keys whose vector clocks
 differ between two clusters (\-\-peer URL, by comparing trees) or two
-buckets (\-\-peer\-bucket, key by key).
+buckets (\-\-peer\-bucket, key by key, in ranges of at most
+\-\-chunk keys per side paged from the $bucket index).
 .TP
 .B repl fetch\fR|\fPpush\fR|\fPmembers\fR|\fPcluster\-id\fR|\fPget
 nextgenrepl queues and riak_repl.
@@ -170,7 +171,14 @@ as replication does. Several siblings are written one by one and become
 siblings again in allow_mult buckets; in a bucket without allow_mult only
 the last modified sibling is written (reported as collapsed). Counters are restored through the
 difference to the stored value, sets by adding elements, maps field by
-field; HyperLogLogs cannot be restored.
+field; HyperLogLogs cannot be restored. Entries longer than
+\-\-max\-line bytes (default 256 MiB) are skipped and counted as failed.
+.PP
+Keys and bucket names are C strings in libriak-c: names that contain a
+NUL byte are left out of listings, folds and AAE results. riakctl then
+warns, adds
+.B left_out
+to the trailer of a backup and exits with status 1.
 .SH EXIT STATUS
 .TP
 .B 0

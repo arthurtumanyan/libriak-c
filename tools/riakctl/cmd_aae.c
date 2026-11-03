@@ -8,6 +8,7 @@
  clusters (or two buckets) and lists the keys whose clocks differ.
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,8 +34,12 @@ enum {
     OPT_LOCAL,
     OPT_JOB,
     OPT_PEER,
-    OPT_PEER_BUCKET
+    OPT_PEER_BUCKET,
+    OPT_CHUNK
 };
+
+/* Keys per side and range of a bucket against bucket compare. */
+#define COMPARE_CHUNK 20000
 
 static const char *const size_names[] = {"xxsmall", "xsmall", "small", "medium", "large", "xlarge"};
 
@@ -174,56 +179,242 @@ static int print_diff(const char *key, const char *status, const char *local, co
     return rc_print_line(o);
 }
 
-/* Keys of segs on both sides, compared by vector clock. */
-static int compare_segments(riak_client *a, riak_client *b, riak_aae_filter fa, riak_aae_filter fb,
-                            const uint32_t *segs, size_t n, unsigned long long *diffs) {
-    fa.segments = fb.segments = segs;
-    fa.n_segments = fb.n_segments = n;
-    riak_aae_keys ka = {0}, kb = {0};
-    riak_status st = riak_aae_fetch_clocks_range(a, &fa, &ka);
-    if (st != RIAK_OK) {
-        return rc_fail(a, "aae compare", st);
-    }
-    if ((st = riak_aae_fetch_clocks_range(b, &fb, &kb)) != RIAK_OK) {
-        riak_aae_keys_free(&ka);
-        return rc_fail(b, "aae compare (peer)", st);
-    }
-    int rc = RC_OK;
-    clock_ref *rb = calloc(kb.count + 1, sizeof *rb);
+/* Whether key lies in the window (after, upto]; a NULL bound is open. */
+static bool in_window(const char *key, const char *after, const char *upto) {
+    return (after == NULL || strcmp(key, after) > 0) && (upto == NULL || strcmp(key, upto) <= 0);
+}
+
+/* The keys of ka and kb inside the window, compared by vector clock. */
+static int compare_lists(const riak_aae_keys *ka, const riak_aae_keys *kb, const char *after,
+                         const char *upto, unsigned long long *diffs) {
+    clock_ref *rb = calloc(kb->count + 1, sizeof *rb);
     if (rb == NULL) {
-        rc = RC_ERROR;
+        fprintf(stderr, "riakctl: aae compare: out of memory\n");
+        return RC_ERROR;
     }
-    for (size_t i = 0; rb && i < kb.count; i++) {
-        rb[i].k = &kb.items[i];
+    size_t nb = 0;
+    for (size_t i = 0; i < kb->count; i++) {
+        if (in_window(kb->items[i].key, after, upto)) {
+            rb[nb++].k = &kb->items[i];
+        }
     }
-    if (rb) {
-        qsort(rb, kb.count, sizeof *rb, cmp_ref);
-    }
-    for (size_t i = 0; rc == RC_OK && i < ka.count; i++) {
-        clock_ref key = {&ka.items[i], false};
-        clock_ref *m = bsearch(&key, rb, kb.count, sizeof *rb, cmp_ref);
-        const char *va = ka.items[i].vclock ? ka.items[i].vclock : "";
+    qsort(rb, nb, sizeof *rb, cmp_ref);
+    int rc = RC_OK;
+    for (size_t i = 0; rc == RC_OK && i < ka->count; i++) {
+        if (!in_window(ka->items[i].key, after, upto)) {
+            continue;
+        }
+        clock_ref key = {&ka->items[i], false};
+        clock_ref *m = bsearch(&key, rb, nb, sizeof *rb, cmp_ref);
+        const char *va = ka->items[i].vclock ? ka->items[i].vclock : "";
         if (m == NULL) {
-            rc = print_diff(ka.items[i].key, "missing_on_peer", va, NULL);
+            rc = print_diff(ka->items[i].key, "missing_on_peer", va, NULL);
             (*diffs)++;
         } else {
             m->matched = true;
             const char *vb = m->k->vclock ? m->k->vclock : "";
             if (strcmp(va, vb) != 0) {
-                rc = print_diff(ka.items[i].key, "differs", va, vb);
+                rc = print_diff(ka->items[i].key, "differs", va, vb);
                 (*diffs)++;
             }
         }
     }
-    for (size_t i = 0; rc == RC_OK && i < kb.count; i++) {
+    for (size_t i = 0; rc == RC_OK && i < nb; i++) {
         if (!rb[i].matched) {
             rc = print_diff(rb[i].k->key, "missing_locally", NULL, rb[i].k->vclock);
             (*diffs)++;
         }
     }
     free(rb);
+    return rc;
+}
+
+/* The clocks of fa and fb (keys in the window) compared. */
+static int compare_folds(riak_client *a, riak_client *b, const riak_aae_filter *fa,
+                         const riak_aae_filter *fb, const char *after, const char *upto,
+                         unsigned long long *diffs) {
+    riak_aae_keys ka = {0}, kb = {0};
+    riak_status st = riak_aae_fetch_clocks_range(a, fa, &ka);
+    if (st != RIAK_OK) {
+        return rc_fail(a, "aae compare", st);
+    }
+    if ((st = riak_aae_fetch_clocks_range(b, fb, &kb)) != RIAK_OK) {
+        riak_aae_keys_free(&ka);
+        return rc_fail(b, "aae compare (peer)", st);
+    }
+    int rc = compare_lists(&ka, &kb, after, upto, diffs);
     riak_aae_keys_free(&ka);
     riak_aae_keys_free(&kb);
+    return rc;
+}
+
+/* Keys of segs on both sides, compared by vector clock. */
+static int compare_segments(riak_client *a, riak_client *b, riak_aae_filter fa, riak_aae_filter fb,
+                            const uint32_t *segs, size_t n, unsigned long long *diffs) {
+    fa.segments = fb.segments = segs;
+    fa.n_segments = fb.n_segments = n;
+    return compare_folds(a, b, &fa, &fb, NULL, NULL, diffs);
+}
+
+/* ---- bucket against bucket ---------------------------------------------- */
+
+/* The keys of one side in ascending order, a page at a time, from the
+ * $bucket index (or $key over the --start-key/--end-key range). */
+typedef struct {
+    riak_client *c;
+    const char *bucket;
+    riak_index_query q;
+    riak_index_result page;
+    size_t pos;    /* first key of the page not yet compared */
+    bool has_more; /* another page follows */
+} key_pager;
+
+static riak_status pager_next(key_pager *p) {
+    char *cont = NULL;
+    riak_status st = RIAK_OK;
+    do {
+        free(cont);
+        cont = p->page.continuation;
+        p->page.continuation = NULL;
+        riak_index_result_free(&p->page);
+        p->pos = 0;
+        p->q.continuation = cont;
+        st = riak_index_query_run(p->c, p->bucket, &p->q, &p->page);
+        p->has_more = st == RIAK_OK && p->page.continuation != NULL;
+        /* a page may come back empty with a continuation */
+    } while (st == RIAK_OK && p->page.count == 0 && p->has_more);
+    free(cont);
+    p->q.continuation = NULL;
+    return st;
+}
+
+static riak_status pager_start(key_pager *p, riak_client *c, const riak_aae_filter *f,
+                               unsigned chunk) {
+    memset(p, 0, sizeof *p);
+    p->c = c;
+    p->bucket = f->bucket;
+    p->q.bucket_type = f->bucket_type;
+    p->q.max_results = chunk;
+    if (f->start_key) {
+        p->q.index = "$key";
+        p->q.range_min = f->start_key;
+        p->q.range_max = f->end_key;
+    } else {
+        p->q.index = "$bucket";
+        p->q.value = f->bucket;
+    }
+    return pager_next(p);
+}
+
+static const char *pager_last(const key_pager *p) {
+    return p->page.count ? p->page.keys[p->page.count - 1] : NULL;
+}
+
+/* The keys up to upto are compared: the page moves on. */
+static riak_status pager_consume(key_pager *p, const char *upto) {
+    while (p->pos < p->page.count && strcmp(p->page.keys[p->pos], upto) <= 0) {
+        p->pos++;
+    }
+    return p->pos == p->page.count && p->has_more ? pager_next(p) : RIAK_OK;
+}
+
+/* The node answered the index query with an error such as a backend
+ * without secondary indexes (bitcask) gives. */
+static bool no_index(riak_status st) {
+    return st == RIAK_E_UNSUPPORTED || st == RIAK_E_SERVER || st == RIAK_E_HTTP;
+}
+
+/* Upper end of the last range, above every key that does not start with
+ * it: 1024 bytes 0xFF over Protocol Buffers; over HTTP, where keys travel
+ * as JSON strings, 256 times U+10FFFF, the largest valid UTF-8. */
+#define CEILING_REPEAT ((size_t)256)
+
+static char *key_ceiling(bool pb) {
+    static const char top[] = "\xf4\x8f\xbf\xbf";
+    char *s = malloc(CEILING_REPEAT * 4 + 1);
+    for (size_t i = 0; s && i < CEILING_REPEAT; i++) {
+        if (pb) {
+            memset(s + i * 4, 0xff, 4);
+        } else {
+            memcpy(s + i * 4, top, 4);
+        }
+    }
+    if (s) {
+        s[CEILING_REPEAT * 4] = '\0';
+    }
+    return s;
+}
+
+/* Two buckets compared in windows of keys: each window ends at a key at
+ * which one side's page ends, so a window holds at most a page of each
+ * side's stored keys (plus their tombstones), and the clocks of a window
+ * come from an AAE fold over its key range. */
+static int compare_buckets(riak_client *a, riak_client *b, const riak_aae_filter *fa,
+                           const riak_aae_filter *fb, bool pb_a, bool pb_b, unsigned chunk,
+                           unsigned long long *diffs, unsigned long long *windows) {
+    key_pager pa, pb;
+    riak_status st = pager_start(&pa, a, fa, chunk);
+    if (st != RIAK_OK) {
+        riak_index_result_free(&pa.page);
+        return no_index(st) ? -1 : rc_fail(a, "aae compare", st);
+    }
+    if ((st = pager_start(&pb, b, fb, chunk)) != RIAK_OK) {
+        riak_index_result_free(&pa.page);
+        riak_index_result_free(&pb.page);
+        return no_index(st) ? -1 : rc_fail(b, "aae compare (peer)", st);
+    }
+    char *ceil_a = key_ceiling(pb_a), *ceil_b = key_ceiling(pb_b);
+    char *after = NULL; /* the previous window ended here */
+    int rc = ceil_a && ceil_b ? RC_OK : RC_ERROR;
+    while (rc == RC_OK) {
+        /* the window ends where the first unfinished side's page ends */
+        const char *upto = NULL;
+        if (pa.has_more) {
+            upto = pager_last(&pa);
+        }
+        if (pb.has_more && (upto == NULL || strcmp(pager_last(&pb), upto) < 0)) {
+            upto = pager_last(&pb);
+        }
+        char *hi = upto ? malloc(strlen(upto) + 2) : NULL;
+        if (upto && hi == NULL) {
+            rc = RC_ERROR;
+            break;
+        }
+        if (hi) {
+            /* the fold range reaches just past upto, whether or not the
+             * node treats the end as inclusive */
+            size_t n = strlen(upto);
+            memcpy(hi, upto, n);
+            hi[n] = '\x01';
+            hi[n + 1] = '\0';
+        }
+        riak_aae_filter wa = *fa, wb = *fb;
+        wa.start_key = wb.start_key = after ? after : fa->start_key ? fa->start_key : "\x01";
+        wa.end_key = hi ? hi : fa->end_key ? fa->end_key : ceil_a;
+        wb.end_key = hi ? hi : fa->end_key ? fa->end_key : ceil_b;
+        rc = compare_folds(a, b, &wa, &wb, after, hi ? upto : fa->end_key, diffs);
+        (*windows)++;
+        if (rc != RC_OK || hi == NULL) {
+            free(hi);
+            break;
+        }
+        hi[strlen(upto)] = '\0';
+        free(after);
+        after = hi;
+        if ((st = pager_consume(&pa, after)) != RIAK_OK) {
+            rc = rc_fail(a, "aae compare", st);
+        } else if ((st = pager_consume(&pb, after)) != RIAK_OK) {
+            rc = rc_fail(b, "aae compare (peer)", st);
+        }
+        if (rc != RC_OK) {
+            break;
+        }
+    }
+    free(after);
+    free(ceil_a);
+    free(ceil_b);
+    riak_index_result_free(&pa.page);
+    riak_index_result_free(&pb.page);
     return rc;
 }
 
@@ -236,8 +427,19 @@ static const riak_aae_branch *find_branch(const riak_aae_tree *t, uint32_t id) {
     return NULL;
 }
 
+/* Names the peer left out (NUL bytes) make the comparison incomplete; the
+ * local client's are reported when riakctl exits. */
+static int left_out(riak_client *pc, int rc) {
+    uint64_t n = riak_client_skipped_names(pc);
+    if (n > 0) {
+        rc_warn("aae compare: %" PRIu64 " key(s) of the peer with a NUL byte were not compared", n);
+        return rc == RC_OK ? RC_ERROR : rc;
+    }
+    return rc;
+}
+
 static int aae_compare(rc_ctx *x, riak_client *c, riak_aae_filter f, riak_aae_tree_size size,
-                       const char *peer_url, const char *peer_bucket) {
+                       const char *peer_url, const char *peer_bucket, unsigned chunk) {
     rc_ctx px = *x;
     memset(&px.conn, 0, sizeof px.conn);
     px.client = NULL;
@@ -256,12 +458,23 @@ static int aae_compare(rc_ctx *x, riak_client *c, riak_aae_filter f, riak_aae_tr
     /* A key's segment depends on its bucket as well: trees are comparable
      * only for the same bucket. Two buckets are compared key by key. */
     if (rc == RC_OK && strcmp(f.bucket, pf.bucket) != 0) {
-        unsigned long long diffs = 0;
-        rc = compare_segments(c, pc, f, pf, NULL, 0, &diffs);
+        unsigned long long diffs = 0, windows = 0;
+        rc = compare_buckets(c, pc, &f, &pf, x->conn.cfg.transport == RIAK_TRANSPORT_PB,
+                             px.conn.cfg.transport == RIAK_TRANSPORT_PB, chunk, &diffs, &windows);
+        if (rc == -1) {
+            /* without secondary indexes the keys cannot be paged in order */
+            rc_warn("aae compare: the $bucket index is not available (%s); the key lists are "
+                    "compared whole, in memory",
+                    riak_client_errmsg(c));
+            rc = compare_segments(c, pc, f, pf, NULL, 0, &diffs);
+            windows = 1;
+        }
         if (rc == RC_OK) {
-            fprintf(stderr, "riakctl: aae compare: %llu keys differ (key by key)\n", diffs);
+            fprintf(stderr, "riakctl: aae compare: %llu keys differ (key by key, %llu ranges)\n",
+                    diffs, windows);
         }
         if (pc != c) {
+            rc = left_out(pc, rc);
             riak_client_free(pc);
         }
         rc_conn_free(&px.conn);
@@ -338,6 +551,7 @@ static int aae_compare(rc_ctx *x, riak_client *c, riak_aae_filter f, riak_aae_tr
         fprintf(stderr, "riakctl: aae compare: %zu segments and %llu keys differ\n", n_segs, diffs);
     }
     if (pc != c) {
+        rc = left_out(pc, rc);
         riak_client_free(pc);
     }
     rc_conn_free(&px.conn);
@@ -363,6 +577,7 @@ int rc_cmd_aae(rc_ctx *x, int argc, char **argv) {
         {"job", required_argument, NULL, OPT_JOB},
         {"peer", required_argument, NULL, OPT_PEER},
         {"peer-bucket", required_argument, NULL, OPT_PEER_BUCKET},
+        {"chunk", required_argument, NULL, OPT_CHUNK},
         {NULL, 0, NULL, 0}};
     riak_aae_filter f = {0};
     riak_aae_tree_size size = RIAK_AAE_SMALL;
@@ -374,6 +589,7 @@ int rc_cmd_aae(rc_ctx *x, int argc, char **argv) {
     riak_aae_change how = RIAK_AAE_COUNT;
     uint32_t job = 0;
     const char *peer = NULL, *peer_bucket = NULL;
+    unsigned long long chunk = COMPARE_CHUNK;
     int rc = RC_USAGE;
     int ch;
     while ((ch = getopt_long(argc, argv, "t:", opts, NULL)) != -1) {
@@ -439,6 +655,12 @@ int rc_cmd_aae(rc_ctx *x, int argc, char **argv) {
             break;
         case OPT_PEER_BUCKET:
             peer_bucket = optarg;
+            break;
+        case OPT_CHUNK:
+            if (!rc_parse_uint(optarg, 1000000, &chunk) || chunk < 10) {
+                rc = rc_usage_error("aae", "--chunk takes 10 to 1000000 keys");
+                goto out;
+            }
             break;
         default:
             rc = rc_usage_error("aae", "unknown option");
@@ -587,7 +809,7 @@ int rc_cmd_aae(rc_ctx *x, int argc, char **argv) {
             rc = rc_usage_error("aae", "compare needs --peer URL and/or another --peer-bucket");
             goto out;
         }
-        rc = aae_compare(x, c, f, size, peer, peer_bucket);
+        rc = aae_compare(x, c, f, size, peer, peer_bucket, (unsigned)chunk);
     } else {
         rc = rc_usage_error("aae", "unknown action '%s'", action);
     }

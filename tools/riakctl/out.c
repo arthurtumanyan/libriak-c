@@ -6,6 +6,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -383,6 +384,46 @@ json_object *rc_dt_json(const riak_dt_value *v) {
 }
 
 /* ---- input -------------------------------------------------------------- */
+
+ssize_t rc_read_line(FILE *f, char **buf, size_t *cap, size_t max, bool *too_long) {
+    size_t n = 0, total = 0;
+    int ch;
+    *too_long = false;
+    flockfile(f);
+    while ((ch = getc_unlocked(f)) != EOF) {
+        total += total < (size_t)SSIZE_MAX;
+        if (n < max) {
+            if (n + 2 > *cap) {
+                size_t nc = *cap ? *cap * 2 : 4096;
+                char *nb = nc > *cap ? realloc(*buf, nc) : NULL;
+                if (nb == NULL) {
+                    funlockfile(f);
+                    return -1;
+                }
+                *buf = nb;
+                *cap = nc;
+            }
+            (*buf)[n++] = (char)ch;
+        } else {
+            *too_long = true; /* the rest of the line is read and dropped */
+        }
+        if (ch == '\n') {
+            break;
+        }
+    }
+    funlockfile(f);
+    if (total == 0 || ferror(f)) {
+        return -1;
+    }
+    if (*cap == 0) { /* max is 0: nothing was kept */
+        if ((*buf = malloc(1)) == NULL) {
+            return -1;
+        }
+        *cap = 1;
+    }
+    (*buf)[n] = '\0';
+    return (ssize_t)(*too_long ? total : n);
+}
 
 bool rc_read_all(FILE *f, char **data, size_t *len) {
     size_t cap = 65536;

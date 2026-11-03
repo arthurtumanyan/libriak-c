@@ -3,14 +3,16 @@
  SPDX-License-Identifier: GPL-3.0-or-later
 
  libFuzzer target for the parsers of riakctl that see untrusted input:
- node URLs (command line, environment) and the value encodings of backup
- files. Beyond the absence of crashes and sanitizer reports, round trips
- must hold: value -> JSON -> value and bytes -> base64 -> bytes.
+ node URLs (command line, environment), the value encodings of backup
+ files and the line reader of restore. Beyond the absence of crashes and
+ sanitizer reports, round trips must hold: value -> JSON -> value and
+ bytes -> base64 -> bytes, and the line reader accounts for every byte.
    cmake -B build-fuzz -DCMAKE_C_COMPILER=clang -DRIAK_FUZZ=ON
    build-fuzz/tests/fuzz_riakctl -max_total_time=300
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -92,6 +94,36 @@ static void fuzz_numbers(const char *s) {
     }
 }
 
+/* Lines read with a small limit cover the input exactly once; a line keeps
+ * at most max bytes, and only a line longer than that is marked. */
+static void fuzz_lines(const uint8_t *data, size_t size) {
+    if (size < 1) {
+        return;
+    }
+    size_t max = data[0] % 64;
+    FILE *f = fmemopen((void *)(uintptr_t)(data + 1), size - 1, "r");
+    if (f == NULL) {
+        return;
+    }
+    char *buf = NULL;
+    size_t cap = 0, total = 0;
+    bool too_long;
+    ssize_t n;
+    while ((n = rc_read_line(f, &buf, &cap, max, &too_long)) > 0) {
+        size_t kept = strlen(buf);
+        if (too_long ? (size_t)n <= max || kept > max
+                     : (size_t)n > max || memcmp(buf, data + 1 + total, (size_t)n) != 0) {
+            abort();
+        }
+        total += (size_t)n;
+    }
+    if (total != size - 1) {
+        abort();
+    }
+    free(buf);
+    (void)fclose(f);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (size == 0) {
         return 0;
@@ -105,7 +137,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     memcpy(s, data, size);
     s[size] = '\0';
-    switch (mode % 4) {
+    switch (mode % 5) {
     case 0:
         fuzz_urls(s);
         break;
@@ -115,8 +147,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     case 2:
         fuzz_bytes(data, size);
         break;
-    default:
+    case 3:
         fuzz_numbers(s);
+        break;
+    default:
+        fuzz_lines(data, size);
         break;
     }
     free(s);
