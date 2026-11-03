@@ -161,11 +161,18 @@ jobs:
             sh tests/docker/setup-node.sh riak --security "$PWD/certs"
           else
             sh tests/docker/setup-node.sh riak
+            # a second cluster for the riakctl bucket comparison, with a
+            # node name (and so vnode actor ids) of its own
+            docker run -d --name riak-peer --ulimit nofile=65536:65536 \
+              -e RIAK_NODENAME=peer@127.0.0.1 \
+              -p 18098:8098 -p 18087:8087 "libriak-riak:$RIAK"
+            sh tests/docker/setup-node.sh riak-peer
           fi
       - name: Live tests (HTTP)
         if: matrix.security == 'plain'
         env:
           RIAK_TEST_URL: http://127.0.0.1:8098
+          RIAK_TEST_PEER_URL: http://127.0.0.1:18098
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: ${{ matrix.features }}
         run: ctest --test-dir build --output-on-failure -R live
@@ -173,6 +180,7 @@ jobs:
         if: matrix.security == 'plain'
         env:
           RIAK_TEST_URL: pb://127.0.0.1:8087
+          RIAK_TEST_PEER_URL: pb://127.0.0.1:18087
           RIAK_TEST_HTTP_PORT: "8098"
           RIAK_TEST_TYPE: libriak_multi
           RIAK_TEST_FEATURES: ${{ matrix.features }}

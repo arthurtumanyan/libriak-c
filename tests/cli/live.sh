@@ -22,6 +22,9 @@ export RIAK_URL="$RIAK_TEST_URL"
 if [ -n "${RIAK_TEST_FEATURES:-}" ]; then
     export RIAK_FEATURES="$RIAK_TEST_FEATURES"
 fi
+if [ -n "${RIAK_TEST_PEER_URL:-}" ]; then
+    export RIAK_PEER_URL="$RIAK_TEST_PEER_URL"
+fi
 if [ -n "${RIAK_TEST_TYPE:-}" ]; then
     export RIAK_MULTI_TYPE="$RIAK_TEST_TYPE"
 fi

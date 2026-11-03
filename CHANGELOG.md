@@ -24,8 +24,9 @@
   asynchronous) returns the tombstone's clock in `riak_object_set::vclock`.
 - Demo workflows built on `riakctl` in `examples/cli/` (connectivity,
   checked backup and restore, Nagios-style health check, statistics
-  sampling, paged index queries, AAE inspection, replication queues), run
-  as one scenario by `run-all.sh`, against a Docker node by `run-demo.sh`,
+  sampling, paged index queries, AAE inspection, comparison of buckets on
+  two clusters, replication queues), run
+  as one scenario by `run-all.sh`, against two Docker nodes by `run-demo.sh`,
   and in CI by the new `riakctl_live` test; `riakctl_cli` tests the tool
   against the stub server.
 
@@ -34,6 +35,11 @@
   listings, object folds, index and AAE results, so a different (and
   possibly existing) key was reported. They are now left out, logged and
   counted.
+- Objects read over HTTP carried the `</buckets/B>; rel="up"` entry that
+  Riak adds to the Link header of every response in `riak_object::links`,
+  unlike Protocol Buffers; written back into another bucket it made Riak
+  reject the request (400, invalid Link header). Only stored links
+  (`riaktag`) are returned now.
 - A Protocol Buffers connection kept the buffer of its largest request for
   its whole life; buffers above 256 KiB are now freed once the request is
   sent.

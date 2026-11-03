@@ -109,6 +109,20 @@ Buffers. Against a node set up with `--security`, `RIAK_TEST_USER`,
 `RIAK_TEST_LOG=1` prints the library's warnings. Nodes need a descriptor
 limit well above 1024 (`--ulimit nofile=65536:65536`).
 
+`RIAK_TEST_PEER_URL` names a second, separate node for the `riakctl`
+comparison of two clusters in `riakctl_live` (skipped without it). It needs
+a node name of its own, since vnode actor ids derive from the node name:
+the Riak 3.x image takes it from `RIAK_NODENAME` (the CI uses
+`peer@127.0.0.1`), the 2.x nodes are named after their container address.
+
+```sh
+docker run -d --name riak-peer --ulimit nofile=65536:65536 -e RIAK_NODENAME=peer@127.0.0.1 \
+    -p 18098:8098 -p 18087:8087 libriak-riak:3.4.1
+sh tests/docker/setup-node.sh riak-peer
+RIAK_TEST_URL=pb://127.0.0.1:8087 RIAK_TEST_PEER_URL=pb://127.0.0.1:18087 ... \
+    ctest --test-dir build -R riakctl_live --output-on-failure
+```
+
 Riak checks the password of every authenticated HTTP request, at a cost of
 a fraction of a second of server CPU each, while Protocol Buffers
 authenticate once per connection. Over HTTPS with authentication the suite

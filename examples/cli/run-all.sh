@@ -1,15 +1,17 @@
 #!/bin/sh
 # Runs the demos as one workflow against the node(s) of RIAK_URL and checks
 # their results: connectivity, seeding, backup, wiping the bucket, restore
-# (twice), a paged index query, monitoring, AAE inspection and a
-# replication queue round trip. Every key written lives in a fresh bucket
+# (twice), a paged index query, monitoring, AAE inspection, a comparison
+# with another cluster and a replication queue round trip. Every key written lives in a fresh bucket
 # that is removed at the end.
 #   RIAK_URL=pb://127.0.0.1:8087 examples/cli/run-all.sh
 # RIAK_FEATURES (comma separated: 2i, aae, nextgenrepl) skips the detection
 # of optional features; RIAK_REPL_QUEUE names the nextgenrepl source queue
 # (default libriak_q); RIAK_MULTI_TYPE and RIAK_MAP_TYPE name an allow_mult
 # and a map bucket type (default libriak_multi and libriak_maps, as created
-# by tests/docker/setup-node.sh); missing ones are skipped.
+# by tests/docker/setup-node.sh); missing ones are skipped. RIAK_PEER_URL
+# names a second cluster (same credentials) for the comparison of buckets
+# restored there; without it the comparison is skipped.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 RIAKCTL=${RIAKCTL:-riakctl}
@@ -22,12 +24,22 @@ bucket=riakctl-demo-$(date +%s)-$$
 r() { "$RIAKCTL" --compact "$@"; }
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
+copy=$bucket-copy
+# the peer cluster of the comparison (RIAK_PEER_URL), same credentials
+rp() { RIAK_URL=$RIAK_PEER_URL r "$@"; }
 cleanup() {
     for t in "" "$multi"; do
         r ${t:+--type "$t"} list --plain keys "$bucket" 2>/dev/null | while read -r k; do
             r ${t:+--type "$t"} delete "$bucket" "$k" || true
         done
     done
+    if [ -n "${RIAK_PEER_URL:-}" ]; then
+        for b in "$bucket" "$copy"; do
+            rp list --plain keys "$b" 2>/dev/null | while read -r k; do
+                rp delete "$b" "$k" || true
+            done
+        done
+    fi
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -96,9 +108,9 @@ strip() { jq -c 'select(.key) | del(.vclock, .siblings[]?.last_modified)' "$1" |
 [ "$(strip "$work/objects.jsonl")" = "$(strip "$work/again.jsonl")" ] || fail "restored objects differ"
 r get "$bucket" blob | cmp -s "$work/blob" - || fail "binary value differs"
 if has_type "$multi"; then
-    # over HTTP the tombstone of the wiped key can remain as one more sibling
+    # the first sibling replaces the tombstone of the wiped key
     [ "$(r --type "$multi" get --all "$bucket" conflict |
-         jq -c '[.siblings[] | select(.deleted | not) | .value] | sort')" = '["left","right"]' ] ||
+         jq -c '[.siblings[] | .value] | sort')" = '["left","right"]' ] ||
         fail "siblings not restored"
 fi
 if has_type "$maps"; then
@@ -128,6 +140,32 @@ cat "$work/stats.csv"
 if has aae; then
     step "AAE inspection"
     "$here/operations/aae-inspection.sh" "$bucket"
+fi
+if has aae && [ -z "${RIAK_PEER_URL:-}" ]; then
+    echo "no RIAK_PEER_URL: comparison with another cluster skipped"
+elif has aae; then
+    # Another cluster, as for a migration: on the same cluster a copy's
+    # clocks would not stay equal, since a vnode that receives a clock
+    # holding its own actor for a key it does not store starts a new key
+    # epoch (an additional clock entry).
+    step "comparison with the cluster of $RIAK_PEER_URL"
+    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/again.jsonl" >/dev/null
+    PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$bucket" ||
+        fail "the peer differs after the restore"
+    RIAK_URL=$RIAK_PEER_URL "$here/basic/restore.sh" "$work/again.jsonl" "$copy" >/dev/null
+    printf changed | rp put "$copy" user1
+    printf extra | rp put "$copy" only_in_copy
+    printf extra | r put "$bucket" only_in_original
+    # ranges of 10 keys: the 27 keys of each bucket take several folds
+    rc=0
+    CHUNK=10 PEER_URL=$RIAK_PEER_URL "$here/operations/bucket-compare.sh" "$bucket" "$copy" \
+        >"$work/compare.txt" || rc=$?
+    cat "$work/compare.txt"
+    [ "$rc" -eq 1 ] || fail "bucket comparison exit code $rc"
+    [ "$(grep -v ' differ in ' "$work/compare.txt")" = "differs user1
+missing_locally only_in_copy
+missing_on_peer only_in_original" ] || fail "unexpected comparison result"
+    r delete "$bucket" only_in_original
 fi
 # queue pushes need Protocol Buffers
 case ${RIAK_URL:-pb://} in

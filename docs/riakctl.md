@@ -440,11 +440,15 @@ be included.
   over both transports), and the object is written as an update of the
   tombstone: its clock then includes the deletion, and no deleted sibling
   is left behind.
-- Riak itself may extend the clocks of objects written "as is" afterwards
-  (read repair and anti-entropy between the replicas): on OpenRiak 3.4,
-  for about 4% of 20,000 restored objects the clock read back later
-  carried an additional entry. Values, metadata, indexes and siblings are
-  not affected.
+- Restored into the cluster the backup came from (another bucket, or a key
+  that is no longer stored), an object's clock may get an additional
+  entry: a vnode that receives a clock holding its own actor for a key it
+  does not store starts a new key epoch, so that it never issues a counter
+  twice. This concerns the keys whose replicas land on a vnode named in
+  the clock (about n_val / ring size of them, 4 to 5% with the defaults).
+  Into another cluster the clocks are kept as they are, provided its nodes
+  are named differently (vnode actor ids derive from the node name).
+  Values, metadata, indexes and siblings are not affected.
 - Several siblings are written one by one, without vector clocks, so they
   become siblings again; only siblings missing on the key are written. Their
   clocks are new (Riak takes one value per write). In a bucket without
@@ -502,21 +506,27 @@ environment variables, and follow `set -eu`, `jq` and exit codes:
 | `automation/cluster-stats.sh [INTERVAL [SAMPLES]]` | Selected statistics sampled as CSV (`STATS` selects them) |
 | `secondary-indexes/query.sh BUCKET INDEX MIN MAX [PAGE]` | Paged index range query with continuations, each match fetched |
 | `operations/aae-inspection.sh [--reap] BUCKET [TYPE]` | Object count and size, sibling and size outliers, tombstones, optional reaping |
+| `operations/bucket-compare.sh BUCKET OTHER [TYPE]` | Two buckets compared key by key in ranges (`CHUNK` keys, `PEER_URL` for another cluster); one line per difference, exit code 1 when they differ |
 | `operations/replication-queues.sh BUCKET QUEUE [TYPE]` | AAE keys pushed onto a nextgenrepl queue, the queue drained and counted |
 
 `run-all.sh` chains them on a fresh bucket and checks every result:
 connectivity, seeding (objects with metadata, indexes and a binary value,
 siblings, a map), backup, wiping the bucket, restoring, comparing with the
 backup, restoring again (nothing written), the paged query, monitoring,
-AAE inspection and the replication round trip. Optional parts are detected
-from the node (`RIAK_FEATURES`, comma separated `2i`, `aae`,
+AAE inspection, the comparison with another cluster and the replication
+round trip. For the comparison `RIAK_PEER_URL` names a second cluster (same
+credentials, nodes named differently): the backup is restored there, the
+bucket is compared by trees, and a copy with deliberate changes key by key
+in ranges of 10 keys; without it this part is skipped. Optional parts are
+detected from the node (`RIAK_FEATURES`, comma separated `2i`, `aae`,
 `nextgenrepl`, skips the detection), and the bucket types come from
 `tests/docker/setup-node.sh` (`RIAK_MULTI_TYPE`, `RIAK_MAP_TYPE`,
 `RIAK_REPL_QUEUE` name others).
 
 `run-demo.sh VERSION [pb|http]` does everything with one command: it starts
-a container from the test image `libriak-riak:VERSION` (built as in the CI
-workflow), prepares it, runs `run-all.sh` and removes the container:
+two containers from the test image `libriak-riak:VERSION` (built as in the
+CI workflow; the second one, named `peer@127.0.0.1`, is the peer cluster),
+prepares them, runs `run-all.sh` and removes the containers:
 
 ```sh
 examples/cli/run-demo.sh 3.4.1

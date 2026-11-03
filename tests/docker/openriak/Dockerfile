@@ -11,6 +11,9 @@
 #   docker build -t libriak-riak:3.2.6 --build-arg RIAK_TAG=riak-3.2.6 \
 #       --build-arg OTP=24 tests/docker/openriak
 #   docker run -d --ulimit nofile=65536:65536 -p 8087:8087 -p 8098:8098 libriak-riak:3.4.1
+# RIAK_NODENAME sets the node name at the start (default riak@127.0.0.1).
+# Vnode actor ids derive from it: two containers that stand for different
+# clusters exchanging objects need different names.
 ARG OTP=26
 FROM erlang:${OTP} AS build
 ARG RIAK_TAG=riak-3.4.1
@@ -53,4 +56,5 @@ COPY --from=build --chown=riak:riak /src/rel/riak /opt/riak
 USER riak
 ENV PATH=/opt/riak/bin:$PATH
 EXPOSE 8087 8098 8443
-CMD ["riak", "foreground"]
+ENV RIAK_NODENAME=riak@127.0.0.1
+CMD ["sh", "-c", "sed -i \"s/^nodename = .*/nodename = $RIAK_NODENAME/\" /opt/riak/etc/riak.conf && exec riak foreground"]
