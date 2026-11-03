@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.1 — 2026-11-03
 
 ### Added
 - Signed apt and dnf repositories on GitHub Pages, rebuilt from the packages
