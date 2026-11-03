@@ -150,8 +150,14 @@ It needs GitHub Pages enabled with GitHub Actions as the source, and the
 signing key as repository secrets: `RELEASE_GPG_KEY` (the armored secret
 key) and, for a key protected by a passphrase, `RELEASE_GPG_PASSPHRASE`:
 
+The `github-pages` environment that GitHub creates with Pages accepts
+deployments from the default branch only; the release workflow deploys from
+the release tag, so `v*` tags are added to its deployment rules:
+
 ```sh
 gh api -X POST repos/arthurtumanyan/libriak-c/pages -f build_type=workflow
+gh api -X POST repos/arthurtumanyan/libriak-c/environments/github-pages/deployment-branch-policies \
+    -f name='v*' -f type=tag
 gpg --armor --export-secret-keys D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 |
     gh secret set RELEASE_GPG_KEY
 ```
