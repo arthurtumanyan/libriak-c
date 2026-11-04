@@ -1,0 +1,5 @@
+usr/include
+usr/lib/*/libriak-c.so
+usr/lib/*/libriak-c.a
+usr/lib/*/cmake
+usr/lib/*/pkgconfig

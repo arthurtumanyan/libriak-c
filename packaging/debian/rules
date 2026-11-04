@@ -1,0 +1,9 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DRIAK_BUILD_TESTS=OFF -DRIAK_BUILD_EXAMPLES=OFF -DRIAK_BUILD_TOOLS=ON

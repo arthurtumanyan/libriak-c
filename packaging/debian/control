@@ -1,0 +1,51 @@
+Source: libriak-c
+Section: libs
+Priority: optional
+Maintainer: Arthur Tumanyan <arthurtumanyan@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.20),
+               pkgconf | pkg-config,
+               libcurl4-openssl-dev,
+               libjson-c-dev,
+               libprotobuf-c-dev,
+               protobuf-c-compiler,
+               libssl-dev,
+               zlib1g-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/arthurtumanyan/libriak-c
+Vcs-Browser: https://github.com/arthurtumanyan/libriak-c
+Vcs-Git: https://github.com/arthurtumanyan/libriak-c.git
+Rules-Requires-Root: no
+
+Package: libriak-c2
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: C client for Riak KV (Protocol Buffers and HTTP) - shared library
+ C client library for Riak KV over Protocol Buffers and HTTP, with TLS,
+ authentication, connection pooling and an asynchronous API.
+
+Package: libriak-c-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends: libriak-c2 (= ${binary:Version}),
+         libcurl4-openssl-dev | libcurl-dev,
+         libjson-c-dev,
+         libprotobuf-c-dev,
+         libssl-dev,
+         zlib1g-dev,
+         ${misc:Depends}
+Description: C client for Riak KV (Protocol Buffers and HTTP) - development files
+ Header, static library, CMake package and pkg-config file of libriak-c.
+
+Package: riakctl
+Section: utils
+Architecture: any
+Depends: libriak-c2 (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Replaces: libriak-c-tools (<< 2.2.2)
+Breaks: libriak-c-tools (<< 2.2.2)
+Description: command-line client for Riak KV
+ riakctl, a scriptable command-line client for Riak KV built on libriak-c:
+ objects, backup and restore, queries, data types, bucket properties,
+ Search, AAE and replication, with JSON output.

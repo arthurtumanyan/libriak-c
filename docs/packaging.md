@@ -110,6 +110,32 @@ submitted with:
 packaging/copr-build.sh 2.2.2    # needs copr-cli and ~/.config/copr
 ```
 
+## Ubuntu PPA
+
+The Ubuntu packages are also built by Launchpad in the PPA
+[`ppa:tumanyan/libriak-c`](https://launchpad.net/~tumanyan/+archive/ubuntu/libriak-c)
+for Ubuntu 22.04, 24.04, 26.04 and 26.10, from the release tarball and
+`packaging/debian/` (package names as above: `libriak-c2`, `libriak-c-dev`,
+`riakctl`):
+
+```sh
+sudo add-apt-repository ppa:tumanyan/libriak-c
+sudo apt install riakctl
+```
+
+Launchpad builds from signed source uploads only. A release is uploaded
+with:
+
+```sh
+packaging/ppa-build.sh 2.2.2 D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 ppa-out \
+    jammy noble resolute stonking   # dpkg-dev, debhelper, devscripts, curl
+packaging/ppa-upload.sh ppa-out
+```
+
+The source packages are versioned `<version>-1~<series>1` and signed with
+the release signing key, which is registered on the Launchpad account
+`tumanyan`; Launchpad signs the PPA with its own per-archive key.
+
 ## Prebuilt packages in the source tree
 
 Prebuilt x86_64 packages of 2.1.0 and 2.2.0 are also kept in the source tree
