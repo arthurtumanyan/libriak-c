@@ -28,8 +28,7 @@ build/tools/riakctl/riakctl --version
 sudo cmake --install build             # /usr/local/bin/riakctl
 ```
 
-The binary packages ship it as `libriak-c-tools` (Debian/Ubuntu and
-Fedora/EL), see [Packaging](packaging.md). The demo scripts need `jq`.
+The binary packages ship it as `riakctl` (Debian/Ubuntu and Fedora/EL), see [Packaging](packaging.md). The demo scripts need `jq`.
 
 ## Connecting
 

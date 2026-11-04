@@ -1,12 +1,25 @@
 # Changelog
 
-## Unreleased
+## 2.2.2 — 2026-11-04
+
+### Added
+- Fedora Copr project `atumanyan/libriak-c` (Fedora 44 and 45, EPEL 9 and
+  10), built from `packaging/rpm/libriak-c.spec` and the release tarball;
+  `packaging/copr-build.sh` submits a release.
 
 ### Changed
+- `riakctl` is packaged as `riakctl` instead of `libriak-c-tools`. The rpm
+  package obsoletes `libriak-c-tools`; for deb a transitional
+  `libriak-c-tools` package depends on `riakctl`, so upgrades switch over.
 - The release tags and the package repositories are signed with a dedicated
   libriak-c key, `D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84`, in place of a
   key shared with another project; CI holds only its signing subkey. Systems
   set up with the earlier key download `libriak-c.asc` again.
+
+### Fixed
+- The rpm development package requires its dependencies through
+  `pkgconfig()` names, so it installs on Fedora 45 next to `protobuf3-c`,
+  which obsoletes `protobuf-c`.
 
 ## 2.2.1 — 2026-11-03
 
