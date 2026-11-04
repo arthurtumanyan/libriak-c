@@ -8,4 +8,8 @@ project=${2:-atumanyan/libriak-c}
 spec=https://raw.githubusercontent.com/arthurtumanyan/libriak-c/v$version/packaging/rpm/libriak-c.spec
 curl -fsS "$spec" | grep -q "^Version: *$version\$" ||
     { echo "spec of v$version does not carry version $version" >&2; exit 1; }
+# Copr downloads Source0 when it builds the source package
+tarball=https://github.com/arthurtumanyan/libriak-c/releases/download/v$version/libriak-c-$version.tar.gz
+curl -fsSLI -o /dev/null "$tarball" ||
+    { echo "release tarball of v$version is not published yet: $tarball" >&2; exit 1; }
 exec copr-cli build "$project" "$spec"
