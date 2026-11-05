@@ -2,7 +2,7 @@
 # tarball into the same three packages as cpack -G RPM.
 
 Name:           libriak-c
-Version:        2.2.2
+Version:        2.2.3
 Release:        1%{?dist}
 Summary:        C client for Riak KV (Protocol Buffers and HTTP)
 License:        GPL-3.0-or-later AND Apache-2.0
@@ -79,6 +79,9 @@ rm -rf %{buildroot}%{_docdir}/%{name}
 %{_mandir}/man1/riakctl.1*
 
 %changelog
+* Thu Nov 05 2026 Arthur Tumanyan <arthurtumanyan@gmail.com> - 2.2.3-1
+- Release 2.2.3
+
 * Wed Nov 04 2026 Arthur Tumanyan <arthurtumanyan@gmail.com> - 2.2.2-1
 - Release 2.2.2; riakctl is packaged as riakctl in place of libriak-c-tools
 
