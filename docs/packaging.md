@@ -140,7 +140,9 @@ gh workflow run distributions.yml -f version=2.2.2
 ```
 
 The source packages are versioned `<version>-1~<series>1`; Launchpad never
-accepts a version twice. They are signed with the PPA upload key
+accepts a version twice. `packaging/ppa-upload.sh` skips the versions already
+in the PPA and starts a failed FTP session again, so a failed `ppa` job is
+completed by running it again (`gh run rerun RUN_ID --failed`). They are signed with the PPA upload key
 `08A2F95F0E0E49BE72DB96A1A0DBBC93C96C4E77`
 (`libriak-c PPA upload key <arthurtumanyan@gmail.com>`), which is registered
 on the Launchpad account `tumanyan` and serves no other purpose; Launchpad
