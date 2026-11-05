@@ -1,0 +1,80 @@
+name: Distribution builds
+
+# Submits a published release to the Launchpad PPA (signed source packages
+# per Ubuntu series, built by Launchpad) and to Fedora Copr (built from the
+# spec of the release tag). Called by the release workflow after a release
+# is published; can also be started by hand for an existing release.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, e.g. 2.2.3
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, e.g. 2.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  VERSION: ${{ inputs.version }}
+  # Ubuntu series of the PPA; new Ubuntu releases are added here
+  PPA_SERIES: jammy noble resolute stonking
+
+jobs:
+  ppa:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ inputs.version }}
+          persist-credentials: false
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev debhelper devscripts curl gnupg
+      - name: Import PPA upload key
+        env:
+          PPA_GPG_KEY: ${{ secrets.PPA_GPG_KEY }}
+          PPA_GPG_PASSPHRASE: ${{ secrets.PPA_GPG_PASSPHRASE }}
+        run: |
+          test -n "$PPA_GPG_KEY" || { echo "secret PPA_GPG_KEY is not set"; exit 1; }
+          printf '%s\n' "$PPA_GPG_KEY" | gpg --batch --import
+          if [ -n "$PPA_GPG_PASSPHRASE" ]; then
+            printf '%s' "$PPA_GPG_PASSPHRASE" > "$RUNNER_TEMP/passphrase"
+            printf 'pinentry-mode loopback\npassphrase-file %s\n' "$RUNNER_TEMP/passphrase" >> ~/.gnupg/gpg.conf
+          fi
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          echo "KEY=$key" >> "$GITHUB_ENV"
+      - name: Build signed source packages
+        run: |
+          # PPA_SERIES is split into one argument per series
+          # shellcheck disable=SC2086
+          packaging/ppa-build.sh "$VERSION" "$KEY" "$RUNNER_TEMP/ppa" $PPA_SERIES
+      - name: Upload to the PPA
+        run: packaging/ppa-upload.sh "$RUNNER_TEMP/ppa"
+
+  copr:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ inputs.version }}
+          persist-credentials: false
+      - name: Install copr-cli
+        run: pipx install copr-cli
+      - name: Copr API token
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          test -n "$COPR_CONFIG" || { echo "secret COPR_CONFIG is not set"; exit 1; }
+          mkdir -p ~/.config
+          (umask 077 && printf '%s\n' "$COPR_CONFIG" > ~/.config/copr)
+      - name: Submit and wait for the Copr build
+        run: packaging/copr-build.sh "$VERSION"

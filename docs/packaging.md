@@ -103,10 +103,16 @@ sudo dnf copr enable atumanyan/libriak-c
 sudo dnf install riakctl
 ```
 
-Copr signs the packages with its own per-project key. A release is
-submitted with:
+Copr signs the packages with its own per-project key. A published release
+is submitted by the release workflow (`.github/workflows/distributions.yml`,
+job `copr`), which waits for the Copr build. It needs the copr-cli
+configuration with an API token
+(https://copr.fedorainfracloud.org/api/) as the repository secret
+`COPR_CONFIG`; Copr API tokens expire after 180 days and are renewed on the
+same page. By hand:
 
 ```sh
+gh secret set COPR_CONFIG < ~/.config/copr
 packaging/copr-build.sh 2.2.2    # needs copr-cli and ~/.config/copr
 ```
 
@@ -123,18 +129,29 @@ sudo add-apt-repository ppa:tumanyan/libriak-c
 sudo apt install riakctl
 ```
 
-Launchpad builds from signed source uploads only. A release is uploaded
-with:
+Launchpad builds from signed source uploads only. The release workflow
+(`.github/workflows/distributions.yml`, job `ppa`) builds the source package
+of every series in `PPA_SERIES`, signs it and uploads it after the release is
+published; a new Ubuntu release is added to `PPA_SERIES`. For an existing
+release the workflow is started by hand:
 
 ```sh
-packaging/ppa-build.sh 2.2.2 D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 ppa-out \
+gh workflow run distributions.yml -f version=2.2.2
+```
+
+The source packages are versioned `<version>-1~<series>1`; Launchpad never
+accepts a version twice. They are signed with the PPA upload key
+`08A2F95F0E0E49BE72DB96A1A0DBBC93C96C4E77`
+(`libriak-c PPA upload key <arthurtumanyan@gmail.com>`), which is registered
+on the Launchpad account `tumanyan` and serves no other purpose; Launchpad
+signs the PPA with its own per-archive key. The key is the repository secret
+`PPA_GPG_KEY`, its passphrase `PPA_GPG_PASSPHRASE`. The same steps by hand:
+
+```sh
+packaging/ppa-build.sh 2.2.2 08A2F95F0E0E49BE72DB96A1A0DBBC93C96C4E77 ppa-out \
     jammy noble resolute stonking   # dpkg-dev, debhelper, devscripts, curl
 packaging/ppa-upload.sh ppa-out
 ```
-
-The source packages are versioned `<version>-1~<series>1` and signed with
-the release signing key, which is registered on the Launchpad account
-`tumanyan`; Launchpad signs the PPA with its own per-archive key.
 
 ## Prebuilt packages in the source tree
 
@@ -204,8 +221,7 @@ the release tag), and the signing key as repository secrets: `RELEASE_GPG_KEY` (
 key) and, for a key protected by a passphrase, `RELEASE_GPG_PASSPHRASE`.
 
 The release signing key is dedicated to libriak-c. Its primary key
-`D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84` is certify-only and is kept
-offline; CI holds only the signing subkey, exported with
+`D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84` is kept offline; CI holds only the signing subkey, exported with
 `--export-secret-subkeys` and protected by a passphrase of its own. Metadata
 and tags signed by the subkey verify against the public key of the primary.
 
