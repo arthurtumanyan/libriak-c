@@ -78,6 +78,8 @@ jobs:
   release:
     needs: [deb, rpm]
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     permissions:
       contents: write
       id-token: write
@@ -87,10 +89,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Check tag matches project version
+        id: version
         run: |
           version=$(sed -n 's/^project(libriak-c VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$version"; exit 1; }
           echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -121,4 +125,11 @@ jobs:
       pages: write
       id-token: write
     uses: ./.github/workflows/repository.yml
+    secrets: inherit
+
+  distributions:
+    needs: release
+    uses: ./.github/workflows/distributions.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
     secrets: inherit

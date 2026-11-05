@@ -7,6 +7,10 @@
   26.10), built by Launchpad from `packaging/debian/` and the release
   tarball; `packaging/ppa-build.sh` and `packaging/ppa-upload.sh` build and
   upload the signed source packages.
+- Release workflow submits each published release to the PPA (signed with
+  a dedicated PPA upload key) and to Fedora Copr
+  (`.github/workflows/distributions.yml`, also started by hand for an
+  existing release).
 
 ## 2.2.2 — 2026-11-04
 
