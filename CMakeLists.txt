@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libriak-c VERSION 2.2.2 LANGUAGES C
+project(libriak-c VERSION 2.2.3 LANGUAGES C
         DESCRIPTION "C client for Riak KV (Protocol Buffers and HTTP)")
 
 include(GNUInstallDirs)

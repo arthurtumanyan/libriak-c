@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.3 — 2026-11-05
 
 ### Added
 - Ubuntu PPA `ppa:tumanyan/libriak-c` (Ubuntu 22.04, 24.04, 26.04 and
@@ -11,6 +11,10 @@
   a dedicated PPA upload key) and to Fedora Copr
   (`.github/workflows/distributions.yml`, also started by hand for an
   existing release).
+
+### Fixed
+- The riakctl replication queue demo no longer fails when a tombstone
+  listed by AAE is reaped before the queue is drained.
 
 ## 2.2.2 — 2026-11-04
 
