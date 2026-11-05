@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Ubuntu PPA `ppa:tumanyan/libriak-c` (Ubuntu 22.04, 24.04, 26.04 and
+  26.10), built by Launchpad from `packaging/debian/` and the release
+  tarball; `packaging/ppa-build.sh` and `packaging/ppa-upload.sh` build and
+  upload the signed source packages.
+
 ## 2.2.2 — 2026-11-04
 
 ### Added

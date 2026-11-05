@@ -77,7 +77,9 @@ sudo dnf install riakctl    # libriak-c-devel for development
 The repository metadata is signed with the release key
 `D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84`; dnf asks to confirm its import
 on first use. Fedora and EL packages are also available from the Copr
-project `atumanyan/libriak-c` (`sudo dnf copr enable atumanyan/libriak-c`).
+project `atumanyan/libriak-c` (`sudo dnf copr enable atumanyan/libriak-c`),
+Ubuntu packages from the PPA `ppa:tumanyan/libriak-c`
+(`sudo add-apt-repository ppa:tumanyan/libriak-c`).
 The packages are attached to the
 [releases](https://github.com/arthurtumanyan/libriak-c/releases); details
 are in [Packaging and releases](docs/packaging.md#package-repository).
