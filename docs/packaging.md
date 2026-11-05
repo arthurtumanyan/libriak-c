@@ -142,7 +142,8 @@ gh workflow run distributions.yml -f version=2.2.2
 The source packages are versioned `<version>-1~<series>1`; Launchpad never
 accepts a version twice. `packaging/ppa-upload.sh` skips the versions already
 in the PPA and starts a failed FTP session again, so a failed `ppa` job is
-completed by running it again (`gh run rerun RUN_ID --failed`). They are signed with the PPA upload key
+completed by running it again (`gh run rerun RUN_ID --failed`). They are
+signed with the PPA upload key
 `08A2F95F0E0E49BE72DB96A1A0DBBC93C96C4E77`
 (`libriak-c PPA upload key <arthurtumanyan@gmail.com>`), which is registered
 on the Launchpad account `tumanyan` and serves no other purpose; Launchpad
@@ -189,12 +190,20 @@ are added to the same command when needed.
 
 A release is made by updating `project(VERSION ...)` in `CMakeLists.txt`,
 the version macros in `include/riak/riak.h`, `PROJECT_NUMBER` in
-`docs/Doxyfile` and the `CHANGELOG.md` heading, and pushing a matching tag:
+`docs/Doxyfile`, `Version` and the `%changelog` entry in
+`packaging/rpm/libriak-c.spec` (Copr builds from it) and the `CHANGELOG.md`
+heading, and pushing a matching signed tag:
 
 ```sh
-git tag -s v2.2.1 -m "libriak-c 2.2.1"
-git push origin v2.2.1
+git tag -s v2.2.3 -m "libriak-c 2.2.3"
+git push origin v2.2.3
 ```
+
+No secret key material is kept on the development machine. For signing the
+tag, the release key is imported from its offline backup
+(`gpg --import release-key-secret.asc`) and deleted again afterwards
+(`gpg --delete-secret-keys D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84`); the
+public key stays in the keyring for verification.
 
 `.github/workflows/release.yml` then checks that the tag matches the project
 version, builds and install-tests packages in containers of Ubuntu 22.04,
@@ -209,8 +218,9 @@ The release workflow then runs `.github/workflows/repository.yml`, which
 downloads the packages of all published releases, builds the repositories
 with `packaging/repo-site.sh` (sorting by distribution) and
 `packaging/make-repo.sh` (indexes and signatures), and deploys them to
-GitHub Pages. The workflow can also be started by hand, for example after
-a release was edited:
+GitHub Pages, and `.github/workflows/distributions.yml`, which submits the
+release to the Ubuntu PPA and to Fedora Copr (see above). The Pages workflow
+can also be started by hand, for example after a release was edited:
 
 ```sh
 gh workflow run repository.yml
@@ -234,6 +244,11 @@ gh api -X POST repos/arthurtumanyan/libriak-c/environments/github-pages/deployme
 gpg --armor --export-secret-subkeys D3C2A1C79D9B63A5DAEF362507E49B41B39FBE84 |
     gh secret set RELEASE_GPG_KEY    # the subkey passphrase goes to RELEASE_GPG_PASSPHRASE
 ```
+
+The default `GITHUB_TOKEN` permission of the repository is read-only and
+workflows may not approve pull requests; every workflow declares the
+permissions it needs, and only the workflows started by a release tag or by
+hand (release, repository, distributions) receive secrets.
 
 The public key is published as `libriak-c.asc` at the repository root. When
 the key is replaced, apt reports `NO_PUBKEY` until the key file is downloaded
