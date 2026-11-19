@@ -136,7 +136,12 @@ riak_status riak_counter_http_finish(riak_client *c, riak_response *resp, int64_
         const char *body = resp->body.data ? resp->body.data : "";
         errno = 0;
         long long v = strtoll(body, &end, 10);
-        if (end == body || errno == ERANGE) {
+        const char *rest = end != NULL ? end : body;
+        bool digits = rest != body;
+        while (*rest == ' ' || *rest == '\t' || *rest == '\r' || *rest == '\n') {
+            rest++;
+        }
+        if (!digits || errno == ERANGE || *rest != '\0') {
             return riak_set_error(c, RIAK_E_PARSE, "malformed counter value");
         }
         *value = v;

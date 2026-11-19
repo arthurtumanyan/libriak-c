@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.2.4 — 2026-11-19
+
+### Fixed
+- A failed Protocol Buffers connect is reported with the error of the last
+  address tried (e.g. "Connection timed out", "No route to host") instead
+  of "Connection refused".
+- The receive buffer of a Protocol Buffers connection is no longer kept at
+  the size of the largest streamed message (e.g. a large value in an
+  object fold) for the life of the connection.
+- A JSON `null` inside a multi-valued field of a Search result document is
+  skipped instead of failing the query with `RIAK_E_NOMEM`.
+- The HTTP `User-Agent` carries the library version
+  (`libriak-c/2.2.4`) instead of the fixed `libriak-c/2.0`.
+- A Riak 1.4 counter value over HTTP with trailing characters other than
+  whitespace is rejected with `RIAK_E_PARSE`.
+- riakctl accepts blanks before a comma and at the end of a `--url` list.
+
 ## 2.2.3 — 2026-11-05
 
 ### Added
