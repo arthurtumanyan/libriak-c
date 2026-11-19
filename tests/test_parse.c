@@ -212,7 +212,7 @@ static void test_search_json(void) {
         "{\"responseHeader\":{\"status\":0},\"response\":{\"numFound\":7,\"start\":0,"
         "\"maxScore\":1.5,\"docs\":[{\"age_i\":30,\"name_s\":\"alice\",\"tags_ss\":[\"a\",\"b\"],"
         "\"_yz_rk\":\"u1\",\"_yz_rt\":\"default\",\"_yz_rb\":\"users\",\"score\":1.5,"
-        "\"none\":null}]}}";
+        "\"none\":null,\"opt_ss\":[null,\"x\"]}]}}";
     riak_search_result r = {0};
     CHECK_EQ_INT(riak_parse_search(json, strlen(json), &r), RIAK_OK);
     CHECK_EQ_INT(r.num_found, 7);
@@ -228,6 +228,7 @@ static void test_search_json(void) {
         for (size_t i = 0; i < d->n_fields; i++) {
             if (strcmp(d->fields[i].name, "tags_ss") == 0) tags++;
             if (strcmp(d->fields[i].name, "age_i") == 0) CHECK_EQ_STR(d->fields[i].value, "30");
+            if (strcmp(d->fields[i].name, "opt_ss") == 0) CHECK_EQ_STR(d->fields[i].value, "x");
             CHECK(strcmp(d->fields[i].name, "none") != 0 &&
                   strcmp(d->fields[i].name, "score") != 0);
         }

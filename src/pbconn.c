@@ -292,9 +292,10 @@ static void close_fd(riak_pbconn *k) {
     }
 }
 
-/* Connects to the next candidate address: 1 connected, 0 in progress, -1 none left. */
-static int connect_next(riak_pbconn *k) {
-    int last_errno = ECONNREFUSED;
+/* Connects to the next candidate address: 1 connected, 0 in progress, -1 none
+ * left. prev_errno is the failure of the previous candidate (0 for none). */
+static int connect_next(riak_pbconn *k, int prev_errno) {
+    int last_errno = prev_errno != 0 ? prev_errno : ECONNREFUSED;
     while (k->next_addr < k->n_addrs) {
         size_t i = k->next_addr++;
         close_fd(k);
@@ -491,7 +492,12 @@ static void handle_response(riak_pbconn *k) {
     bool done = false;
     riak_status err = RIAK_OK;
     k->delivered = true;
-    if (!k->req->sink(k->req->sink_ctx, data, len, &done, &err)) {
+    bool ok = k->req->sink(k->req->sink_ctx, data, len, &done, &err);
+    if (k->in.cap > OUT_KEEP) {
+        /* a large streamed message (a big folded value) is not kept either */
+        riak_buf_free(&k->in);
+    }
+    if (!ok) {
         if (err == RIAK_OK) {
             /* the caller is done; unread messages make the connection unusable */
             k->resp->stopped = true;
@@ -600,7 +606,7 @@ int riak_pbconn_step(riak_pbconn *k) {
         switch (k->state) {
         case RIAK_PBC_CONNECTING:
             if (k->fd < 0) {
-                r = connect_next(k);
+                r = connect_next(k, 0);
             } else {
                 /* a connect in progress: writable means done or failed */
                 struct pollfd p = {.fd = k->fd, .events = POLLOUT};
@@ -613,7 +619,7 @@ int riak_pbconn_step(riak_pbconn *k) {
                 if (getsockopt(k->fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0) {
                     err = errno;
                 }
-                r = err == 0 ? 1 : connect_next(k);
+                r = err == 0 ? 1 : connect_next(k, err);
             }
             if (r == 0) {
                 return k->want;

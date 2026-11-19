@@ -538,6 +538,8 @@ class Handler(BaseHTTPRequestHandler):
                 value = COUNTERS.get((parts[1], parts[3]))
             if self.server.malformed == 2:
                 value = "99999999999999999999"  # beyond int64
+            elif self.server.malformed == 3:
+                value = "12abc"  # a number followed by junk
             return self._send(404, "not found\n") if value is None else \
                 self._send(200, str(value), {"Content-Type": "text/plain"})
         if len(parts) >= 5 and parts[0] == "buckets" and parts[2] == "keys":
@@ -918,7 +920,7 @@ class Server(ThreadingHTTPServer):
     hits = 0
     auth = None
     old = False  # answer the Riak 2.9+/3.x endpoints like Riak 2.2 (no resource)
-    malformed = 0  # 1: wrongly typed documents; 2: numbers out of range or with junk
+    malformed = 0  # 1: wrongly typed documents; 2: numbers out of range or with junk; 3: counter with junk
     nosearch = False  # no Riak Search (Riak 3.x): every /search path is unknown
     legacyloc = False  # link walker Locations in the old /riak/<b>/<k> form
     drop = 0           # requests to the newer endpoints closed without an answer

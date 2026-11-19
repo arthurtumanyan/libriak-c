@@ -1319,7 +1319,21 @@ static void test_counters_type_props_http(void) {
     stub_flag("malformed", 2);
     CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_E_PARSE); /* beyond int64 */
     CHECK_EQ_INT(v, 3);
+    stub_flag("malformed", 3);
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_E_PARSE); /* "12abc" */
+    CHECK_EQ_INT(v, 3);
     stub_flag("malformed", 0);
+    json_object *ua;
+    CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", NULL, &v), RIAK_OK);
+    (void)last_path(&ua);
+    json_object *hdrs = NULL, *agent = NULL;
+    CHECK(json_object_object_get_ex(ua, "headers", &hdrs) &&
+          json_object_object_get_ex(hdrs, "User-Agent", &agent));
+    char want[32];
+    snprintf(want, sizeof want, "libriak-c/%d.%d.%d", RIAK_VERSION_MAJOR, RIAK_VERSION_MINOR,
+             RIAK_VERSION_PATCH);
+    CHECK_EQ_STR(agent ? json_object_get_string(agent) : NULL, want);
+    json_object_put(ua);
     riak_opts q = {.r = 2, .node_confirms = 1};
     CHECK_EQ_INT(riak_counter_get(rc, "cnt", "c", &q, &v), RIAK_OK);
     path = last_path(&l);

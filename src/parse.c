@@ -333,7 +333,10 @@ static riak_status parse_doc_fields(json_object *jdoc, riak_search_doc *doc) {
         if (rc == 0 && json_object_is_type(v, json_type_array)) {
             size_t n = json_object_array_length(v);
             for (size_t i = 0; rc == 0 && i < n; i++) {
-                rc = push_field(doc, &cap, name, json_object_array_get_idx(v, i));
+                json_object *item = json_object_array_get_idx(v, i);
+                if (item != NULL) { /* a JSON null element carries no value */
+                    rc = push_field(doc, &cap, name, item);
+                }
             }
         } else if (rc == 0 && v != NULL) {
             rc = push_field(doc, &cap, name, v);

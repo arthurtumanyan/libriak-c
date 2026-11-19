@@ -16,7 +16,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RIAK_USER_AGENT "libriak-c/2.0"
+#define RIAK_STR_(x) #x
+#define RIAK_STR(x) RIAK_STR_(x)
+#define RIAK_USER_AGENT                                                                            \
+    "libriak-c/" RIAK_STR(RIAK_VERSION_MAJOR) "." RIAK_STR(RIAK_VERSION_MINOR) "." RIAK_STR(       \
+        RIAK_VERSION_PATCH)
 
 static size_t abort_transfer(riak_attempt *a, riak_status st, const char *msg) {
     a->abort_status = st;

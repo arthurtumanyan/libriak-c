@@ -60,6 +60,15 @@ static void test_urls(void) {
     CHECK_EQ_INT(c.nodes[2].port, 9);
     rc_conn_free(&c);
 
+    /* blanks before a comma or at the end are skipped too */
+    CHECK_EQ_INT(setup(&c, "pb://a:8087 ,\tb:8088\t "), RC_OK);
+    CHECK_EQ_INT(c.n_nodes, 2);
+    CHECK_EQ_STR(c.nodes[0].host, "a");
+    CHECK_EQ_INT(c.nodes[0].port, 8087);
+    CHECK_EQ_STR(c.nodes[1].host, "b");
+    CHECK_EQ_INT(c.nodes[1].port, 8088);
+    rc_conn_free(&c);
+
     /* no scheme at all: Protocol Buffers */
     CHECK_EQ_INT(setup(&c, "h1:1,h2:2"), RC_OK);
     CHECK_EQ_INT(c.cfg.transport, RIAK_TRANSPORT_PB);

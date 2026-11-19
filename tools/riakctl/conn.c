@@ -82,6 +82,11 @@ int rc_conn_setup(rc_conn *c, const char *urls) {
             s++;
             len--;
         }
+        size_t trail = 0; /* blanks before the comma, skipped after the entry */
+        while (len > trail && (s[len - trail - 1] == ' ' || s[len - trail - 1] == '\t')) {
+            trail++;
+        }
+        len -= trail;
         const char *sep = len >= 3 ? strstr(s, "://") : NULL;
         if (sep && sep < s + len) {
             size_t sl = (size_t)(sep - s);
@@ -117,7 +122,7 @@ int rc_conn_setup(rc_conn *c, const char *urls) {
             return RC_USAGE;
         }
         c->n_nodes++;
-        s += len;
+        s += len + trail;
         if (*s == ',') {
             s++;
         }
